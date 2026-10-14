@@ -1,6 +1,6 @@
-// 本文件通过真实宿主管理菜单验证超长输入的列表/详情截断提示；只用合成凭据，不读私有存储。
+// 本文件通过真实宿主管理菜单验证截断、不完整及双状态提示；只用合成凭据，不读私有存储。
 // 场景由独立 runner 导入；page 位于合成实例，options 指定本轮截图路径。
-// 返回本轮截断显示及字节边界的有限验收证据；鉴权、落盘或页面校验失败抛错。
+// 返回本轮截断/不完整显示与字节边界的有限验收证据；鉴权、落盘或页面校验失败抛错。
 module.exports = async (page, options = {}) => {
   /** 验证 condition 的用户可见结果；失败以 message 抛错，成功无返回，不输出凭据或超长正文。 */
   const assert = (condition, message) => { if (!condition) throw new Error(message); };
@@ -28,6 +28,33 @@ module.exports = async (page, options = {}) => {
     assert((await saved).status()===200, '监控选择未保存');
     await frame.locator('#objects option').filter({hasText:'超长验收对象'+i}).waitFor({state:'attached'});
   }
+  /** 等待 fixture.marker 的本轮落盘并打开精确详情；fixture 指定两个标记及可见标签。
+   * 返回已核对详情；HTTP、状态或等待失败抛错，不通过旧记录证明本轮成功。 */
+  async function openSavedDetail(fixture) {
+    let id = '';
+    // 给真实 fsync 和管理鉴权查询十秒冷启动余量，不用固定 sleep 假定已经落盘。
+    const deadline = Date.now() + 10000;
+    while (!id && Date.now()<deadline) {
+      const response = await page.request.get(api + '/records', {headers:{Authorization:'Bearer '+admin}});
+      assert(response.status()===200, '受保护记录查询失败');
+      const list = await response.json();
+      const record = list.records.find(r => r.preview.startsWith(fixture.marker) && r.truncated===fixture.truncated && r.extraction_incomplete===fixture.incomplete);
+      if (record) id = record.id;
+    }
+    assert(id !== '', '本轮符合状态的记录没有实际保存');
+    await frame.getByRole('button', {name:'刷新已保存记录'}).click();
+    const row = frame.locator('#records tbody tr').filter({hasText:fixture.marker});
+    await row.getByRole('cell', {name:fixture.label,exact:true}).waitFor();
+    const detailResponse = page.waitForResponse(r => r.url().includes('/request-input-audit/detail?') && new URL(r.url()).searchParams.get('id')===id);
+    await row.getByRole('button', {name:'查看',exact:true}).click();
+    const response = await detailResponse;
+    assert(response.status()===200, '本轮详情查询失败');
+    const detail = await response.json();
+    assert(detail.id===id && detail.truncated===fixture.truncated && detail.extraction_incomplete===fixture.incomplete, '本轮列表/详情状态不一致');
+    await frame.locator('#detail-meta').filter({hasText:fixture.label}).waitFor();
+    await frame.locator('#detail').filter({hasText:fixture.marker}).waitFor();
+    return detail;
+  }
   // 65535 个 ASCII 后放一个四字节字符，64KiB 前缀必须停在字符之前，不能切断 UTF-8。
   const prefix = 'BROWSER-LIMIT-' + Date.now() + '-';
   const input = prefix + 'x'.repeat(65535 - prefix.length) + '🙂FORBIDDEN_BROWSER_TAIL';
@@ -36,25 +63,7 @@ module.exports = async (page, options = {}) => {
     data:{model:'audit-test-model',messages:[{role:'system',content:'FORBIDDEN_BROWSER_SYSTEM'},{role:'user',content:input}]}
   });
   assert(result.status()===200, '超长模型提交不应被审计拒绝');
-  let id = '';
-  const deadline = Date.now() + 10000;
-  while (!id && Date.now()<deadline) {
-    const response = await page.request.get(api + '/records', {headers:{Authorization:'Bearer '+admin}});
-    assert(response.status()===200, '受保护记录查询失败');
-    const list = await response.json();
-    const record = list.records.find(r => r.preview.startsWith(prefix) && r.truncated);
-    if (record) id = record.id;
-  }
-  assert(id !== '', '期限内没有实际落盘的截断记录');
-  await frame.getByRole('button', {name:'刷新已保存记录'}).click();
-  const row = frame.locator('#records tbody tr').filter({hasText:prefix});
-  await row.getByRole('cell', {name:'已截断',exact:true}).waitFor();
-  const detailResponse = page.waitForResponse(r => r.url().includes('/request-input-audit/detail?') && new URL(r.url()).searchParams.get('id')===id);
-  await row.getByRole('button', {name:'查看',exact:true}).click();
-  const savedDetail = await detailResponse;
-  assert(savedDetail.status()===200 && (await savedDetail.json()).id===id, '详情不是本次实际落盘的记录');
-  await frame.locator('#detail-meta').filter({hasText:'已截断'}).waitFor();
-  await frame.locator('#detail').filter({hasText:prefix}).waitFor();
+  await openSavedDetail({marker:prefix,truncated:true,incomplete:false,label:'已截断'});
   const visible = await frame.locator('#detail').evaluate((el, expectedPrefix) => {
     const value = el.textContent;
     return {bytes:new TextEncoder().encode(value).length,prefix:value.startsWith(expectedPrefix),onlyExpectedASCII:!(/[^x]/u.test(value.slice(expectedPrefix.length))),tail:value.includes('FORBIDDEN_BROWSER_TAIL'),broken:value.includes('�'),instructions:value.includes('FORBIDDEN_BROWSER_SYSTEM')};
@@ -62,5 +71,40 @@ module.exports = async (page, options = {}) => {
   assert(visible.bytes===65535 && visible.prefix && visible.onlyExpectedASCII && !visible.tail && !visible.broken && !visible.instructions, '浏览器展示不是已保存的字符安全前缀');
   const screenshot = options.screenshot ?? '.test-data/browser-truncation-label-' + Date.now() + '.png';
   await frame.locator('#detail-meta').screenshot({path:screenshot});
-  return {screenshot,modelStatus:200,listTruncationLabel:true,detailTruncationLabel:true,visibleBytes:visible.bytes,tailVisible:false,brokenUTF8:false};
+  const extraScreenshots = [];
+  const hostile = '<img src="https://invalid.example/forbidden-incomplete.png">';
+  const partialMarker = 'BROWSER-INCOMPLETE-' + Date.now() + '-';
+  const combinedMarker = 'BROWSER-COMBINED-' + Date.now() + '-';
+  const combinedPrefix = combinedMarker + 'y'.repeat(65535 - combinedMarker.length);
+  const unknown = {type:'future',payload:'FORBIDDEN_BROWSER_UNKNOWN_PAYLOAD'};
+  const cases = [
+    {marker:partialMarker,content:[{type:'text',text:partialMarker + hostile},{type:'image_url',image_url:{url:'https://invalid.example/FORBIDDEN_BROWSER_IMAGE'}},unknown,{type:'text',text:'后'}],want:partialMarker + hostile + '[图片]后',truncated:false,label:'提取不完整'},
+    {marker:combinedMarker,content:[{type:'text',text:combinedPrefix},{type:'text',text:'🙂FORBIDDEN_BROWSER_COMBINED_TAIL'},unknown,{type:'text',text:'z'}],want:combinedPrefix,truncated:true,label:'已截断 · 提取不完整'}
+  ];
+  let externalLoads = 0;
+  /** 统计 request 是否离开合成 origin；无返回，URL 无效时由测试抛错，不保存请求内容。 */
+  const onRequest = request => { if (new URL(request.url()).origin !== origin) externalLoads++; };
+  page.on('request', onRequest);
+  try {
+    for (const [i,tc] of cases.entries()) {
+      const submitted = await page.request.post(origin + '/v1/chat/completions', {
+        headers:{Authorization:'Bearer synthetic-client-audit-a-only'},
+        data:{model:'audit-test-model',messages:[{role:'user',content:tc.content}]}
+      });
+      assert(submitted.status()===200, '不完整内容提交被审计拒绝');
+      const detail = await openSavedDetail({...tc,incomplete:true});
+      assert(detail.text===tc.want, '管理详情正文不是本轮独立预期值');
+      assert((await frame.locator('#detail').textContent())===tc.want, '不完整记录未按纯文本展示已保存部分');
+      assert((await frame.locator('#detail img, #detail a, #detail script').count())===0, '输入生成了可执行或外部资源节点');
+      const health = await frame.locator('#health').textContent();
+      assert(/"unsupported_content":[1-9][0-9]*/.test(health), '提取缺口没有可见诊断');
+      const labelScreenshot = screenshot.replace(/\.png$/, i===0?'-incomplete.png':'-combined.png');
+      await frame.locator('#detail-meta').screenshot({path:labelScreenshot});
+      extraScreenshots.push(require('node:path').basename(labelScreenshot));
+    }
+    assert(externalLoads===0, '不完整正文触发了外部资源加载');
+  } finally {
+    page.off('request', onRequest);
+  }
+  return {screenshot,extraScreenshots,modelStatus:200,listTruncationLabel:true,detailTruncationLabel:true,incompleteLabels:true,combinedLabels:true,visibleGap:true,literalPlaceholders:true,externalLoads,visibleBytes:visible.bytes,tailVisible:false,brokenUTF8:false};
 }
