@@ -46,6 +46,13 @@ func startHost(t *testing.T, budget int64, plugin bool, upstream string, stateDi
 // 返回HTTP入口，启动失败终止测试，不继承真实凭据或添加生产故障接口。
 func startHostWithManagementAuth(t *testing.T, budget int64, plugin bool, upstream string, environmentAuth bool, stateDir ...string) *instance {
 	t.Helper()
+	return startHostWithConfiguration(t, budget, plugin, upstream, environmentAuth, "", stateDir...)
+}
+
+// startHostWithConfiguration 按 startHost 的约束启动宿主，extraConfig 仅扩展合成实例的公开 YAML 配置。
+// environmentAuth 选择已有管理密码入口，stateDir 可复用专用目录；返回入口，配置或启动失败终止测试。
+func startHostWithConfiguration(t *testing.T, budget int64, plugin bool, upstream string, environmentAuth bool, extraConfig string, stateDir ...string) *instance {
+	t.Helper()
 	root, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
@@ -114,8 +121,11 @@ plugins:
     models:
       - name: audit-test-model
         alias: audit-test-model
+      - name: audit-test-model
+        alias: responses-client-model
 `, upstream)
 	}
+	config += extraConfig
 	configPath := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatal(err)

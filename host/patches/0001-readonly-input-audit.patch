@@ -38,7 +38,7 @@ index efe1e58f222426b653caee57cc7868859ca3808e..7a0d7f625d03028ac89fbd4c384f2557
 -func AuthMiddleware(manager *sdkaccess.Manager) gin.HandlerFunc {
 -	return accessAuthMiddleware(manager, false)
 +// AuthMiddleware returns authentication middleware using manager's configured providers.
-+// The optional auditHost freezes Chat Completions admission only after final built-in authentication.
++// The optional auditHost freezes supported HTTP admission only after final built-in authentication.
 +// Missing providers retain legacy admission; audit failures never change authentication or panic outward.
 +func AuthMiddleware(manager *sdkaccess.Manager, auditHost ...handlers.InputAuditHost) gin.HandlerFunc {
 +	return accessAuthMiddleware(manager, false, auditHost...)
@@ -53,12 +53,18 @@ index efe1e58f222426b653caee57cc7868859ca3808e..7a0d7f625d03028ac89fbd4c384f2557
  	return func(c *gin.Context) {
  		if manager == nil {
  			c.Next()
-@@ -208,6 +209,9 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
+@@ -208,6 +209,15 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
  				reqCtx := coreusage.WithAPIKey(c.Request.Context(), result.Principal)
  				reqCtx = coreusage.WithAccessProvider(reqCtx, result.Provider)
  				reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(result.Provider))
-+				if result.NativeConfigKey && result.Provider == sdkaccess.DefaultAccessProviderName && len(auditHost) > 0 && c.Request.Method == http.MethodPost && c.FullPath() == "/v1/chat/completions" {
-+					reqCtx = handlers.WithInputAuditEntry(reqCtx, result.Principal, auditHost[0])
++				if result.NativeConfigKey && result.Provider == sdkaccess.DefaultAccessProviderName && len(auditHost) > 0 && c.Request.Method == http.MethodPost {
++					// Exact POST routes exclude WebSocket handshakes and unrelated API submissions.
++					switch c.FullPath() {
++					case "/v1/chat/completions":
++						reqCtx = handlers.WithInputAuditEntry(reqCtx, result.Principal, "chat-completions", auditHost[0])
++					case "/v1/responses", "/v1/responses/compact", "/backend-api/codex/responses", "/backend-api/codex/responses/compact":
++						reqCtx = handlers.WithInputAuditEntry(reqCtx, result.Principal, "responses", auditHost[0])
++					}
 +				}
  				c.Request = c.Request.WithContext(reqCtx)
  			}
@@ -81,6 +87,14 @@ index 5c482f10007bb6c1f4eabd8cf4f41a77a30459c3..078d1d1960c115a29cc304de751fc7f3
  	{
  		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
  		v1.GET("/models/*model", func(c *gin.Context) {
+@@ -118,6 +119,6 @@
+ 	// Codex CLI direct route aliases (chatgpt_base_url compatible)
+ 	codexDirect := s.engine.Group("/backend-api/codex")
+-	codexDirect.Use(AuthMiddleware(s.accessManager))
++	codexDirect.Use(AuthMiddleware(s.accessManager, s.pluginHost))
+ 	{
+ 		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
+ 		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
 diff --git a/internal/pluginhost/host.go b/internal/pluginhost/host.go
 index a1bca7f614e3c5d271514858622d17b9590f46fc..01d90bad4ba3e03e6f907c89e6f9b9a2568c5eef 100644
 --- a/internal/pluginhost/host.go
@@ -153,7 +167,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..ef3df7c98b3214ed5d4a7ce249ca6fcf2af6e640
 --- /dev/null
 +++ b/internal/pluginhost/input_audit.go
-@@ -0,0 +1,410 @@
+@@ -0,0 +1,411 @@
 +// This file owns private inline-key identities and isolated, fail-open input-audit observer delivery.
 +package pluginhost
 +
@@ -187,12 +201,13 @@ index 0000000000000000000000000000000000000000..ef3df7c98b3214ed5d4a7ce249ca6fcf
 +var inputAuditIdentityMu sync.Mutex
 +
 +type inputAuditCapabilities struct {
-+	ContractVersion int    `json:"contract_version"`
-+	Available       bool   `json:"available"`
-+	StateDir        string `json:"state_dir,omitempty"`
-+	Reason          string `json:"reason,omitempty"`
-+	BridgeFailures  uint64 `json:"bridge_failures"`
-+	BridgeReason    string `json:"bridge_reason,omitempty"`
++	ContractVersion int      `json:"contract_version"`
++	Protocols       []string `json:"protocols"`
++	Available       bool     `json:"available"`
++	StateDir        string   `json:"state_dir,omitempty"`
++	Reason          string   `json:"reason,omitempty"`
++	BridgeFailures  uint64   `json:"bridge_failures"`
++	BridgeReason    string   `json:"bridge_reason,omitempty"`
 +}
 +type inputAuditObject struct {
 +	ID string `json:"id"`
@@ -248,7 +263,7 @@ index 0000000000000000000000000000000000000000..ef3df7c98b3214ed5d4a7ce249ca6fcf
 +	if reason == "" {
 +		_, reason = inputAuditSeed(dir)
 +	}
-+	response := inputAuditCapabilities{ContractVersion: 2, Available: reason == "", Reason: reason}
++	response := inputAuditCapabilities{ContractVersion: 2, Protocols: []string{"chat-completions", "responses"}, Available: reason == "", Reason: reason}
 +	if h != nil {
 +		response.BridgeFailures = h.inputAuditBridgeFailures.Load()
 +		if response.BridgeFailures > 0 {
@@ -669,7 +684,7 @@ index 0000000000000000000000000000000000000000..8b36e4690f3eb9a641c2586dd9788100
 --- /dev/null
 +++ b/sdk/api/handlers/input_audit.go
 @@ -0,0 +1,70 @@
-+// This file binds authenticated admission decisions to the later Chat Completions body observation.
++// This file binds authenticated admission decisions to the later original HTTP protocol body observation.
 +package handlers
 +
 +import (
@@ -691,9 +706,9 @@ index 0000000000000000000000000000000000000000..8b36e4690f3eb9a641c2586dd9788100
 +}
 +
 +// WithInputAuditEntry synchronously freezes admission before the handler can read the submitted body.
-+// principal is the final built-in authentication result, host owns trusted identity mapping, and ctx is derived.
-+// Returns a context carrying only private delivery state; absent hosts, errors, or panics fail open.
-+func WithInputAuditEntry(ctx context.Context, principal string, host InputAuditHost) context.Context {
++// principal is the final built-in authentication result; protocol comes from the host's exact route whitelist.
++// host owns trusted identity mapping and ctx is derived; returns only private state, failures and panics fail open.
++func WithInputAuditEntry(ctx context.Context, principal, protocol string, host InputAuditHost) context.Context {
 +	if host == nil {
 +		return ctx
 +	}
@@ -702,7 +717,7 @@ index 0000000000000000000000000000000000000000..8b36e4690f3eb9a641c2586dd9788100
 +		log.Warn("input audit entry unavailable")
 +		return ctx
 +	}
-+	delivery := prepareInputAuditEntry(ctx, host, principal, pluginapi.InputAuditEvent{ID: id.String(), ReceivedAt: time.Now().UTC(), Protocol: "chat-completions"})
++	delivery := prepareInputAuditEntry(ctx, host, principal, pluginapi.InputAuditEvent{ID: id.String(), ReceivedAt: time.Now().UTC(), Protocol: protocol})
 +	if delivery == nil {
 +		return ctx
 +	}
@@ -753,6 +768,27 @@ index 4077ee5b8c1cd502128e417638cd1817e41139b6..a97a65b928999debd7f1cf14d7c02e7b
  	// If data retrieval fails, return a 400 Bad Request error.
  	if err != nil {
  		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{
+diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/handlers/openai/openai_responses_handlers.go
+--- a/sdk/api/handlers/openai/openai_responses_handlers.go
++++ b/sdk/api/handlers/openai/openai_responses_handlers.go
+@@ -600,6 +600,9 @@
+ //   - c: The Gin context containing the HTTP request and response
+ func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
+ 	rawJSON, err := handlers.ReadRequestBody(c)
++	// Audit only this decoded submission, before Codex rewrites, routing, or execution.
++	// Failed reads omit partial input without changing the handler's existing response.
++	h.ObserveInputAudit(c, rawJSON, err != nil)
+ 	// If data retrieval fails, return a 400 Bad Request error.
+ 	if err != nil {
+ 		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{
+@@ -628,6 +631,7 @@
+ func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
+ 	rawJSON, err := handlers.ReadRequestBody(c)
++	h.ObserveInputAudit(c, rawJSON, err != nil)
+ 	if err != nil {
+ 		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{
+ 			Error: handlers.ErrorDetail{
+ 				Message: fmt.Sprintf("Invalid request: %v", err),
 diff --git a/sdk/pluginabi/types.go b/sdk/pluginabi/types.go
 index e79fd8c16fe73dbad1ac9f38ec7900167740c455..ebae42a5a512766dde42befd0ad734e408cfd83e 100644
 --- a/sdk/pluginabi/types.go

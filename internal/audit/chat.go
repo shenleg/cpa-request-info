@@ -1,4 +1,4 @@
-// 本文件只提取选中 Chat 用户消息的允许内容，并在组合过程中限制 UTF-8 前缀；不保留协议块。
+// 本文件提取选中 Chat 用户消息的允许内容，并提供各协议共用的 UTF-8 前缀组合；不保留协议块。
 package audit
 
 import (
@@ -27,15 +27,21 @@ func chatContent(raw []byte, limit int) (string, bool, bool) {
 	if len(raw) == 0 || raw[0] != '[' || json.Unmarshal(raw, &blocks) != nil {
 		return "", false, true
 	}
+	return contentBlocks(blocks, limit, chatPiece)
+}
+
+// contentBlocks 共用按序组合与双状态规则；piece 仅识别本协议允许块，不扩展消息选择或工具边界。
+func contentBlocks(blocks []json.RawMessage, limit int, piece func([]byte) (string, bool)) (string, bool, bool) {
+	prefix := contentPrefix{limit: limit}
 	incomplete := false
 	for _, rawBlock := range blocks {
-		piece, supported := chatPiece(rawBlock)
+		text, supported := piece(rawBlock)
 		if !supported {
 			incomplete = true
 			continue
 		}
 		// 即使容量已满也继续判定后续块，以免把未知尾部冒充为单纯截断。
-		prefix.append(piece)
+		prefix.append(text)
 	}
 	return prefix.text.String(), prefix.truncated, incomplete
 }

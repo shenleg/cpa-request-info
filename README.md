@@ -1,11 +1,11 @@
 # CPA 请求输入审计：最小安全闭环
 
-本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)、[ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md) 与 [ticket 03](.scratch/request-input-audit/issues/03-chat-input-boundaries.md) 的本地验收范围，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
+本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)、[ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md)、[ticket 03](.scratch/request-input-audit/issues/03-chat-input-boundaries.md) 与 [ticket 04](.scratch/request-input-audit/issues/04-responses-http.md) 的本地验收范围，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
 
 ## 已实现范围
 
 - 固定官方 commit `bf9341629ef2300ac9d846a2e80fe2756f63a671`，保持 C ABI 1 / RPC schema 6，新增独立只读观察契约 2；旧契约不静默降级。
-- 宿主在最终内置客户端 Key 鉴权后、读体前同步冻结本次提交的无秘密身份与采集决策；读体后、业务改写及模型路由前只读观察，不重新按名单或主动暂停决定资格。不是 usage queue 或执行请求拦截器。
+- 宿主在最终内置客户端 Key 鉴权后、handler 读体前同步冻结本次提交的无秘密身份与采集决策；读体后、业务改写及模型路由前只读观察，不重新按名单或主动暂停决定资格。不是 usage queue 或执行请求拦截器。
 - 宿主随机 seed + HMAC-SHA-256 产生稳定无秘密对象 ID；不同 Key 分开，目录和认证采用同一算法，不依赖配置下标/名称。标识不能登录。
 - 默认监控名单为空。管理员选择 ID 并命名、仅改名、移除或重新加入；名称仅在对象目录保存，旧/新记录显示当前名称。同 Key 重返名单沿用历史，不同 Key 即使同名也独立。不粘贴原客户端 Key，不改变宿主 Key 配置。
 - 全局主动暂停/恢复单独持久化，不解除存储故障、不把预期跳过记为缺口；后续变更不取消已接收/入队副本。对象名称、停用及暂停状态正常重启后保留。
@@ -14,6 +14,8 @@
 - 选中 `user.content` 支持字符串或内容数组：`text` 原样保存；`image_url`、`input_audio`、`video_url`、`file` 的对应非 null 对象载荷仅生成 `[图片]`、`[音频]`、`[视频]`、`[文件]`。按原顺序直接组合，不保存附件载荷、文件名、URL、Base64 或引用标识。`tool_call` / `tool_use` / `tool_result` 整块排除，不递归提取嵌套内容。
 - 未知/畸形块不序列化：安全部分保存并标记 `extraction_incomplete`，每次提交增加一次 `unsupported_content` 缺口；完全无法安全提取则只报缺口。缺失字段、重复键和大小写别名不静默回退为完整输入，也不保存整请求兜底。空字符串、显式 `null`、空数组、仅合法空文本或工具块正常跳过，空白文本不 trim。
 - 文本与占位符合计最多 64 KiB UTF-8 安全前缀，不含元数据；恰好上限不误报，首次字符越界后不再拼后续短块。只截断审计副本，列表和详情分别显示截断/提取不完整，两种状态可同时存在。请求模型缺失/非字符串时记为未知，不猜测。普通文本里的 URL、秘密、Base64 **不会自动脱敏**。
+- Responses HTTP 覆盖标准、compact 与 Codex direct 别名 POST 入口；GET WebSocket 握手不观察。字符串 `input` 是本次用户文本，结构化列表只取末尾明确 `user` 消息（`type` 省略或为 `message`），不回找/拼接历史。`input_text` 原样提取；`input_image`、`input_file`、固定宿主支持的 `input_audio` 和 `input_video` 只留占位符。已知工具/模型生成项整体排除，未知项与无法判断的 `item_reference` 报解析缺口，不解析引用。
+- `previous_response_id` 不参与历史回查或持久化，显式重发独立记录；客户端请求模型先于路由及上游别名映射提取，不从回复补猜。宿主 capabilities 必须显式声明两种 HTTP 协议，只有旧 Chat 接入点的 contract v2 宿主也拒绝采集，不静默显示 Responses 覆盖。
 - 64 条 / 8 MiB 有界副本队列，约 1 MiB 分段 JSONL，写入并同步成功后才允许管理查询；入队不等于保存。
 - 默认总预算 1 GiB，合法启动预算 4 MiB–1 GiB；保守核算整个专用目录及辅助文件，预留 1 MiB 配置更新等维护空间。满额停采，不覆盖或删除旧记录。
 - 宿主插件菜单、无数据静态 shell、受保护对象/选择/状态/列表/详情 API。正文和名称只按纯文本展示，不渲染 HTML/Markdown，不自动加载外部资源。
@@ -21,7 +23,7 @@
 
 ## 未完成与风险
 
-尚无其他协议、上述白名单以外的内容类型、WebSocket、完整 SSE/重试/断开矩阵、组合搜索、七天过期清理、动态预算管理、满额自动恢复、异常退出恢复、完整缺口历史或 Linux 双架构运行验收。**已保存输入目前不会自动到期清理。** 当前只实现最小闭环、配置生命周期与 Chat 输入边界；暂停、移除不会改变接收时间或删除历史，保留期限/清理由后续票完成，正常重启不等于异常恢复 ticket 11 已完成。
+尚无 Anthropic Messages、上述白名单以外的内容类型、Responses WebSocket、完整 SSE/重试/断开矩阵、组合搜索、七天过期清理、动态预算管理、满额自动恢复、异常退出恢复、完整缺口历史或 Linux 双架构运行验收。**已保存输入目前不会自动到期清理。** 当前只实现最小闭环、配置生命周期、Chat 输入边界与 Responses HTTP；暂停、移除不会改变接收时间或删除历史，保留期限/清理由后续票完成，正常重启不等于异常恢复 ticket 11 已完成。
 
 应用层不加密。专用目录为 `0700`、文件为 `0600`，仍需保护主机、磁盘、快照和备份。没有安全擦除或 native 进程崩溃隔离保证；常规解析/队列/存储错误 fail-open，不代表零丢失、零延迟或吞吐承诺。诊断是有界运行期原因码和已知计数，不是完整可恢复缺口历史。
 
@@ -93,7 +95,7 @@ go build -o .build/bin/audit-demo ./cmd/audit-demo
 
 自动验收只需 `make browser`：构建固定宿主/插件及 demo、核对管理页面、启动真实实例、运行三个场景各两轮并停止进程，不依赖 MCP。已有构建产物时可用 `make browser-run`。启动 JSON 只有健康检查通过后才发 `ready`，失败/超时有明确退出；runner 不保存子进程 stderr 原文或 Playwright 可能含凭据的调用日志，只报告固定阶段/原因和本项目场景行号。
 
-场景位于 `tests/browser/smoke.js`、`tests/browser/truncation.js`、`tests/browser/lifecycle.js`。分别验证菜单与纯文本安全展示、65,535字节截断标签/提取不完整/双状态及可见缺口，以及页面改名、移除后历史筛选、同Key重新加入、主动暂停/恢复。同一宿主连续两轮且每次使用唯一标记/记录 ID，旧数据不能冒充本轮通过。有限证据保存在 `.test-data/verification-*/result.json` 和状态标签截图；没有成功验收的结果不会报告为通过。
+场景位于 `tests/browser/smoke.js`、`tests/browser/truncation.js`、`tests/browser/lifecycle.js`。分别验证菜单与纯文本安全展示、65,535字节截断标签/提取不完整/双状态及可见缺口、Responses 协议与请求模型/未知模型展示，以及页面改名、移除后历史筛选、同Key重新加入、主动暂停/恢复。同一宿主连续两轮且每次使用唯一标记/记录 ID，旧数据不能冒充本轮通过。有限证据保存在 `.test-data/verification-*/result.json` 和状态标签截图；没有成功验收的结果不会报告为通过。
 
 浏览器环境使用精确版本 Playwright 和明确的 `zh-CN` locale，匹配固定管理前端；不宣称所有浏览器/语言/未来前端已验证。验收责任与工作区审查的项目约定见 `docs/agents/verification.md`；个人技能文件不修改。
 
@@ -107,6 +109,20 @@ go build -o .build/bin/audit-demo ./cmd/audit-demo
 make build
 make test-one TEST='TestChat'
 ```
+
+## Responses HTTP 输入边界验收
+
+`tests/system/responses_http_test.go` 和 `tests/system/responses_http_execution_test.go` 沿用已确认的公开系统边界：真实客户端 HTTP → 固定补丁宿主/原生插件 → 管理列表、精确详情与状态。覆盖字符串、末尾消息、纯工具续跑、混合非文本/未知块、空白/空输入、协议字段歧义、请求模型未知、鉴权/未监控/握手跳过、各 HTTP 入口、UTF-8 截断及正常重启。
+
+可控上游验证 Responses 转换为 Chat 执行后请求字节与宿主公开响应在审计开启/关闭时一致，且实际模型别名不同于持久化请求模型。阻塞上游后先查到已保存输入，再释放上游失败响应，证明采集不等待回复。使用宿主已有 `upstream.codex.orphan-delegation-compatibility` 与合成 `X-Openai-Subagent` 触发工具输出→user 改写，证实上游实际收到改写后的 user，但审计不保存该工具输出/历史。
+
+正文观察是 `ReadRequestBody` 解码内容编码之后、handler 业务改写之前的原协议输入，不是压缩 wire bytes；接收快照早于 handler 读体，不保证早于宿主既有中间件第一次读取 socket。隔离目录及诊断扫描检查白名单和禁存标记；不保存整条请求、会话标识、认证 Key 或附件载荷。
+
+```bash
+make test-one TEST='TestResponsesHTTP'
+```
+
+固定内容白名单：`input_image` 要有非空字符串 `image_url` 或 `file_id`；`input_file` 要有 `file_data`、`file_url` 或 `file_id`；`input_audio` 识别嵌套 `input_audio.data` 或扁平 `data`；`input_video` 识别 `video_url` 字符串或对象内的 `url`。这些字段只用于瞬时判断占位，不持久化来源或数据。畸形/未知形状报告缺口，不用宿主转换后消息替代。协议类型依据 [OpenAI Responses schema](https://github.com/openai/openai-openapi/blob/main/openapi.yaml) 与固定宿主已支持形状限定，不承诺未来新增类型自动兼容。
 
 ## 管理 API
 

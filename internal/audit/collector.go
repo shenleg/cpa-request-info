@@ -129,7 +129,7 @@ func Open(dir string, budget int64) (*Collector, error) {
 	return c, nil
 }
 
-// Observe 按 event 的接收快照同步提取末尾 user 允许内容并非阻塞入队，不复核当前名单或主动暂停。
+// Observe 按 event 的接收快照同步提取 Chat/Responses 本次允许输入并非阻塞入队，不复核当前名单或主动暂停。
 // 无返回值，解析及容量失败仅增加固定缺口诊断，不影响宿主请求；Body 不进入采集器。
 func (c *Collector) Observe(event Event) {
 	c.mu.Lock()
@@ -160,7 +160,7 @@ func (c *Collector) Observe(event Event) {
 		c.gap("invalid_event")
 		return
 	}
-	if event.Protocol != "chat-completions" {
+	if event.Protocol != "chat-completions" && event.Protocol != "responses" {
 		c.gap("unsupported_protocol")
 		return
 	}
@@ -170,29 +170,35 @@ func (c *Collector) Observe(event Event) {
 		c.gap("invalid_json")
 		return
 	}
-	var messages []json.RawMessage
-	if json.Unmarshal(request["messages"], &messages) != nil || len(messages) == 0 {
-		c.gap("unsupported_content")
-		return
+	var text string
+	var truncated, incomplete bool
+	if event.Protocol == "responses" {
+		text, truncated, incomplete = responsesContent(request["input"], event.Snapshot.MaxTextBytes)
+	} else {
+		var messages []json.RawMessage
+		if json.Unmarshal(request["messages"], &messages) != nil || len(messages) == 0 {
+			c.gap("unsupported_content")
+			return
+		}
+		last, err := protocolObject(messages[len(messages)-1])
+		if err != nil {
+			c.gap("invalid_json")
+			return
+		}
+		var role string
+		if json.Unmarshal(last["role"], &role) != nil {
+			c.gap("unsupported_content")
+			return
+		}
+		if role == "assistant" || role == "tool" || role == "function" || role == "system" || role == "developer" {
+			return
+		}
+		if role != "user" {
+			c.gap("unsupported_content")
+			return
+		}
+		text, truncated, incomplete = chatContent(last["content"], event.Snapshot.MaxTextBytes)
 	}
-	last, err := protocolObject(messages[len(messages)-1])
-	if err != nil {
-		c.gap("invalid_json")
-		return
-	}
-	var role string
-	if json.Unmarshal(last["role"], &role) != nil {
-		c.gap("unsupported_content")
-		return
-	}
-	if role == "assistant" || role == "tool" || role == "function" || role == "system" || role == "developer" {
-		return
-	}
-	if role != "user" {
-		c.gap("unsupported_content")
-		return
-	}
-	text, truncated, incomplete := chatContent(last["content"], event.Snapshot.MaxTextBytes)
 	if incomplete {
 		// 一次提交只计一次提取缺口；仍允许安全部分入队，不把未知内容归为空输入。
 		c.gap("unsupported_content")
@@ -212,7 +218,7 @@ func (c *Collector) Observe(event Event) {
 		return
 	}
 	// Clone 切断与解析出的巨大字符串/原正文的关系，队列只保留受限白名单副本。
-	record := Record{ID: strings.Clone(event.ID), ObjectID: strings.Clone(event.ObjectID), ReceivedAt: strings.Clone(event.ReceivedAt), Protocol: "chat-completions", Model: strings.Clone(model), Text: strings.Clone(text), Truncated: truncated, ExtractionIncomplete: incomplete}
+	record := Record{ID: strings.Clone(event.ID), ObjectID: strings.Clone(event.ObjectID), ReceivedAt: strings.Clone(event.ReceivedAt), Protocol: strings.Clone(event.Protocol), Model: strings.Clone(model), Text: strings.Clone(text), Truncated: truncated, ExtractionIncomplete: incomplete}
 	size := int64(len(record.ID) + len(record.ObjectID) + len(record.ReceivedAt) + len(record.Protocol) + len(record.Model) + len(record.Text) + queuedRecordOverhead)
 	c.mu.Lock()
 	defer c.mu.Unlock()

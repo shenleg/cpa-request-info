@@ -106,5 +106,24 @@ module.exports = async (page, options = {}) => {
   } finally {
     page.off('request', onRequest);
   }
-  return {screenshot,extraScreenshots,modelStatus:200,listTruncationLabel:true,detailTruncationLabel:true,incompleteLabels:true,combinedLabels:true,visibleGap:true,literalPlaceholders:true,externalLoads,visibleBytes:visible.bytes,tailVisible:false,brokenUTF8:false};
+  // Responses 通过同一个真实宿主提交；模型未知不能用上游回复或其他字段补猜。
+  for (const [i,model] of ['audit-test-model',null].entries()) {
+    const marker = 'BROWSER-RESPONSES-' + i + '-' + Date.now() + '-';
+    const submitted = await page.request.post(origin + '/v1/responses', {
+      headers:{Authorization:'Bearer synthetic-client-audit-a-only'},
+      data:{model,input:[{type:'message',role:'user',content:[{type:'input_text',text:marker},{type:'input_image',image_url:'FORBIDDEN_BROWSER_RESPONSES_IMAGE'},unknown]}],previous_response_id:'FORBIDDEN_BROWSER_RESPONSES_PREVIOUS'}
+    });
+    assert(submitted.status()===(i===0?200:400), 'Responses 审计改变了原模型路由结果');
+    const detail = await openSavedDetail({marker,truncated:false,incomplete:true,label:'提取不完整'});
+    assert(detail.protocol==='responses' && detail.model===(model??'') && detail.text===marker+'[图片]', 'Responses 元数据或原协议正文不正确');
+    const row = frame.locator('#records tbody tr').filter({hasText:marker});
+    await row.getByRole('cell', {name:'Responses HTTP',exact:true}).waitFor();
+    await row.getByRole('cell', {name:model??'未知',exact:true}).waitFor();
+    await frame.locator('#detail-meta').filter({hasText:'Responses HTTP · '+(model??'未知')}).waitFor();
+    const labelScreenshot = screenshot.replace(/\.png$/, i===0?'-responses.png':'-responses-unknown-model.png');
+    await frame.locator('#detail-meta').screenshot({path:labelScreenshot});
+    extraScreenshots.push(require('node:path').basename(labelScreenshot));
+  }
+  assert((await frame.locator('#notice').textContent()).includes('Responses HTTP'), '页面未说明实际 HTTP 支持范围');
+  return {screenshot,extraScreenshots,modelStatus:200,listTruncationLabel:true,detailTruncationLabel:true,incompleteLabels:true,combinedLabels:true,visibleGap:true,literalPlaceholders:true,responsesProtocolLabels:true,responsesRequestModel:true,unknownRequestModel:true,externalLoads,visibleBytes:visible.bytes,tailVisible:false,brokenUTF8:false};
 }

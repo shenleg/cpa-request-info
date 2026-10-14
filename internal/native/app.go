@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -61,7 +62,7 @@ func (a *App) Handle(method string, raw []byte) (any, error) {
 		return struct {
 			Routes    []route    `json:"routes"`
 			Resources []resource `json:"resources"`
-		}{[]route{{"GET", "/plugins/request-input-audit/objects"}, {"POST", "/plugins/request-input-audit/monitor"}, {"POST", "/plugins/request-input-audit/remove"}, {"POST", "/plugins/request-input-audit/rename"}, {"POST", "/plugins/request-input-audit/pause"}, {"GET", "/plugins/request-input-audit/records"}, {"GET", "/plugins/request-input-audit/detail"}, {"GET", "/plugins/request-input-audit/status"}}, []resource{{"/index.html", "输入审计", "最小安全 Chat Completions 审计闭环"}}}, nil
+		}{[]route{{"GET", "/plugins/request-input-audit/objects"}, {"POST", "/plugins/request-input-audit/monitor"}, {"POST", "/plugins/request-input-audit/remove"}, {"POST", "/plugins/request-input-audit/rename"}, {"POST", "/plugins/request-input-audit/pause"}, {"GET", "/plugins/request-input-audit/records"}, {"GET", "/plugins/request-input-audit/detail"}, {"GET", "/plugins/request-input-audit/status"}}, []resource{{"/index.html", "输入审计", "Chat Completions 与 Responses HTTP 输入审计"}}}, nil
 	case "management.handle":
 		var req managementRequest
 		if err := json.Unmarshal(raw, &req); err != nil {
@@ -100,6 +101,11 @@ func (a *App) Handle(method string, raw []byte) (any, error) {
 	}
 }
 
+// supportsHTTPAudit 拒绝只具备旧 Chat 接入点的同版本宿主，避免管理页静默宣称 Responses 全覆盖。
+func supportsHTTPAudit(protocols []string) bool {
+	return slices.Contains(protocols, "chat-completions") && slices.Contains(protocols, "responses")
+}
+
 func (a *App) configure(raw []byte) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -122,11 +128,12 @@ func (a *App) configure(raw []byte) {
 	}
 	caps, err := a.host("host.input_audit.capabilities", struct{}{})
 	var capability struct {
-		ContractVersion int    `json:"contract_version"`
-		Available       bool   `json:"available"`
-		StateDir        string `json:"state_dir"`
+		ContractVersion int      `json:"contract_version"`
+		Protocols       []string `json:"protocols"`
+		Available       bool     `json:"available"`
+		StateDir        string   `json:"state_dir"`
 	}
-	if err != nil || json.Unmarshal(caps, &capability) != nil || capability.ContractVersion != 2 || !capability.Available {
+	if err != nil || json.Unmarshal(caps, &capability) != nil || capability.ContractVersion != 2 || !capability.Available || !supportsHTTPAudit(capability.Protocols) {
 		return
 	}
 	dir, err := filepath.Abs(cfg.Dir)
@@ -176,12 +183,13 @@ func (a *App) management(req managementRequest) any {
 		// 身份文件/目录可能在启动后损坏，不能只展示曾经成功的握手。
 		caps, err := a.host("host.input_audit.capabilities", struct{}{})
 		var live struct {
-			Available       bool   `json:"available"`
-			ContractVersion int    `json:"contract_version"`
-			StateDir        string `json:"state_dir"`
-			BridgeFailures  uint64 `json:"bridge_failures"`
+			Available       bool     `json:"available"`
+			ContractVersion int      `json:"contract_version"`
+			Protocols       []string `json:"protocols"`
+			StateDir        string   `json:"state_dir"`
+			BridgeFailures  uint64   `json:"bridge_failures"`
 		}
-		if err != nil || json.Unmarshal(caps, &live) != nil || !live.Available || live.ContractVersion != 2 || (dir != "" && live.StateDir != dir) {
+		if err != nil || json.Unmarshal(caps, &live) != nil || !live.Available || live.ContractVersion != 2 || !supportsHTTPAudit(live.Protocols) || (dir != "" && live.StateDir != dir) {
 			available = false
 			reason = "observer_unavailable"
 		}
@@ -202,7 +210,7 @@ func (a *App) management(req managementRequest) any {
 		if live.BridgeFailures > 0 && reason == "" && collectorReason == "" {
 			reason = "observer_bridge_error"
 		}
-		return responseJSON(200, map[string]any{"available": available, "reason": reason, "supported": "chat-completions-last-user-content", "retention": "not_implemented", "state": state})
+		return responseJSON(200, map[string]any{"available": available, "reason": reason, "supported": "chat-completions-and-responses-http-last-user-content", "supported_protocols": []string{"chat-completions", "responses"}, "responses_websocket": false, "retention": "not_implemented", "state": state})
 	}
 	if strings.HasSuffix(req.Path, "/objects") {
 		catalog, catalogErr := a.catalog()
