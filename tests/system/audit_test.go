@@ -53,6 +53,13 @@ func startHostWithManagementAuth(t *testing.T, budget int64, plugin bool, upstre
 // environmentAuth 选择已有管理密码入口，stateDir 可复用专用目录；返回入口，配置或启动失败终止测试。
 func startHostWithConfiguration(t *testing.T, budget int64, plugin bool, upstream string, environmentAuth bool, extraConfig string, stateDir ...string) *instance {
 	t.Helper()
+	return startHostWithPluginDirectory(t, budget, plugin, upstream, environmentAuth, extraConfig, "", "", stateDir...)
+}
+
+// startHostWithPluginDirectory 沿用隔离宿主约束，pluginDirectory 指定本轮 native 夹具目录（空值用默认产物），pluginConfig 添加合成插件配置。
+// 其余参数同 startHostWithConfiguration；返回真实入口，配置或启动失败终止测试，不污染其他测试的插件目录。
+func startHostWithPluginDirectory(t *testing.T, budget int64, plugin bool, upstream string, environmentAuth bool, extraConfig, pluginDirectory, pluginConfig string, stateDir ...string) *instance {
+	t.Helper()
 	root, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +86,10 @@ func startHostWithConfiguration(t *testing.T, budget int64, plugin bool, upstrea
 	if err := ln.Close(); err != nil {
 		t.Fatal(err)
 	}
-	pluginDir := filepath.Join(root, ".build/plugins")
+	pluginDir := pluginDirectory
+	if pluginDir == "" {
+		pluginDir = filepath.Join(root, ".build/plugins")
+	}
 	if !plugin {
 		pluginDir = filepath.Join(dir, "empty-plugins")
 		if err := os.Mkdir(pluginDir, 0700); err != nil {
@@ -112,6 +122,7 @@ plugins:
       state-dir: %q
       budget-bytes: %d
 `, port, adminKey, keyA, keyB, filepath.Join(dir, "auths"), pluginDir, auditDir, budget)
+	config += pluginConfig
 	if upstream != "" {
 		config += fmt.Sprintf(`openai-compatibility:
   - name: controlled

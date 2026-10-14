@@ -1,6 +1,6 @@
 # CPA 请求输入审计：最小安全闭环
 
-本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)、[ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md)、[ticket 03](.scratch/request-input-audit/issues/03-chat-input-boundaries.md)、[ticket 04](.scratch/request-input-audit/issues/04-responses-http.md) 与 [ticket 05](.scratch/request-input-audit/issues/05-anthropic-messages.md) 的本地验收范围，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
+本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)、[ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md)、[ticket 03](.scratch/request-input-audit/issues/03-chat-input-boundaries.md)、[ticket 04](.scratch/request-input-audit/issues/04-responses-http.md)、[ticket 05](.scratch/request-input-audit/issues/05-anthropic-messages.md) 与 [ticket 06](.scratch/request-input-audit/issues/06-http-request-once.md) 的本地验收范围，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
 
 ## 已实现范围
 
@@ -24,7 +24,7 @@
 
 ## 未完成与风险
 
-尚无上述白名单以外的内容类型、Responses WebSocket、完整 SSE/重试/断开矩阵、组合搜索、七天过期清理、动态预算管理、满额自动恢复、异常退出恢复、完整缺口历史或 Linux 双架构运行验收。**已保存输入目前不会自动到期清理。** 当前只实现最小闭环、配置生命周期、Chat 输入边界、Responses HTTP 与 Anthropic Messages；暂停、移除不会改变接收时间或删除历史，保留期限/清理由后续票完成，正常重启不等于异常恢复 ticket 11 已完成。
+尚无上述白名单以外的内容类型、Responses WebSocket、三协议完整 SSE/重试/断开回归矩阵、组合搜索、七天过期清理、动态预算管理、满额自动恢复、异常退出恢复、完整缺口历史或 Linux 双架构运行验收。**已保存输入目前不会自动到期清理。** 当前实现最小闭环、配置生命周期、三种 HTTP 输入提取与 Chat HTTP 一次提交机制验收；暂停、移除不会改变接收时间或删除历史，保留期限/清理由后续票完成，正常重启不等于异常恢复 ticket 11 已完成。
 
 应用层不加密。专用目录为 `0700`、文件为 `0600`，仍需保护主机、磁盘、快照和备份。没有安全擦除或 native 进程崩溃隔离保证；常规解析/队列/存储错误 fail-open，不代表零丢失、零延迟或吞吐承诺。诊断是有界运行期原因码和已知计数，不是完整可恢复缺口历史。
 
@@ -136,7 +136,28 @@ make test-one TEST='TestAnthropic'
 make browser-run
 ```
 
-本票未宣称重试/断开完整矩阵、Responses WebSocket、其他平台或后续票据已完成。
+Anthropic 本票未宣称该协议的重试/断开完整矩阵、Responses WebSocket、其他平台或后续票据已完成。
+
+## HTTP 一次提交语义验收
+
+`tests/system/http_once*_test.go` 在 Chat Completions 已可用链路验证通用机制，不据此宣称 Responses HTTP、Anthropic Messages 的完整失败/重试矩阵已完成；三协议回归仍由 ticket 13 执行。
+
+- 相同文本、相同客户端请求 ID/会话信息重交两次，产生不同宿主提交 ID 的独立记录，不按内容或客户端字段去重。
+- 正常、上游失败、上游 `408` 超时响应及 SSE 请求，在上游响应/首 token 被通道屏障阻塞时已能查询本轮精确详情；SSE token 后失败保留原错误完成语义。公开响应及转发请求与关闭审计的宿主对照，不把正常协议改写当作审计副作用。
+- 公开 `routing.retry` 配置触发同账号重试或真实账号切换；SSE 在建立流后先发错误帧，触发首 token 前内部重试。可控上游明确收到两次完整执行请求，但管理员始终只看到一次客户端提交。
+- `tests/fixtures/http-once-plugin` 是仅测试使用的 C ABI 插件，从原客户端请求拦截回调调用官方 `host.model.execute`。上游确实收到内部输入及原客户端输入，审计只保存后者。夹具编译/审计库复制到全新 `.test-data/` 插件目录，不加入默认 `.build/plugins/` 或部署产物。
+- 实际客户端 HTTP 取消和期限超时传到上游；SSE 另在客户端收到首 token 后断开。已经接收的合格输入仍保存，取消不变为采集故障。
+- 路由前失败仍保存；鉴权失败不记录。真实 TCP 在认证后 `100-continue` 屏障后发送含完整 JSON 的不完整 chunk，并半关闭写端：只能报 `read_error`，不得保存收到的正文前缀；畸形 JSON 报 `invalid_json`。后续唯一提交落盘是负向检查屏障，不靠固定 sleep。
+- 外部隔离存储权限故障和模型失败同时发生时，公开模型错误保持不变，保存失败单独报 `storage_error`，不冒充成功保存。管理详情和持久化字段仅含输入白名单，不增加响应正文、状态追踪或执行日志。
+
+每个可重复场景在同一实例跑两轮，以本轮唯一标记/记录 ID 等待已保存结果，管理状态明确核对 `saved`、`queued` 和固定缺口计数。共享等待/上游对照模式可用于最终三协议交付回归；不通过私有 lifecycle 或 usage queue 证明提交次数。
+
+宿主原有执行失败 warning 可能包含上游错误正文，关闭审计时也会出现；本票比较开关审计的标记次数，确认审计未新增该输出，并单独扫描整个审计目录确保错误正文没有落盘。插件不使用或复制该执行日志，不能把本项目的输入白名单保证误解成宿主已有日志已被脱敏。
+
+```bash
+make build
+make test-one TEST='TestHTTPOnce'
+```
 
 ## 管理 API
 
