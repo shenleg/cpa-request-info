@@ -14,7 +14,7 @@ type Snapshot struct {
 func (c *Collector) Prepare(event Event) Snapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	result := Snapshot{Version: 2, Decision: "unavailable", CollectorGeneration: c.generation}
+	result := Snapshot{Version: 3, Decision: "unavailable", CollectorGeneration: c.generation}
 	if !validEvent(event) {
 		c.incrementGap("invalid_event")
 		return result
@@ -30,6 +30,6 @@ func (c *Collector) Prepare(event Event) Snapshot {
 		return result
 	}
 	result.Decision = "capture"
-	result.MaxTextBytes = maxText
+	result.MaxTextBytes = c.config.MaxTextBytes
 	return result
 }

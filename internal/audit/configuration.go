@@ -1,4 +1,4 @@
-// 本文件维护有界审计对象目录；停用只改变采集资格，名称和历史仍按稳定对象关联。
+// 本文件维护有界审计对象目录与正文上限；配置仅在持久化成功后发布，停用保留名称和历史。
 package audit
 
 import (
@@ -17,6 +17,7 @@ type Object struct {
 type configuration struct {
 	Version       int               `json:"version"`
 	CapturePaused bool              `json:"capture_paused"`
+	MaxTextBytes  int               `json:"max_text_bytes"`
 	Objects       map[string]Object `json:"objects"`
 }
 
@@ -71,6 +72,18 @@ func (c *Collector) Rename(objectID, name string) error {
 func (c *Collector) SetPaused(paused bool) error {
 	return c.changeConfiguration(func(next *configuration) error {
 		next.CapturePaused = paused
+		return nil
+	})
+}
+
+// SetMaxTextBytes 同步保存后续提交的正文上限；limit 为1至65536个UTF-8字节，不追溯已接收副本。
+// 成功无返回值，非法上限、关闭或存储失败返回固定错误；保存失败不发布新上限，并遵循配置失败停采规则。
+func (c *Collector) SetMaxTextBytes(limit int) error {
+	if limit < 1 || limit > maxText {
+		return errors.New("invalid_max_text_bytes")
+	}
+	return c.changeConfiguration(func(next *configuration) error {
+		next.MaxTextBytes = limit
 		return nil
 	})
 }
@@ -149,10 +162,21 @@ func decodeConfiguration(data []byte) (configuration, error) {
 	if err != nil {
 		return configuration{}, errors.New("invalid_configuration")
 	}
-	config := configuration{Version: 2, Objects: make(map[string]Object)}
+	config := configuration{Version: 2, MaxTextBytes: maxText, Objects: make(map[string]Object)}
 	if _, versioned := fields["version"]; versioned {
+		var version *int
 		var paused *bool
-		if len(fields) != 3 || json.Unmarshal(fields["version"], &config.Version) != nil || config.Version != 2 || json.Unmarshal(fields["capture_paused"], &paused) != nil || paused == nil {
+		expectedFields := 3
+		if rawLimit, present := fields["max_text_bytes"]; present {
+			expectedFields++
+			var limit *int
+			if json.Unmarshal(rawLimit, &limit) != nil || limit == nil || *limit < 1 || *limit > maxText {
+				return configuration{}, errors.New("invalid_configuration")
+			}
+			config.MaxTextBytes = *limit
+		}
+		// 指针区分显式null与整数2，不能让null沿用初始化版本并被视为有效配置。
+		if len(fields) != expectedFields || json.Unmarshal(fields["version"], &version) != nil || version == nil || *version != 2 || json.Unmarshal(fields["capture_paused"], &paused) != nil || paused == nil {
 			return configuration{}, errors.New("invalid_configuration")
 		}
 		config.CapturePaused = *paused

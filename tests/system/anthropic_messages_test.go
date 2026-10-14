@@ -55,7 +55,7 @@ func TestAnthropicMessagesAdmission(t *testing.T) {
 		SupportedProtocols []string `json:"supported_protocols"`
 		ResponsesWebSocket bool     `json:"responses_websocket"`
 	}
-	if code != 200 || json.Unmarshal(raw, &status) != nil || !status.Available || !slices.Contains(status.SupportedProtocols, "anthropic-messages") || status.ResponsesWebSocket {
+	if code != 200 || json.Unmarshal(raw, &status) != nil || !status.Available || !slices.Contains(status.SupportedProtocols, "anthropic-messages") || !status.ResponsesWebSocket || !slices.Contains(status.SupportedProtocols, "responses-websocket") {
 		t.Fatal("管理状态没有准确声明 Anthropic Messages HTTP 支持")
 	}
 	for _, key := range []string{"", keyA} {

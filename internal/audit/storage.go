@@ -282,7 +282,7 @@ func eachRecord(file io.Reader, limit int64, visit func(Record, int64) error) er
 			return errors.New("invalid_record")
 		}
 		var trailing any
-		if decoder.Decode(&trailing) != io.EOF || !validEvent(Event{ID: record.ID, ObjectID: record.ObjectID, ReceivedAt: record.ReceivedAt, Protocol: record.Protocol}) || !supportedHTTPProtocol(record.Protocol) || len(record.Model) > 1024 || len(record.Text) > maxText {
+		if decoder.Decode(&trailing) != io.EOF || !validEvent(Event{ID: record.ID, ObjectID: record.ObjectID, ReceivedAt: record.ReceivedAt, Protocol: record.Protocol}) || !supportedProtocol(record.Protocol) || len(record.Model) > 1024 || len(record.Text) > maxText {
 			return errors.New("invalid_record")
 		}
 		if err := visit(record, int64(len(line))); err != nil {

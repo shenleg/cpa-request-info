@@ -59,8 +59,17 @@ func run(jsonOutput bool) (result error) {
 		return err
 	}
 	upstream := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, err := io.Copy(io.Discard, r.Body); err != nil {
+		var request struct {
+			Stream bool `json:"stream"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 			http.Error(w, "synthetic read failure", 400)
+			return
+		}
+		// WebSocket 的真实模型执行转换为 Chat stream；非流式场景仍使用原 JSON 回复。
+		if request.Stream {
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: {\"id\":\"synthetic-reply\",\"created\":1,\"object\":\"chat.completion.chunk\",\"model\":\"audit-test-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"合成上游回复\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"synthetic-reply\",\"created\":1,\"object\":\"chat.completion.chunk\",\"model\":\"audit-test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")

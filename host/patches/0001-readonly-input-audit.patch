@@ -1,5 +1,4 @@
 diff --git a/internal/access/config_access/provider.go b/internal/access/config_access/provider.go
-index b6d371ae1540e5b359d3c81c5dbcdf41c303a361..c589ba167cbd4e40bd0a5cac631a86f81276938f 100644
 --- a/internal/access/config_access/provider.go
 +++ b/internal/access/config_access/provider.go
 @@ -1,3 +1,4 @@
@@ -7,7 +6,7 @@ index b6d371ae1540e5b359d3c81c5dbcdf41c303a361..c589ba167cbd4e40bd0a5cac631a86f8
  package configaccess
  
  import (
-@@ -91,8 +92,9 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
+@@ -91,8 +92,9 @@
  		}
  		if _, ok := p.keys[candidate.value]; ok {
  			return &sdkaccess.Result{
@@ -20,7 +19,6 @@ index b6d371ae1540e5b359d3c81c5dbcdf41c303a361..c589ba167cbd4e40bd0a5cac631a86f8
  					"source": candidate.source,
  				},
 diff --git a/internal/api/server_middleware.go b/internal/api/server_middleware.go
-index efe1e58f222426b653caee57cc7868859ca3808e..7a0d7f625d03028ac89fbd4c384f25574e8c5fae 100644
 --- a/internal/api/server_middleware.go
 +++ b/internal/api/server_middleware.go
 @@ -1,3 +1,4 @@
@@ -28,7 +26,7 @@ index efe1e58f222426b653caee57cc7868859ca3808e..7a0d7f625d03028ac89fbd4c384f2557
  package api
  
  import (
-@@ -179,18 +180,18 @@ func corsMiddleware() gin.HandlerFunc {
+@@ -179,18 +180,18 @@
  	}
  }
  
@@ -53,7 +51,7 @@ index efe1e58f222426b653caee57cc7868859ca3808e..7a0d7f625d03028ac89fbd4c384f2557
  	return func(c *gin.Context) {
  		if manager == nil {
  			c.Next()
-@@ -208,6 +209,17 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
+@@ -208,6 +209,23 @@
  				reqCtx := coreusage.WithAPIKey(c.Request.Context(), result.Principal)
  				reqCtx = coreusage.WithAccessProvider(reqCtx, result.Provider)
  				reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(result.Provider))
@@ -68,11 +66,16 @@ index efe1e58f222426b653caee57cc7868859ca3808e..7a0d7f625d03028ac89fbd4c384f2557
 +						reqCtx = handlers.WithInputAuditEntry(reqCtx, result.Principal, "responses", auditHost[0])
 +					}
 +				}
++				if result.NativeConfigKey && result.Provider == sdkaccess.DefaultAccessProviderName && len(auditHost) > 0 && c.Request.Method == http.MethodGet {
++					switch c.FullPath() {
++					case "/v1/responses", "/backend-api/codex/responses":
++						reqCtx = handlers.WithInputAuditWebsocket(reqCtx, result.Principal, auditHost[0])
++					}
++				}
  				c.Request = c.Request.WithContext(reqCtx)
  			}
  			c.Next()
 diff --git a/internal/api/server_routes.go b/internal/api/server_routes.go
-index 5c482f10007bb6c1f4eabd8cf4f41a77a30459c3..078d1d1960c115a29cc304de751fc7f3dfa3ff47 100644
 --- a/internal/api/server_routes.go
 +++ b/internal/api/server_routes.go
 @@ -1,3 +1,4 @@
@@ -80,7 +83,7 @@ index 5c482f10007bb6c1f4eabd8cf4f41a77a30459c3..078d1d1960c115a29cc304de751fc7f3
  package api
  
  import (
-@@ -62,7 +63,7 @@ func (s *Server) setupRoutes() {
+@@ -62,7 +63,7 @@
  
  	// OpenAI compatible API routes
  	v1 := s.engine.Group("/v1")
@@ -89,7 +92,8 @@ index 5c482f10007bb6c1f4eabd8cf4f41a77a30459c3..078d1d1960c115a29cc304de751fc7f3
  	{
  		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
  		v1.GET("/models/*model", func(c *gin.Context) {
-@@ -118,6 +119,6 @@
+@@ -117,7 +118,7 @@
+ 
  	// Codex CLI direct route aliases (chatgpt_base_url compatible)
  	codexDirect := s.engine.Group("/backend-api/codex")
 -	codexDirect.Use(AuthMiddleware(s.accessManager))
@@ -98,7 +102,6 @@ index 5c482f10007bb6c1f4eabd8cf4f41a77a30459c3..078d1d1960c115a29cc304de751fc7f3
  		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
  		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
 diff --git a/internal/pluginhost/host.go b/internal/pluginhost/host.go
-index a1bca7f614e3c5d271514858622d17b9590f46fc..01d90bad4ba3e03e6f907c89e6f9b9a2568c5eef 100644
 --- a/internal/pluginhost/host.go
 +++ b/internal/pluginhost/host.go
 @@ -1,3 +1,4 @@
@@ -106,7 +109,7 @@ index a1bca7f614e3c5d271514858622d17b9590f46fc..01d90bad4ba3e03e6f907c89e6f9b9a2
  package pluginhost
  
  import (
-@@ -92,6 +93,8 @@ type Host struct {
+@@ -92,6 +93,8 @@
  	modelStreams           *modelStreamBridge
  	callbackContexts       *callbackContextRegistry
  	snapshot               atomic.Value
@@ -115,7 +118,7 @@ index a1bca7f614e3c5d271514858622d17b9590f46fc..01d90bad4ba3e03e6f907c89e6f9b9a2
  }
  
  func New() *Host {
-@@ -1088,17 +1091,17 @@ func (h *Host) rollbackReplacement(lp *loadedPlugin, item runtimeItemConfig) (ca
+@@ -1088,17 +1091,17 @@
  		return capabilityRecord{}, pluginFile{}, false
  	}
  	return capabilityRecord{
@@ -145,7 +148,6 @@ index a1bca7f614e3c5d271514858622d17b9590f46fc..01d90bad4ba3e03e6f907c89e6f9b9a2
  
  func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {
 diff --git a/internal/pluginhost/host_callbacks.go b/internal/pluginhost/host_callbacks.go
-index 4af872a9f83feb6df7de6ccef14a70022b0e8db7..7e8e9186336e3d5487b5a6797a9358d70201d485 100644
 --- a/internal/pluginhost/host_callbacks.go
 +++ b/internal/pluginhost/host_callbacks.go
 @@ -1,3 +1,4 @@
@@ -153,7 +155,7 @@ index 4af872a9f83feb6df7de6ccef14a70022b0e8db7..7e8e9186336e3d5487b5a6797a9358d7
  package pluginhost
  
  import (
-@@ -145,6 +146,10 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
+@@ -145,6 +146,10 @@
  		return nil, fmt.Errorf("host plugin callback instance is closed")
  	}
  	switch method {
@@ -166,10 +168,9 @@ index 4af872a9f83feb6df7de6ccef14a70022b0e8db7..7e8e9186336e3d5487b5a6797a9358d7
  	case pluginabi.MethodHostModelExecuteStream:
 diff --git a/internal/pluginhost/input_audit.go b/internal/pluginhost/input_audit.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..ef3df7c98b3214ed5d4a7ce249ca6fcf2af6e640
 --- /dev/null
 +++ b/internal/pluginhost/input_audit.go
-@@ -0,0 +1,411 @@
+@@ -0,0 +1,430 @@
 +// This file owns private inline-key identities and isolated, fail-open input-audit observer delivery.
 +package pluginhost
 +
@@ -265,7 +266,7 @@ index 0000000000000000000000000000000000000000..ef3df7c98b3214ed5d4a7ce249ca6fcf
 +	if reason == "" {
 +		_, reason = inputAuditSeed(dir)
 +	}
-+	response := inputAuditCapabilities{ContractVersion: 2, Protocols: []string{"chat-completions", "responses", "anthropic-messages"}, Available: reason == "", Reason: reason}
++	response := inputAuditCapabilities{ContractVersion: 3, Protocols: []string{"chat-completions", "responses", "anthropic-messages", "responses-websocket"}, Available: reason == "", Reason: reason}
 +	if h != nil {
 +		response.BridgeFailures = h.inputAuditBridgeFailures.Load()
 +		if response.BridgeFailures > 0 {
@@ -284,7 +285,7 @@ index 0000000000000000000000000000000000000000..ef3df7c98b3214ed5d4a7ce249ca6fcf
 +	if reason == "" {
 +		seed, reason = inputAuditSeed(dir)
 +	}
-+	response := inputAuditCatalog{ContractVersion: 2, Available: reason == "", Reason: reason, Objects: []inputAuditObject{}}
++	response := inputAuditCatalog{ContractVersion: 3, Available: reason == "", Reason: reason, Objects: []inputAuditObject{}}
 +	if response.Available {
 +		for _, key := range keys {
 +			response.Objects = append(response.Objects, inputAuditObject{ID: inputAuditObjectID(seed, key)})
@@ -424,13 +425,54 @@ index 0000000000000000000000000000000000000000..ef3df7c98b3214ed5d4a7ce249ca6fcf
 +	return seed, ""
 +}
 +
-+// PrepareInputAudit maps final authenticated principal and freezes admission before reading the body.
-+// event supplies host-owned submission metadata. Returns request-private delivery state or nil for skip/failure;
-+// credentials and body are never sent during preparation. Errors and ordinary panics never affect the model call.
++// PrepareInputAudit maps the final HTTP principal and freezes admission before reading the body.
++// event supplies host-owned submission metadata; returns private delivery state or nil for skip/failure.
++// Credentials and body are never sent during preparation; ordinary failures never affect execution.
 +func (h *Host) PrepareInputAudit(ctx context.Context, principal string, event pluginapi.InputAuditEvent) func(context.Context, []byte, bool) {
++	prepare := h.BindInputAuditIdentity(principal)
++	if prepare == nil {
++		return nil
++	}
++	return prepare(ctx, event)
++}
++
++// BindInputAuditIdentity maps an already authenticated native principal once, without sampling admission.
++// Returns a submission factory retaining only the opaque object ID, or nil with a fixed bridge diagnostic.
++// Later key removal does not reauthenticate a live connection; each submission still samples current audit configuration.
++func (h *Host) BindInputAuditIdentity(principal string) func(context.Context, pluginapi.InputAuditEvent) func(context.Context, []byte, bool) {
 +	if h == nil {
 +		return nil
 +	}
++	dir, keys, reason := h.inputAuditConfig()
++	if reason != "" {
++		return nil
++	}
++	matched := false
++	for _, key := range keys {
++		if key == principal {
++			matched = true
++			break
++		}
++	}
++	if !matched {
++		h.recordInputAuditBridgeFailure()
++		log.Warn("input audit identity mapping unavailable")
++		return nil
++	}
++	seed, seedReason := inputAuditSeed(dir)
++	if seedReason != "" {
++		h.recordInputAuditBridgeFailure()
++		log.Warn("input audit identity unavailable")
++		return nil
++	}
++	objectID := inputAuditObjectID(seed, principal)
++	return func(ctx context.Context, event pluginapi.InputAuditEvent) func(context.Context, []byte, bool) {
++		event.ObjectID = objectID
++		return h.prepareInputAuditSubmission(ctx, event)
++	}
++}
++
++func (h *Host) prepareInputAuditSubmission(ctx context.Context, event pluginapi.InputAuditEvent) func(context.Context, []byte, bool) {
 +	var record capabilityRecord
 +	for _, current := range h.activeRecords() {
 +		if current.id == inputAuditPluginID && current.plugin.Capabilities.InputAuditObserver != nil && !h.isPluginFused(current.id) {
@@ -452,28 +494,6 @@ index 0000000000000000000000000000000000000000..ef3df7c98b3214ed5d4a7ce249ca6fcf
 +		h.recordInputAuditBridgeFailure()
 +		return nil
 +	}
-+	dir, keys, reason := h.inputAuditConfig()
-+	if reason != "" {
-+		log.Warn("input audit identity unavailable")
-+		return nil
-+	}
-+	matched := false
-+	for _, key := range keys {
-+		if key == principal {
-+			matched = true
-+			break
-+		}
-+	}
-+	if !matched {
-+		log.Warn("input audit identity mapping unavailable")
-+		return nil
-+	}
-+	seed, seedReason := inputAuditSeed(dir)
-+	if seedReason != "" {
-+		log.Warn("input audit identity unavailable")
-+		return nil
-+	}
-+	event.ObjectID = inputAuditObjectID(seed, principal)
 +	event.Body = nil
 +	event.ReadError = false
 +	decision, errPrepare := prepareInputAudit(inputAuditContext(ctx), observer, event)
@@ -527,14 +547,14 @@ index 0000000000000000000000000000000000000000..ef3df7c98b3214ed5d4a7ce249ca6fcf
 +}
 +
 +func validInputAuditSnapshot(snapshot pluginapi.InputAuditSnapshot) bool {
-+	if snapshot.Version != 2 {
++	if snapshot.Version != 3 {
 +		return false
 +	}
 +	switch snapshot.Decision {
 +	case "capture":
-+		// Contract v2 fixes the audit-copy ceiling at 64 KiB; generation binds the original collector lifetime.
++		// Contract v3 samples a bounded configurable limit; generation binds the original collector lifetime.
 +		generation, errGeneration := hex.DecodeString(snapshot.CollectorGeneration)
-+		return snapshot.MaxTextBytes == 64<<10 && errGeneration == nil && len(generation) == 16
++		return snapshot.MaxTextBytes >= 1 && snapshot.MaxTextBytes <= 64<<10 && errGeneration == nil && len(generation) == 16
 +	case "skip", "unavailable":
 +		if snapshot.CollectorGeneration == "" {
 +			return snapshot.MaxTextBytes == 0
@@ -582,7 +602,6 @@ index 0000000000000000000000000000000000000000..ef3df7c98b3214ed5d4a7ce249ca6fcf
 +	}
 +}
 diff --git a/internal/pluginhost/rpc_client.go b/internal/pluginhost/rpc_client.go
-index 96e3785d25963a40c676f3b4ae20c08339c09090..8a67f07062f0bb2f330de46e0a2e431a7f6d7d0c 100644
 --- a/internal/pluginhost/rpc_client.go
 +++ b/internal/pluginhost/rpc_client.go
 @@ -1,3 +1,4 @@
@@ -590,7 +609,7 @@ index 96e3785d25963a40c676f3b4ae20c08339c09090..8a67f07062f0bb2f330de46e0a2e431a
  package pluginhost
  
  import (
-@@ -8,6 +9,7 @@ import (
+@@ -8,6 +9,7 @@
  	"io"
  	"net/http"
  	"strings"
@@ -598,18 +617,18 @@ index 96e3785d25963a40c676f3b4ae20c08339c09090..8a67f07062f0bb2f330de46e0a2e431a
  
  	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
  	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-@@ -130,6 +132,10 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
+@@ -129,6 +131,10 @@
+ 	}
  	if resp.Capabilities.RequestNormalizer {
  		plugin.Capabilities.RequestNormalizer = adapter
- 	}
-+	// A v1 observer cannot understand admission snapshots; never send it a v2 body event.
++	}
++	// Observers without snapshot support cannot accept versioned admission events.
 +	if resp.Capabilities.InputAuditObserver && resp.Capabilities.InputAuditSnapshot {
 +		plugin.Capabilities.InputAuditObserver = adapter
-+	}
+ 	}
  	if resp.Capabilities.RequestInterceptor {
  		plugin.Capabilities.RequestInterceptor = adapter
- 	}
-@@ -583,6 +589,25 @@ func (a *rpcPluginAdapter) InterceptStreamChunk(ctx context.Context, req plugina
+@@ -583,6 +589,25 @@
  	})
  }
  
@@ -636,7 +655,6 @@ index 96e3785d25963a40c676f3b4ae20c08339c09090..8a67f07062f0bb2f330de46e0a2e431a
  	callbackID, closeCallback := a.openHostCallbackContext(ctx)
  	defer closeCallback()
 diff --git a/internal/pluginhost/rpc_schema.go b/internal/pluginhost/rpc_schema.go
-index 188ed246c73e7973573f68d9fdda58292723d1c6..8656f189d82f9b6365a9084aaf64a3e4fdd81261 100644
 --- a/internal/pluginhost/rpc_schema.go
 +++ b/internal/pluginhost/rpc_schema.go
 @@ -1,3 +1,4 @@
@@ -644,7 +662,7 @@ index 188ed246c73e7973573f68d9fdda58292723d1c6..8656f189d82f9b6365a9084aaf64a3e4
  package pluginhost
  
  import (
-@@ -33,6 +34,8 @@ type rpcCapabilities struct {
+@@ -33,6 +34,8 @@
  	ExecutorOutputFormats         []string                     `json:"executor_output_formats,omitempty"`
  	RequestTranslator             bool                         `json:"request_translator"`
  	RequestNormalizer             bool                         `json:"request_normalizer"`
@@ -653,7 +671,7 @@ index 188ed246c73e7973573f68d9fdda58292723d1c6..8656f189d82f9b6365a9084aaf64a3e4
  	RequestInterceptor            bool                         `json:"request_interceptor"`
  	RequestLifecyclePlugin        bool                         `json:"request_lifecycle_plugin"`
  	ResponseTranslator            bool                         `json:"response_translator"`
-@@ -175,6 +178,8 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
+@@ -175,6 +178,8 @@
  		ExecutorOutputFormats:         append([]string(nil), caps.ExecutorOutputFormats...),
  		RequestTranslator:             caps.RequestTranslator != nil,
  		RequestNormalizer:             caps.RequestNormalizer != nil,
@@ -663,7 +681,6 @@ index 188ed246c73e7973573f68d9fdda58292723d1c6..8656f189d82f9b6365a9084aaf64a3e4
  		RequestLifecyclePlugin:        caps.RequestLifecyclePlugin != nil,
  		ResponseTranslator:            caps.ResponseTranslator != nil,
 diff --git a/sdk/access/registry.go b/sdk/access/registry.go
-index e257f27658dddf942dac59f9f08065c2540ef184..cb48709adce5065c20437d65440ccd4ad487c60b 100644
 --- a/sdk/access/registry.go
 +++ b/sdk/access/registry.go
 @@ -1,3 +1,4 @@
@@ -671,7 +688,7 @@ index e257f27658dddf942dac59f9f08065c2540ef184..cb48709adce5065c20437d65440ccd4a
  package access
  
  import (
-@@ -18,6 +19,8 @@ type Result struct {
+@@ -18,6 +19,8 @@
  	Provider  string
  	Principal string
  	Metadata  map[string]string
@@ -686,7 +703,7 @@ diff --git a/sdk/api/handlers/claude/code_handlers.go b/sdk/api/handlers/claude/
 @@ -63,15 +63,14 @@
  	return modelRegistry.GetAvailableModels("claude")
  }
-
+ 
 -// ClaudeMessages handles Claude-compatible streaming chat completions.
 -// This function implements a sophisticated client rotation and quota management system
 -// to ensure high availability and optimal resource utilization across multiple backend clients.
@@ -706,11 +723,10 @@ diff --git a/sdk/api/handlers/claude/code_handlers.go b/sdk/api/handlers/claude/
  		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{
 diff --git a/sdk/api/handlers/input_audit.go b/sdk/api/handlers/input_audit.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..8b36e4690f3eb9a641c2586dd9788100723a079d
 --- /dev/null
 +++ b/sdk/api/handlers/input_audit.go
-@@ -0,0 +1,70 @@
-+// This file binds authenticated admission decisions to the later original HTTP protocol body observation.
+@@ -0,0 +1,120 @@
++// This file binds native authentication to original HTTP bodies and individual WebSocket submissions.
 +package handlers
 +
 +import (
@@ -724,11 +740,13 @@ index 0000000000000000000000000000000000000000..8b36e4690f3eb9a641c2586dd9788100
 +)
 +
 +type inputAuditEntryKey struct{}
++type inputAuditWebsocketKey struct{}
 +
 +// InputAuditHost prepares a request-private delivery function from final built-in authentication.
 +// The function binds the original observer and admission decision without retaining credentials.
 +type InputAuditHost interface {
 +	PrepareInputAudit(context.Context, string, pluginapi.InputAuditEvent) func(context.Context, []byte, bool)
++	BindInputAuditIdentity(string) func(context.Context, pluginapi.InputAuditEvent) func(context.Context, []byte, bool)
 +}
 +
 +// WithInputAuditEntry synchronously freezes admission before the handler can read the submitted body.
@@ -759,6 +777,54 @@ index 0000000000000000000000000000000000000000..8b36e4690f3eb9a641c2586dd9788100
 +	return host.PrepareInputAudit(ctx, principal, event)
 +}
 +
++// WithInputAuditWebsocket binds the final native identity without preparing a connection-wide snapshot.
++// principal comes from authentication; host returns a factory retaining only opaque identity.
++// Returns a derived context; identity failures and ordinary panics fail open without changing the handshake.
++func WithInputAuditWebsocket(ctx context.Context, principal string, host InputAuditHost) (bound context.Context) {
++	bound = ctx
++	if host == nil {
++		return bound
++	}
++	defer func() {
++		if recover() != nil {
++			log.Warn("input audit websocket identity unavailable")
++		}
++	}()
++	prepare := host.BindInputAuditIdentity(principal)
++	if prepare != nil {
++		bound = context.WithValue(ctx, inputAuditWebsocketKey{}, prepare)
++	}
++	return bound
++}
++
++// ObserveInputAuditWebsocket observes one complete client frame before queuing or business normalization.
++// ctx supplies authenticated identity; body is borrowed until return and readError omits all partial bytes.
++// Each message has its own host UUID, receive time and current snapshot; ordinary audit failures fail open.
++func ObserveInputAuditWebsocket(ctx context.Context, body []byte, readError bool) {
++	prepare, ok := ctx.Value(inputAuditWebsocketKey{}).(func(context.Context, pluginapi.InputAuditEvent) func(context.Context, []byte, bool))
++	if !ok {
++		return
++	}
++	defer func() {
++		if recover() != nil {
++			log.Warn("input audit websocket observer panic")
++		}
++	}()
++	id, errUUID := uuid.NewRandom()
++	if errUUID != nil {
++		log.Warn("input audit websocket entry unavailable")
++		return
++	}
++	event := pluginapi.InputAuditEvent{ID: id.String(), ReceivedAt: time.Now().UTC(), Protocol: "responses-websocket"}
++	delivery := prepare(ctx, event)
++	if delivery != nil {
++		if readError {
++			body = nil
++		}
++		delivery(ctx, body, readError)
++	}
++}
++
 +// ObserveInputAudit passes the body to the delivery state prepared at authenticated entry.
 +// c supplies the request context; readError omits partial bytes. Returns nothing and never changes the response.
 +// Missing decisions or ordinary observer panics fail open rather than sampling current configuration.
@@ -781,10 +847,9 @@ index 0000000000000000000000000000000000000000..8b36e4690f3eb9a641c2586dd9788100
 +	delivery(c.Request.Context(), body, readError)
 +}
 diff --git a/sdk/api/handlers/openai/openai_handlers.go b/sdk/api/handlers/openai/openai_handlers.go
-index 4077ee5b8c1cd502128e417638cd1817e41139b6..a97a65b928999debd7f1cf14d7c02e7bd62f7ff3 100644
 --- a/sdk/api/handlers/openai/openai_handlers.go
 +++ b/sdk/api/handlers/openai/openai_handlers.go
-@@ -116,6 +116,9 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
+@@ -116,6 +116,9 @@
  //   - c: The Gin context containing the HTTP request and response
  func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
  	rawJSON, err := handlers.ReadRequestBody(c)
@@ -797,7 +862,7 @@ index 4077ee5b8c1cd502128e417638cd1817e41139b6..a97a65b928999debd7f1cf14d7c02e7b
 diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/handlers/openai/openai_responses_handlers.go
 --- a/sdk/api/handlers/openai/openai_responses_handlers.go
 +++ b/sdk/api/handlers/openai/openai_responses_handlers.go
-@@ -600,6 +600,9 @@
+@@ -601,6 +601,9 @@
  //   - c: The Gin context containing the HTTP request and response
  func (h *OpenAIResponsesAPIHandler) Responses(c *gin.Context) {
  	rawJSON, err := handlers.ReadRequestBody(c)
@@ -807,16 +872,52 @@ diff --git a/sdk/api/handlers/openai/openai_responses_handlers.go b/sdk/api/hand
  	// If data retrieval fails, return a 400 Bad Request error.
  	if err != nil {
  		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{
-@@ -628,6 +631,7 @@
+@@ -627,6 +630,7 @@
+ 
  func (h *OpenAIResponsesAPIHandler) Compact(c *gin.Context) {
  	rawJSON, err := handlers.ReadRequestBody(c)
 +	h.ObserveInputAudit(c, rawJSON, err != nil)
  	if err != nil {
  		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{
  			Error: handlers.ErrorDetail{
- 				Message: fmt.Sprintf("Invalid request: %v", err),
+diff --git a/sdk/api/handlers/openai/openai_responses_websocket_input.go b/sdk/api/handlers/openai/openai_responses_websocket_input.go
+--- a/sdk/api/handlers/openai/openai_responses_websocket_input.go
++++ b/sdk/api/handlers/openai/openai_responses_websocket_input.go
+@@ -1,3 +1,4 @@
++// This file reads downstream frames once, before audit observation, queuing and business normalization.
+ package openai
+ 
+ import (
+@@ -14,6 +15,7 @@
+ 
+ 	"github.com/gorilla/websocket"
+ 	"github.com/router-for-me/CLIProxyAPI/v8/internal/interfaces"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/api/handlers"
+ 	coreauth "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/auth"
+ 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v8/sdk/cliproxy/executor"
+ 	"github.com/tidwall/gjson"
+@@ -88,12 +90,20 @@
+ 		for {
+ 			kind, payload, errRead := conn.ReadMessage()
+ 			if errRead != nil {
++				// A received prefix is not a completed submission. Ordinary idle disconnects
++				// have no payload; only interrupted messages produce a read diagnostic.
++				if len(payload) > 0 {
++					handlers.ObserveInputAuditWebsocket(ctx, nil, true)
++				}
+ 				cancel(errRead)
+ 				return
+ 			}
+ 			if kind != websocket.TextMessage && kind != websocket.BinaryMessage {
+ 				continue
+ 			}
++			// Observe before the queue: both the handler and Codex duplex consume it,
++			// and later disconnects or configuration changes must not alter received submissions.
++			handlers.ObserveInputAuditWebsocket(ctx, payload, false)
+ 			// Control frames bypass response.create normalization. The original
+ 			// response_id, mode, and extension fields must reach upstream unchanged.
+ 			if json.Valid(payload) && gjson.GetBytes(payload, "type").String() == "response.interrupt" {
 diff --git a/sdk/pluginabi/types.go b/sdk/pluginabi/types.go
-index e79fd8c16fe73dbad1ac9f38ec7900167740c455..ebae42a5a512766dde42befd0ad734e408cfd83e 100644
 --- a/sdk/pluginabi/types.go
 +++ b/sdk/pluginabi/types.go
 @@ -1,3 +1,4 @@
@@ -824,29 +925,28 @@ index e79fd8c16fe73dbad1ac9f38ec7900167740c455..ebae42a5a512766dde42befd0ad734e4
  package pluginabi
  
  import "encoding/json"
-@@ -76,6 +77,15 @@ const (
+@@ -75,6 +76,15 @@
+ 	MethodResponseInterceptStreamChunk = "response.intercept_stream_chunk"
  
  	MethodWebSocketResponseEvent = "websocket.response_event"
- 
-+	// MethodInputAuditPrepare freezes a v2 admission decision without providing the submitted body.
++
++	// MethodInputAuditPrepare freezes a v3 admission decision without providing the submitted body.
 +	MethodInputAuditPrepare = "input_audit.prepare"
-+	// MethodInputAuditObserve delivers a read-only input-audit contract v2 event and its admission snapshot.
++	// MethodInputAuditObserve delivers a read-only input-audit contract v3 event and its admission snapshot.
 +	MethodInputAuditObserve = "input_audit.observe"
 +	// MethodHostInputAuditCapabilities discovers the independent audit contract and safe state directory.
 +	MethodHostInputAuditCapabilities = "host.input_audit.capabilities"
 +	// MethodHostInputAuditCatalog lists opaque identities for current built-in inline configuration keys.
 +	MethodHostInputAuditCatalog = "host.input_audit.catalog"
-+
+ 
  	MethodThinkingIdentifier = "thinking.identifier"
  	MethodThinkingApply      = "thinking.apply"
- 
 diff --git a/sdk/pluginapi/input_audit.go b/sdk/pluginapi/input_audit.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..556002ae6eff1085ccba4fdf326f2b6ecfafcfb2
 --- /dev/null
 +++ b/sdk/pluginapi/input_audit.go
 @@ -0,0 +1,60 @@
-+// This file defines the independent v2 read-only input-audit contract without changing ABI or schema versions.
++// This file defines the independent v3 read-only input-audit contract without changing ABI or schema versions.
 +package pluginapi
 +
 +import (
@@ -855,7 +955,7 @@ index 0000000000000000000000000000000000000000..556002ae6eff1085ccba4fdf326f2b6e
 +	"time"
 +)
 +
-+// InputAuditSnapshot is a bounded admission decision captured before reading the submitted body.
++// InputAuditSnapshot freezes HTTP admission before body reading or WebSocket admission at complete message receipt.
 +// Missing versions or unknown decisions are failures, never implicit permission to capture.
 +type InputAuditSnapshot struct {
 +	Version             int    `json:"version"`
@@ -899,7 +999,7 @@ index 0000000000000000000000000000000000000000..556002ae6eff1085ccba4fdf326f2b6e
 +	return json.Marshal(wire)
 +}
 +
-+// InputAuditObserver prepares a bounded v2 decision and receives an isolated authenticated submission.
++// InputAuditObserver prepares a bounded v3 decision and receives an isolated authenticated submission.
 +// PrepareInputAudit reads only admission configuration; ObserveInputAudit cannot change execution.
 +// Delivery errors and ordinary panics fail open; native process faults are outside this guarantee.
 +type InputAuditObserver interface {
@@ -907,14 +1007,13 @@ index 0000000000000000000000000000000000000000..556002ae6eff1085ccba4fdf326f2b6e
 +	ObserveInputAudit(context.Context, InputAuditEvent) error
 +}
 diff --git a/sdk/pluginapi/types.go b/sdk/pluginapi/types.go
-index 6060977886cd9c24d5493dc873c9ba1858af5ac8..b0a11ba693ca0b45abe32c4adeed96bf354573a4 100644
 --- a/sdk/pluginapi/types.go
 +++ b/sdk/pluginapi/types.go
-@@ -108,6 +108,8 @@ type Capabilities struct {
+@@ -108,6 +108,8 @@
  	ResponseBeforeTranslator ResponseNormalizer
  	// ResponseAfterTranslator normalizes translated responses before delivery.
  	ResponseAfterTranslator ResponseNormalizer
-+	// InputAuditObserver freezes v2 admission and receives isolated, read-only authenticated HTTP protocol inputs.
++	// InputAuditObserver freezes v3 admission and receives isolated HTTP bodies or individual WebSocket inputs.
 +	InputAuditObserver InputAuditObserver
  	// RequestInterceptor rewrites execution requests before and after credential selection.
  	RequestInterceptor RequestInterceptor

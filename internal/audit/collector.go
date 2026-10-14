@@ -63,6 +63,7 @@ type Status struct {
 	Gaps          map[string]uint64 `json:"gaps"`
 	UsedBytes     int64             `json:"used_bytes"`
 	BudgetBytes   int64             `json:"budget_bytes"`
+	MaxTextBytes  int               `json:"max_text_bytes"`
 }
 
 // Collector 是审计深模块；所有存储、队列、解析和缺口诊断均由它管理。
@@ -117,7 +118,7 @@ func Open(dir string, budget int64) (*Collector, error) {
 	if err != nil {
 		return nil, errors.New("storage_unavailable")
 	}
-	c := &Collector{root: root, generation: hex.EncodeToString(generation[:]), config: configuration{Version: 2, Objects: make(map[string]Object)}, queue: make(chan queuedRecord, 64), done: make(chan struct{}), status: Status{Available: true, State: "active", BudgetBytes: budget, Gaps: map[string]uint64{}}}
+	c := &Collector{root: root, generation: hex.EncodeToString(generation[:]), config: configuration{Version: 2, MaxTextBytes: maxText, Objects: make(map[string]Object)}, queue: make(chan queuedRecord, 64), done: make(chan struct{}), status: Status{Available: true, State: "active", BudgetBytes: budget, Gaps: map[string]uint64{}}}
 	for _, key := range []string{"read_error", "invalid_event", "invalid_json", "unsupported_protocol", "unsupported_content", "metadata_too_large", "queue_full", "storage_error", "budget_exhausted", "observer_unavailable"} {
 		c.status.Gaps[key] = 0
 	}
@@ -129,14 +130,14 @@ func Open(dir string, budget int64) (*Collector, error) {
 	return c, nil
 }
 
-// Observe 按 event 的接收快照同步提取三协议 HTTP 本次允许输入并非阻塞入队，不复核当前名单或主动暂停。
+// Observe 按 event 的接收快照同步提取三协议 HTTP 或 Responses WebSocket 本次允许输入并非阻塞入队，不复核当前配置。
 // 无返回值，解析及容量失败仅增加固定缺口诊断，不影响宿主请求；Body 不进入采集器。
 func (c *Collector) Observe(event Event) {
 	c.mu.Lock()
 	accepting := !c.closed && c.status.State == "active"
 	generation := c.generation
 	c.mu.Unlock()
-	if event.Snapshot.Version != 2 || event.Snapshot.CollectorGeneration != generation {
+	if event.Snapshot.Version != 3 || event.Snapshot.CollectorGeneration != generation {
 		c.gap("observer_unavailable")
 		return
 	}
@@ -160,7 +161,7 @@ func (c *Collector) Observe(event Event) {
 		c.gap("invalid_event")
 		return
 	}
-	if !supportedHTTPProtocol(event.Protocol) {
+	if !supportedProtocol(event.Protocol) {
 		c.gap("unsupported_protocol")
 		return
 	}
@@ -172,7 +173,26 @@ func (c *Collector) Observe(event Event) {
 	}
 	var text string
 	var truncated, incomplete bool
-	if event.Protocol == "responses" {
+	if event.Protocol == "responses" || event.Protocol == "responses-websocket" {
+		if event.Protocol == "responses-websocket" {
+			var kind string
+			if json.Unmarshal(request["type"], &kind) != nil {
+				c.gap("unsupported_content")
+				return
+			}
+			switch kind {
+			case "response.create", "response.append", "response.steer":
+				// 后续帧可能只依赖宿主已有上下文，不能把恢复内容当作本次新输入。
+				if _, explicit := request["input"]; !explicit {
+					return
+				}
+			case "response.interrupt", "response.cancel":
+				return
+			default:
+				c.gap("unsupported_content")
+				return
+			}
+		}
 		text, truncated, incomplete = responsesContent(request["input"], event.Snapshot.MaxTextBytes)
 	} else {
 		var messages []json.RawMessage
@@ -207,7 +227,8 @@ func (c *Collector) Observe(event Event) {
 		// 一次提交只计一次提取缺口；仍允许安全部分入队，不把未知内容归为空输入。
 		c.gap("unsupported_content")
 	}
-	if text == "" {
+	// 上限可能容不下首个UTF-8字符或占位符；空的截断前缀仍是非空提交，必须显示截断状态。
+	if text == "" && !truncated {
 		return
 	}
 	// 路由前的缺失/不可靠模型不妨碍记录新输入；空值由管理层显示“未知”，不从其他字段猜测。
@@ -248,6 +269,7 @@ func (c *Collector) Status() Status {
 	defer c.mu.Unlock()
 	result := c.status
 	result.CapturePaused = c.config.CapturePaused
+	result.MaxTextBytes = c.config.MaxTextBytes
 	result.Gaps = make(map[string]uint64, len(c.status.Gaps))
 	for key, value := range c.status.Gaps {
 		result.Gaps[key] = value
@@ -327,9 +349,9 @@ func protocolObject(raw []byte) (map[string]json.RawMessage, error) {
 	return fields, nil
 }
 
-// supportedHTTPProtocol 同时限定入站与持久化读取，避免新增协议能采集却在重启时被判为损坏。
-func supportedHTTPProtocol(protocol string) bool {
-	return protocol == "chat-completions" || protocol == "responses" || protocol == "anthropic-messages"
+// supportedProtocol 同时限定入站与持久化读取，避免新增协议能采集却在重启时被判为损坏。
+func supportedProtocol(protocol string) bool {
+	return protocol == "chat-completions" || protocol == "responses" || protocol == "anthropic-messages" || protocol == "responses-websocket"
 }
 
 func validObjectID(id string) bool {

@@ -1,10 +1,10 @@
 # CPA 请求输入审计：最小安全闭环
 
-本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)、[ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md)、[ticket 03](.scratch/request-input-audit/issues/03-chat-input-boundaries.md)、[ticket 04](.scratch/request-input-audit/issues/04-responses-http.md)、[ticket 05](.scratch/request-input-audit/issues/05-anthropic-messages.md) 与 [ticket 06](.scratch/request-input-audit/issues/06-http-request-once.md) 的本地验收范围，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
+本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)、[ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md)、[ticket 03](.scratch/request-input-audit/issues/03-chat-input-boundaries.md)、[ticket 04](.scratch/request-input-audit/issues/04-responses-http.md)、[ticket 05](.scratch/request-input-audit/issues/05-anthropic-messages.md) 、[ticket 06](.scratch/request-input-audit/issues/06-http-request-once.md) 与 [ticket 07](.scratch/request-input-audit/issues/07-responses-websocket.md) 的本地验收范围，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
 
 ## 已实现范围
 
-- 固定官方 commit `bf9341629ef2300ac9d846a2e80fe2756f63a671`，保持 C ABI 1 / RPC schema 6，新增独立只读观察契约 2；旧契约不静默降级。
+- 固定官方 commit `bf9341629ef2300ac9d846a2e80fe2756f63a671`，保持 C ABI 1 / RPC schema 6，独立只读观察契约升级为 3，要求三种 HTTP 与 Responses WebSocket 接入齐备；旧契约不静默降级。
 - 宿主在最终内置客户端 Key 鉴权后、handler 读体前同步冻结本次提交的无秘密身份与采集决策；读体后、业务改写及模型路由前只读观察，不重新按名单或主动暂停决定资格。不是 usage queue 或执行请求拦截器。
 - 宿主随机 seed + HMAC-SHA-256 产生稳定无秘密对象 ID；不同 Key 分开，目录和认证采用同一算法，不依赖配置下标/名称。标识不能登录。
 - 默认监控名单为空。管理员选择 ID 并命名、仅改名、移除或重新加入；名称仅在对象目录保存，旧/新记录显示当前名称。同 Key 重返名单沿用历史，不同 Key 即使同名也独立。不粘贴原客户端 Key，不改变宿主 Key 配置。
@@ -13,9 +13,9 @@
 - 仅判断 Chat Completions 最后一条显式消息；连续 `user` 只取最后一条，不跨消息拼接。末尾 `assistant` / `tool` / `function` / `system` / `developer` 正常跳过，不回找旧用户发言。
 - 选中 `user.content` 支持字符串或内容数组：`text` 原样保存；`image_url`、`input_audio`、`video_url`、`file` 的对应非 null 对象载荷仅生成 `[图片]`、`[音频]`、`[视频]`、`[文件]`。按原顺序直接组合，不保存附件载荷、文件名、URL、Base64 或引用标识。`tool_call` / `tool_use` / `tool_result` 整块排除，不递归提取嵌套内容。
 - 未知/畸形块不序列化：安全部分保存并标记 `extraction_incomplete`，每次提交增加一次 `unsupported_content` 缺口；完全无法安全提取则只报缺口。缺失字段、重复键和大小写别名不静默回退为完整输入，也不保存整请求兜底。空字符串、显式 `null`、空数组、仅合法空文本或工具块正常跳过，空白文本不 trim。
-- 文本与占位符合计最多 64 KiB UTF-8 安全前缀，不含元数据；恰好上限不误报，首次字符越界后不再拼后续短块。只截断审计副本，列表和详情分别显示截断/提取不完整，两种状态可同时存在。请求模型缺失/非字符串时记为未知，不猜测。普通文本里的 URL、秘密、Base64 **不会自动脱敏**。
+- 文本与占位符默认合计最多 64 KiB UTF-8 安全前缀，可在受保护设置/页面改为1–65536字节，只影响后续提交快照；历史和已接收副本不追溯重截断，不含元数据；恰好上限不误报，首次字符越界后不再拼后续短块。只截断审计副本，列表和详情分别显示截断/提取不完整，两种状态可同时存在。请求模型缺失/非字符串时记为未知，不猜测。普通文本里的 URL、秘密、Base64 **不会自动脱敏**。
 - Responses HTTP 覆盖标准、compact 与 Codex direct 别名 POST 入口；GET WebSocket 握手不观察。字符串 `input` 是本次用户文本，结构化列表只取末尾明确 `user` 消息（`type` 省略或为 `message`），不回找/拼接历史。`input_text` 原样提取；`input_image`、`input_file`、固定宿主支持的 `input_audio` 和 `input_video` 只留占位符。已知工具/模型生成项整体排除，未知项与无法判断的 `item_reference` 报解析缺口，不解析引用。
-- `previous_response_id` 不参与历史回查或持久化，显式重发独立记录；客户端请求模型先于路由及上游别名映射提取，不从回复补猜。宿主 capabilities 必须显式声明三种 HTTP 协议，缺少任一接入点的旧 contract v2 宿主也拒绝采集，不静默显示全覆盖。
+- `previous_response_id` 不参与历史回查或持久化，显式重发独立记录；客户端请求模型先于路由及上游别名映射提取，不从回复补猜。宿主 capabilities 必须显式声明三种 HTTP 协议及 `responses-websocket`，契约版本不是3或缺少任一接入点均拒绝采集，不静默显示全覆盖。
 - Anthropic Messages 在 `/v1/messages` 认证后、模型 DD 名称改写/协议转换/路由之前观察原始消息。末尾连续 `user` 只取最后一条；纯 `tool_result` 正常跳过，混合消息只提取新 `text` 和固定附件占位符，不提取工具结果内嵌文本、图片、文件或引用。`image` 只留 `[图片]`，`document`（包括 text/content 来源）只留 `[文件]`；未知类型/来源报告提取不完整或解析缺口，不猜测其他协议的内容类型。
 - 64 条 / 8 MiB 有界副本队列，约 1 MiB 分段 JSONL，写入并同步成功后才允许管理查询；入队不等于保存。
 - 默认总预算 1 GiB，合法启动预算 4 MiB–1 GiB；保守核算整个专用目录及辅助文件，预留 1 MiB 配置更新等维护空间。满额停采，不覆盖或删除旧记录。
@@ -24,7 +24,7 @@
 
 ## 未完成与风险
 
-尚无上述白名单以外的内容类型、Responses WebSocket、三协议完整 SSE/重试/断开回归矩阵、组合搜索、七天过期清理、动态预算管理、满额自动恢复、异常退出恢复、完整缺口历史或 Linux 双架构运行验收。**已保存输入目前不会自动到期清理。** 当前实现最小闭环、配置生命周期、三种 HTTP 输入提取与 Chat HTTP 一次提交机制验收；暂停、移除不会改变接收时间或删除历史，保留期限/清理由后续票完成，正常重启不等于异常恢复 ticket 11 已完成。
+尚无上述白名单以外的内容类型、三协议完整 SSE/重试/断开回归矩阵、组合搜索、七天过期清理、动态预算管理、满额自动恢复、异常退出恢复、完整缺口历史或 Linux 双架构运行验收。**已保存输入目前不会自动到期清理。** 当前实现最小闭环、配置生命周期、三种 HTTP 输入提取、Chat HTTP 一次提交机制及 Responses WebSocket 消息级审计；暂停、移除不会改变接收时间或删除历史，保留期限/清理由后续票完成，正常重启不等于异常恢复 ticket 11 已完成。
 
 应用层不加密。专用目录为 `0700`、文件为 `0600`，仍需保护主机、磁盘、快照和备份。没有安全擦除或 native 进程崩溃隔离保证；常规解析/队列/存储错误 fail-open，不代表零丢失、零延迟或吞吐承诺。诊断是有界运行期原因码和已知计数，不是完整可恢复缺口历史。
 
@@ -94,9 +94,9 @@ go build -o .build/bin/audit-demo ./cmd/audit-demo
 
 固定官方管理前端为 `v1.26.2`，摘要见 `host/management-ui.json`。复用的 `cli-proxy-auth` 状态格式是此版本的兼容契约，不声称官方有临时 token 桥或未来前端自动兼容。插件不新增凭据持久化；宿主管理前端自身的“记住密码”行为不由插件改变。
 
-自动验收只需 `make browser`：构建固定宿主/插件及 demo、核对管理页面、启动真实实例、运行三个场景各两轮并停止进程，不依赖 MCP。已有构建产物时可用 `make browser-run`。启动 JSON 只有健康检查通过后才发 `ready`，失败/超时有明确退出；runner 不保存子进程 stderr 原文或 Playwright 可能含凭据的调用日志，只报告固定阶段/原因和本项目场景行号。
+自动验收只需 `make browser`：构建固定宿主/插件及 demo、核对管理页面、启动真实实例、运行四个场景各两轮并停止进程，不依赖 MCP。已有构建产物时可用 `make browser-run`。启动 JSON 只有健康检查通过后才发 `ready`，失败/超时有明确退出；runner 不保存子进程 stderr 原文或 Playwright 可能含凭据的调用日志，只报告固定阶段/原因和本项目场景行号。
 
-场景位于 `tests/browser/smoke.js`、`tests/browser/truncation.js`、`tests/browser/lifecycle.js`。分别验证菜单与纯文本安全展示、65,535字节截断标签/提取不完整/双状态及可见缺口、Responses 协议与请求模型/未知模型展示、Anthropic 工具混合输入与原协议/双状态展示，以及页面改名、移除后历史筛选、同Key重新加入、主动暂停/恢复。同一宿主连续两轮且每次使用唯一标记/记录 ID，旧数据不能冒充本轮通过。有限证据保存在 `.test-data/verification-*/result.json` 和状态标签截图；没有成功验收的结果不会报告为通过。
+场景位于 `tests/browser/smoke.js`、`tests/browser/truncation.js`、`tests/browser/lifecycle.js` 与 `tests/browser/responses-websocket.js`。分别验证菜单与纯文本安全展示、65,535字节截断标签/提取不完整/双状态及可见缺口、Responses 协议与请求模型/未知模型展示、Anthropic 工具混合输入与原协议/双状态展示，以及页面改名、移除后历史筛选、同Key重新加入、主动暂停/恢复；WebSocket 场景在同连接提交五次，验证逐条详情、协议与独立状态、上限改为7字节/刷新/拒绝非法值/恢复默认且不追溯改旧正文。同一宿主连续两轮且每次使用唯一标记/记录 ID，旧数据不能冒充本轮通过。有限证据保存在 `.test-data/verification-*/result.json` 和状态标签截图；没有成功验收的结果不会报告为通过。
 
 浏览器环境使用精确版本 Playwright 和明确的 `zh-CN` locale，匹配固定管理前端；不宣称所有浏览器/语言/未来前端已验证。验收责任与工作区审查的项目约定见 `docs/agents/verification.md`；个人技能文件不修改。
 
@@ -136,7 +136,7 @@ make test-one TEST='TestAnthropic'
 make browser-run
 ```
 
-Anthropic 本票未宣称该协议的重试/断开完整矩阵、Responses WebSocket、其他平台或后续票据已完成。
+Anthropic 本票未宣称该协议的重试/断开完整矩阵、其他平台或后续票据已完成；Responses WebSocket 单独见下节 ticket 07 验收。
 
 ## HTTP 一次提交语义验收
 
@@ -159,6 +159,21 @@ make build
 make test-one TEST='TestHTTPOnce'
 ```
 
+## Responses WebSocket 消息级验收
+
+`tests/system/responses_websocket*_test.go` 在标准和 Codex direct GET 入口使用真实 WebSocket 客户端、真实宿主与原生插件、受保护管理 API、本地 Chat SSE/Codex WebSocket 上游。每个完整 Text/Binary 帧在共同 reader 的输入队列之前观察；普通 handler 和 Codex duplex 后续 `response.create`、`response.append`、带业务 `input` 的 `response.steer` 都覆盖。提交使用独立宿主 ID 和服务端时间，握手不产生记录、不冻结监控配置；名字、名单、暂停和1–65536字节上限在同连接下一提交生效。原生 Key 移除拒绝新的鉴权，但不为审计改变已有连接的原认证语义。
+
+审计只提取原帧本次显式 `input`，不恢复历史、不查询 `previous_response_id`、不记录工具续跑；未显式传模型时显示未知。`generate:false` 预热带有显式输入时仍记录，宿主后续恢复的空续跑不再采集。普通 fallback 原本拒绝字符串 input，审计不改变该拒绝；原生 duplex 的字符串 steering 可转发。未知/歧义事件仅报告固定缺口，已知控制/取消不记录；收到非终帧前缀后断开只报 `read_error`、不保存前缀。
+
+公开上游和事件证明：实际历史合并/预热恢复没有扩大审计正文；首 token 前内部重试仍只保存一次；活跃上游阻塞时后续帧已取得快照并保存，随后的暂停/上限变更不追溯影响旧副本；真实首 token 后 interrupt 与断开取消上游但保留记录。普通 HTTP fallback 及原生 duplex/steering 的审计开关对照逐次比较上游请求字节与公开事件，截断/未知块及真实目录权限故障不改变模型执行。隔离存储全字段白名单与诊断禁存标记扫描不只检查管理 API。
+
+```bash
+make test-one TEST='TestResponsesWebsocket|TestSettings'
+make browser-run
+```
+
+管理页面复用原列表/单条详情，`responses-websocket` 显示为 Responses WebSocket，截断和提取不完整独立标记。浏览器四场景各两轮，仅保存有限状态截图/结果。当前仅 macOS arm64 实际运行验收；完整保留期、异常恢复、Linux 双架构与三协议最终失败矩阵仍由后续票执行，未宣称完整第一版已交付。
+
 ## 管理 API
 
 全部动态接口要求**宿主管理鉴权**；匿名、普通客户端 Key 和对象 ID 都不能读取。以下路径由官方 native 管理注册合同托管，并非第二套账号系统。
@@ -170,6 +185,8 @@ make test-one TEST='TestHTTPOnce'
 | POST | `/rename` | 相同参数；仅更新已知对象的当前名称，不改启用状态，允许无效 Key 的历史对象 |
 | POST | `/remove` | `{"object_id":"64hex"}`；停用后续采集，不删除名称或历史 |
 | POST | `/pause` | `{"paused":true}` 或 `false`；成功提交不解除既有存储故障；保存失败可能新增存储故障 |
+| GET | `/settings` | 当前单条正文上限 `max_text_bytes`，默认65536 |
+| POST | `/settings` | `{"max_text_bytes":1..65536}`；精确唯一字段、整数，只影响之后的提交快照 |
 | GET | `/records?offset=0&limit=20&object_id=<64hex>` | 可选对象精确筛选；分页前过滤，总数仅统计匹配记录，`limit`为1–100 |
 | GET | `/detail?id=<recordID>` | 独立记录正文和白名单元数据 |
 | GET | `/status` | 实时观察契约状态和基础采集诊断 |
@@ -178,7 +195,7 @@ make test-one TEST='TestHTTPOnce'
 
 记录只持久化：`id`、`object_id`、`received_at`、`protocol`、`model`、`text`、`truncated` 和为 true 时的 `extraction_incomplete`。列表/详情显式返回两种布尔标记；旧记录缺失不完整字段按 false 读取，不重写历史正文。名称存在对象配置中，查询时关联，不逐条快照保存。配置、状态和新增诊断不能包含原认证 Key、历史、指令、工具数据、模型回复、请求头、完整 URL 或上游账号。
 
-对象配置采用版本化 `monitors.json`，兼容旧 `map[id]name`；旧格式在下一次成功修改时升级，不在启动时擅自改写。损坏、未知版本、歧义字段或超限配置会明确停采，不能以管理操作覆盖成空名单。新配置也纳入总目录预算；没有删除已知对象的管理功能。配置保存失败不发布本轮内存变更，但替换文件后的目录同步/扫描失败不能保证磁盘回滚：会停采，重启可能加载已替换值，管理员应核对结果，不把错误响应理解成必然维持旧磁盘配置。
+对象及上限配置采用版本化 `monitors.json`，包含 `max_text_bytes`；兼容旧 `map[id]name` 和未含上限的version2配置，读取默认65536；旧格式在下一次成功修改时升级，不在启动时擅自改写。损坏、未知版本、歧义字段或超限配置会明确停采，不能以管理操作覆盖成空名单。新配置也纳入总目录预算；没有删除已知对象的管理功能。配置保存失败不发布本轮内存变更，但替换文件后的目录同步/扫描失败不能保证磁盘回滚：会停采，重启可能加载已替换值，管理员应核对结果，不把错误响应理解成必然维持旧磁盘配置。
 
 接收快照不持久化。请求只携带固定小决策、上限与随机采集器代际，不保存待提交映射或旧配置副本；观察者替换/采集器重开导致旧快照失效，属于能力故障，不伪装为主动暂停。普通关闭、存储或容量故障仍可能丢失副本，不承诺零丢失。宿主准备/投递桥接的可恢复错误、无效快照及旧实例失效使用实例内有界饱和计数，管理状态合并到 `gaps.observer_unavailable` 并在无活动故障时保留 `observer_bridge_error` 提示（已有存储故障原因优先展示）；后续成功不抹去历史计数，正常重启会重置该运行期计数，不冒充完整可恢复缺口历史。
 

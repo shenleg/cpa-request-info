@@ -2,9 +2,11 @@
 package native
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"path/filepath"
 	"slices"
@@ -62,7 +64,7 @@ func (a *App) Handle(method string, raw []byte) (any, error) {
 		return struct {
 			Routes    []route    `json:"routes"`
 			Resources []resource `json:"resources"`
-		}{[]route{{"GET", "/plugins/request-input-audit/objects"}, {"POST", "/plugins/request-input-audit/monitor"}, {"POST", "/plugins/request-input-audit/remove"}, {"POST", "/plugins/request-input-audit/rename"}, {"POST", "/plugins/request-input-audit/pause"}, {"GET", "/plugins/request-input-audit/records"}, {"GET", "/plugins/request-input-audit/detail"}, {"GET", "/plugins/request-input-audit/status"}}, []resource{{"/index.html", "输入审计", "Chat Completions、Responses HTTP 与 Anthropic Messages 输入审计"}}}, nil
+		}{[]route{{"GET", "/plugins/request-input-audit/objects"}, {"POST", "/plugins/request-input-audit/monitor"}, {"POST", "/plugins/request-input-audit/remove"}, {"POST", "/plugins/request-input-audit/rename"}, {"POST", "/plugins/request-input-audit/pause"}, {"GET", "/plugins/request-input-audit/settings"}, {"POST", "/plugins/request-input-audit/settings"}, {"GET", "/plugins/request-input-audit/records"}, {"GET", "/plugins/request-input-audit/detail"}, {"GET", "/plugins/request-input-audit/status"}}, []resource{{"/index.html", "输入审计", "Chat Completions、Responses HTTP/WebSocket 与 Anthropic Messages 输入审计"}}}, nil
 	case "management.handle":
 		var req managementRequest
 		if err := json.Unmarshal(raw, &req); err != nil {
@@ -78,7 +80,7 @@ func (a *App) Handle(method string, raw []byte) (any, error) {
 		c, available := a.collector, a.available
 		a.mu.Unlock()
 		if c == nil || !available {
-			return audit.Snapshot{Version: 2, Decision: "unavailable"}, nil
+			return audit.Snapshot{Version: 3, Decision: "unavailable"}, nil
 		}
 		return c.Prepare(event), nil
 	case "input_audit.observe":
@@ -101,9 +103,9 @@ func (a *App) Handle(method string, raw []byte) (any, error) {
 	}
 }
 
-// supportsHTTPAudit 要求三协议接入点齐备，拒绝同契约版本但接入不完整的旧宿主，避免静默漏采。
-func supportsHTTPAudit(protocols []string) bool {
-	return slices.Contains(protocols, "chat-completions") && slices.Contains(protocols, "responses") && slices.Contains(protocols, "anthropic-messages")
+// supportsInputAudit 要求三协议HTTP与Responses消息级接入齐备，拒绝接入不完整的宿主，避免静默漏采。
+func supportsInputAudit(protocols []string) bool {
+	return slices.Contains(protocols, "chat-completions") && slices.Contains(protocols, "responses") && slices.Contains(protocols, "anthropic-messages") && slices.Contains(protocols, "responses-websocket")
 }
 
 func (a *App) configure(raw []byte) {
@@ -133,7 +135,7 @@ func (a *App) configure(raw []byte) {
 		Available       bool     `json:"available"`
 		StateDir        string   `json:"state_dir"`
 	}
-	if err != nil || json.Unmarshal(caps, &capability) != nil || capability.ContractVersion != 2 || !capability.Available || !supportsHTTPAudit(capability.Protocols) {
+	if err != nil || json.Unmarshal(caps, &capability) != nil || capability.ContractVersion != 3 || !capability.Available || !supportsInputAudit(capability.Protocols) {
 		return
 	}
 	dir, err := filepath.Abs(cfg.Dir)
@@ -189,7 +191,7 @@ func (a *App) management(req managementRequest) any {
 			StateDir        string   `json:"state_dir"`
 			BridgeFailures  uint64   `json:"bridge_failures"`
 		}
-		if err != nil || json.Unmarshal(caps, &live) != nil || !live.Available || live.ContractVersion != 2 || !supportsHTTPAudit(live.Protocols) || (dir != "" && live.StateDir != dir) {
+		if err != nil || json.Unmarshal(caps, &live) != nil || !live.Available || live.ContractVersion != 3 || !supportsInputAudit(live.Protocols) || (dir != "" && live.StateDir != dir) {
 			available = false
 			reason = "observer_unavailable"
 		}
@@ -210,7 +212,7 @@ func (a *App) management(req managementRequest) any {
 		if live.BridgeFailures > 0 && reason == "" && collectorReason == "" {
 			reason = "observer_bridge_error"
 		}
-		return responseJSON(200, map[string]any{"available": available, "reason": reason, "supported": "chat-completions-responses-anthropic-http-last-user-content", "supported_protocols": []string{"chat-completions", "responses", "anthropic-messages"}, "responses_websocket": false, "retention": "not_implemented", "state": state})
+		return responseJSON(200, map[string]any{"available": available, "reason": reason, "supported": "chat-completions-responses-anthropic-http-responses-websocket-last-user-content", "supported_protocols": []string{"chat-completions", "responses", "anthropic-messages", "responses-websocket"}, "responses_websocket": true, "retention": "not_implemented", "state": state})
 	}
 	if strings.HasSuffix(req.Path, "/objects") {
 		catalog, catalogErr := a.catalog()
@@ -250,6 +252,22 @@ func (a *App) management(req managementRequest) any {
 	}
 	if c == nil {
 		return responseJSON(503, map[string]string{"error": reason})
+	}
+	if strings.HasSuffix(req.Path, "/settings") {
+		if req.Method == "GET" {
+			return responseJSON(200, map[string]int{"max_text_bytes": c.Status().MaxTextBytes})
+		}
+		if len(req.Body) > 2048 {
+			return responseJSON(400, map[string]string{"error": "invalid_settings"})
+		}
+		limit, err := maxTextBytesSetting(req.Body)
+		if err != nil {
+			return responseJSON(400, map[string]string{"error": "invalid_settings"})
+		}
+		if err := c.SetMaxTextBytes(limit); err != nil {
+			return responseJSON(400, map[string]string{"error": "settings_rejected"})
+		}
+		return responseJSON(200, map[string]bool{"saved": true})
 	}
 	if strings.HasSuffix(req.Path, "/monitor") {
 		if !available {
@@ -353,6 +371,29 @@ func (a *App) management(req managementRequest) any {
 		return responseJSON(200, map[string]any{"id": r.ID, "object_id": r.ObjectID, "name": c.Monitors()[r.ObjectID], "received_at": r.ReceivedAt, "protocol": r.Protocol, "model": r.Model, "truncated": r.Truncated, "extraction_incomplete": r.ExtractionIncomplete, "text": r.Text})
 	}
 	return responseJSON(404, map[string]string{"error": "not_found"})
+}
+
+// maxTextBytesSetting 逐token读取唯一字段，拒绝Go结构体解码默认接受的大小写别名、重复键和额外字段。
+func maxTextBytesSetting(raw []byte) (int, error) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
+		return 0, errors.New("invalid_settings")
+	}
+	if token, err := decoder.Token(); err != nil || token != "max_text_bytes" {
+		return 0, errors.New("invalid_settings")
+	}
+	var limit int
+	if decoder.Decode(&limit) != nil || limit < 1 || limit > 65536 {
+		return 0, errors.New("invalid_settings")
+	}
+	if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
+		return 0, errors.New("invalid_settings")
+	}
+	var trailing any
+	if decoder.Decode(&trailing) != io.EOF {
+		return 0, errors.New("invalid_settings")
+	}
+	return limit, nil
 }
 
 type object struct {

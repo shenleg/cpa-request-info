@@ -84,7 +84,7 @@ async function main(options) {
       report.phase='browser_launch';
       const {chromium}=require('playwright');
       browser=await chromium.launch({headless:true});
-      const scenarios=[['smoke',require('../tests/browser/smoke.js')],['truncation',require('../tests/browser/truncation.js')],['lifecycle',require('../tests/browser/lifecycle.js')]];
+      const scenarios=[['smoke',require('../tests/browser/smoke.js')],['truncation',require('../tests/browser/truncation.js')],['lifecycle',require('../tests/browser/lifecycle.js')],['responses-websocket',require('../tests/browser/responses-websocket.js')]];
       // 同一宿主保留前轮记录，每个场景独立登录；连续两轮锁定“旧记录假通过”的回归。
       for(let round=1;round<=2;round++)for(const [name,scenario] of scenarios) {
         const context=await browser.newContext({locale:'zh-CN',viewport:{width:1200,height:900}});
@@ -107,7 +107,7 @@ async function main(options) {
   } catch(error) {
     if(error.cleanup===false)startupCleanup=false;
     // 只提取本项目场景文件行号，不保存 Playwright 的调用日志（可能包含输入和认证材料）。
-    const source=String(error.stack??'').match(/tests[\\/]browser[\\/](smoke|truncation|lifecycle)\.js:\d+:\d+/);
+    const source=String(error.stack??'').match(/tests[\\/]browser[\\/](smoke|truncation|lifecycle|responses-websocket)\.js:\d+:\d+/);
     if(source)report.location=source[0];
     report.reason=/^(ready_timeout|demo_start_failed|demo_exited_before_ready|ready_output_limit|invalid_ready_url|interrupted)$/.test(error.message)?error.message:'verification_failed';
   } finally {
