@@ -13,6 +13,7 @@
 - 64 条 / 8 MiB 有界副本队列，约 1 MiB 分段 JSONL，写入并同步成功后才允许管理查询；入队不等于保存。
 - 默认总预算 1 GiB，合法启动预算 4 MiB–1 GiB；保守核算整个专用目录及辅助文件，预留 1 MiB 配置更新等维护空间。满额停采，不覆盖或删除旧记录。
 - 宿主插件菜单、无数据静态 shell、受保护对象/选择/状态/列表/详情 API。正文和名称只按纯文本展示，不渲染 HTML/Markdown，不自动加载外部资源。
+- 最近查询页最多保留 100 条记录的分段/偏移位置提示，详情只读取对应已同步行并重新校验；不缓存正文、不建立全量 ID 索引、不新增持久化文件。未命中时仍可扫描查询。
 
 ## 未完成与风险
 
@@ -60,6 +61,8 @@ CI 使用 `macos-15` arm64，复用 `make verify`，权限为 `contents: read`�
 go test ./tests/system -run TestQueueFullPreservesUpstreamAndDrains -count=1 -v
 go test ./tests/system -run 'TestRealENOSPCFailOpen|TestRealReadOnlyVolumeFailOpen' -count=1 -v
 ```
+
+压力夹具使用宿主已有的 `MANAGEMENT_PASSWORD` 环境鉴权入口，仅设置本次合成密码，避免几百次详情查询重复做 bcrypt 淹没队列验收；匿名、客户端 Key 和错误管理密码仍必须被拒绝。普通权限测试保持配置 bcrypt 路径。没有关闭鉴权，也没有给生产代码增加测试后门。
 
 - **队列满**：真实宿主、128 并发、每批 1,024 个 64 KiB 合成提交，最多 4,096 次；必须从受保护管理状态实际看到 `queue_full`，否则测试失败。确认所有模型请求正常到可控上游、输入完整，排空后 `saved + queue_full = 提交数`，查询只展示已保存结果。公开 `queued` 计数包括正在写入的 1 条，因此峰值可为 65，并不表示 64 容量 channel 无界。
 - **ENOSPC**：macOS `hdiutil` 创建全新的 64 MiB HFS+ 镜像，先校验独立设备与容量，再仅在该卷的审计目录之外填充，必须实测得到 `ENOSPC`。随后真实模型调用仍应为 `200`，采集停下且出现 `storage_error`，失败副本不能冒充保存，原已保存记录保留。

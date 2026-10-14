@@ -145,7 +145,14 @@ func TestQueueFullPreservesUpstreamAndDrains(t *testing.T) {
 		_, _ = io.WriteString(w, `{"id":"synthetic-queue-pressure","object":"chat.completion","model":"audit-test-model","choices":[{"index":0,"message":{"role":"assistant","content":"queue-pressure-ok"},"finish_reason":"stop"}]}`)
 	}))
 	defer upstream.Close()
-	h := startHost(t, 1<<30, true, upstream.URL+"/v1")
+	h := startHostWithManagementAuth(t, 1<<30, true, upstream.URL+"/v1", true)
+	// 换用宿主原生环境密码入口仍有真实鉴权，不能以关闭授权换取压力测试速度。
+	for _, credential := range []string{"", keyA, "synthetic-wrong-admin"} {
+		code, _ := h.request(t, "GET", api+"/objects", credential, nil)
+		if code != http.StatusUnauthorized && code != http.StatusForbidden {
+			t.Fatal("压力夹具管理授权被绕过")
+		}
+	}
 	monitored := h.monitorAll(t)
 	if len(monitored) == 0 {
 		t.Fatal("没有监控合成对象")

@@ -64,14 +64,16 @@ type Status struct {
 // Collector 是审计深模块；所有存储、队列、解析和缺口诊断均由它管理。
 // 须通过 Open 构造，关闭后仍可读取状态，但不能写入或查询已关闭的存储。
 type Collector struct {
-	mu          sync.Mutex
-	ioMu        sync.Mutex
-	root        *os.Root
-	lock        *os.File
-	directory   *os.File
-	active      *os.File
-	monitors    map[string]string
-	segments    []segment
+	mu        sync.Mutex
+	ioMu      sync.Mutex
+	root      *os.Root
+	lock      *os.File
+	directory *os.File
+	active    *os.File
+	monitors  map[string]string
+	segments  []segment
+	// 只保留最近查询页（最多100条）的文件位置，不缓存正文或建立全量身份索引；由 ioMu 保护。
+	pageHints   map[string]recordLocation
 	queue       chan queuedRecord
 	done        chan struct{}
 	closeOnce   sync.Once

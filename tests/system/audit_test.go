@@ -38,6 +38,14 @@ type instance struct {
 // 保留数据供隐私检查，不自动删除文件；测试结束只停止本测试创建的进程。
 func startHost(t *testing.T, budget int64, plugin bool, upstream string, stateDir ...string) *instance {
 	t.Helper()
+	return startHostWithManagementAuth(t, budget, plugin, upstream, false, stateDir...)
+}
+
+// startHostWithManagementAuth 启动真实合成宿主；参数同 startHost，environmentAuth 选择宿主已有环境管理密码入口。
+// 环境鉴权只用于大量管理查询的压力夹具，仍必须提供正确合成密码；普通权限验收使用配置 bcrypt。
+// 返回HTTP入口，启动失败终止测试，不继承真实凭据或添加生产故障接口。
+func startHostWithManagementAuth(t *testing.T, budget int64, plugin bool, upstream string, environmentAuth bool, stateDir ...string) *instance {
+	t.Helper()
 	root, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
@@ -120,6 +128,10 @@ plugins:
 	cmd.Dir = dir
 	// 不继承真实云凭据、代理、远程存储或插件 token，只提供运行所需的本地环境。
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "TMPDIR=" + dir}
+	if environmentAuth {
+		// 宿主原生管理入口使用恒定时间比较；避免每条详情都做 bcrypt 掩盖队列/落盘验收的成本。
+		cmd.Env = append(cmd.Env, "MANAGEMENT_PASSWORD="+adminKey)
+	}
 	cmd.Stdout, cmd.Stderr = log, log
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
