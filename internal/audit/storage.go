@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"unicode/utf8"
 )
 
 func openDirectory(path string) (*os.Root, error) {
@@ -101,22 +100,21 @@ func (c *Collector) initialize() error {
 	}
 	if _, err = c.root.Lstat("monitors.json"); err == nil {
 		data, err := c.readBounded("monitors.json", maxLine)
-		if err != nil || !utf8.Valid(data) || json.Unmarshal(data, &c.monitors) != nil || c.monitors == nil || len(c.monitors) > 1024 {
-			c.monitors = make(map[string]string)
+		if err != nil {
 			c.pause("storage_error")
 			return nil
 		}
-		for id, name := range c.monitors {
-			if !validObjectID(id) || !utf8.ValidString(name) || len(name) > 256 {
-				c.monitors = make(map[string]string)
-				c.pause("storage_error")
-				return nil
-			}
+		config, err := decodeConfiguration(data)
+		if err != nil {
+			c.pause("storage_error")
+			return nil
 		}
+		c.config = config
 	} else if !errors.Is(err, os.ErrNotExist) {
 		c.pause("storage_error")
 		return nil
 	}
+	c.configValid = true
 	sort.Strings(names)
 	for _, name := range names {
 		if !strings.HasPrefix(name, "records-") {

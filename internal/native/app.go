@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -53,20 +54,32 @@ func (a *App) Handle(method string, raw []byte) (any, error) {
 	switch method {
 	case "plugin.register", "plugin.reconfigure":
 		a.configure(raw)
-		return map[string]any{"schema_version": 6, "metadata": map[string]any{"Name": "输入审计", "Version": "0.1.0", "Author": "cpa-request-info", "GitHubRepository": "https://github.com/shenleg/cpa-request-info"}, "capabilities": map[string]bool{"management_api": true, "input_audit_observer": true}}, nil
+		return map[string]any{"schema_version": 6, "metadata": map[string]any{"Name": "输入审计", "Version": "0.1.0", "Author": "cpa-request-info", "GitHubRepository": "https://github.com/shenleg/cpa-request-info"}, "capabilities": map[string]bool{"management_api": true, "input_audit_observer": true, "input_audit_snapshot": true}}, nil
 	case "management.register":
 		type route struct{ Method, Path string }
 		type resource struct{ Path, Menu, Description string }
 		return struct {
 			Routes    []route    `json:"routes"`
 			Resources []resource `json:"resources"`
-		}{[]route{{"GET", "/plugins/request-input-audit/objects"}, {"POST", "/plugins/request-input-audit/monitor"}, {"GET", "/plugins/request-input-audit/records"}, {"GET", "/plugins/request-input-audit/detail"}, {"GET", "/plugins/request-input-audit/status"}}, []resource{{"/index.html", "输入审计", "最小安全 Chat Completions 审计闭环"}}}, nil
+		}{[]route{{"GET", "/plugins/request-input-audit/objects"}, {"POST", "/plugins/request-input-audit/monitor"}, {"POST", "/plugins/request-input-audit/remove"}, {"POST", "/plugins/request-input-audit/rename"}, {"POST", "/plugins/request-input-audit/pause"}, {"GET", "/plugins/request-input-audit/records"}, {"GET", "/plugins/request-input-audit/detail"}, {"GET", "/plugins/request-input-audit/status"}}, []resource{{"/index.html", "输入审计", "最小安全 Chat Completions 审计闭环"}}}, nil
 	case "management.handle":
 		var req managementRequest
 		if err := json.Unmarshal(raw, &req); err != nil {
 			return nil, errors.New("invalid_management_request")
 		}
 		return a.management(req), nil
+	case "input_audit.prepare":
+		var event audit.Event
+		if err := json.Unmarshal(raw, &event); err != nil {
+			return nil, errors.New("invalid_preparation")
+		}
+		a.mu.Lock()
+		c, available := a.collector, a.available
+		a.mu.Unlock()
+		if c == nil || !available {
+			return audit.Snapshot{Version: 2, Decision: "unavailable"}, nil
+		}
+		return c.Prepare(event), nil
 	case "input_audit.observe":
 		var event audit.Event
 		if err := json.Unmarshal(raw, &event); err != nil {
@@ -113,7 +126,7 @@ func (a *App) configure(raw []byte) {
 		Available       bool   `json:"available"`
 		StateDir        string `json:"state_dir"`
 	}
-	if err != nil || json.Unmarshal(caps, &capability) != nil || capability.ContractVersion != 1 || !capability.Available {
+	if err != nil || json.Unmarshal(caps, &capability) != nil || capability.ContractVersion != 2 || !capability.Available {
 		return
 	}
 	dir, err := filepath.Abs(cfg.Dir)
@@ -166,30 +179,66 @@ func (a *App) management(req managementRequest) any {
 			Available       bool   `json:"available"`
 			ContractVersion int    `json:"contract_version"`
 			StateDir        string `json:"state_dir"`
+			BridgeFailures  uint64 `json:"bridge_failures"`
 		}
-		if err != nil || json.Unmarshal(caps, &live) != nil || !live.Available || live.ContractVersion != 1 || (dir != "" && live.StateDir != dir) {
+		if err != nil || json.Unmarshal(caps, &live) != nil || !live.Available || live.ContractVersion != 2 || (dir != "" && live.StateDir != dir) {
 			available = false
 			reason = "observer_unavailable"
 		}
 		var state any = map[string]any{"available": false, "reason": reason}
+		collectorReason := ""
 		if c != nil {
-			state = c.Status()
+			snapshot := c.Status()
+			collectorReason = snapshot.Reason
+			// 桥接发生在Collector之前；只合并响应副本，避免每次刷新重复增加同一缺口。
+			old := snapshot.Gaps["observer_unavailable"]
+			if live.BridgeFailures > ^uint64(0)-old {
+				snapshot.Gaps["observer_unavailable"] = ^uint64(0)
+			} else {
+				snapshot.Gaps["observer_unavailable"] = old + live.BridgeFailures
+			}
+			state = snapshot
+		}
+		if live.BridgeFailures > 0 && reason == "" && collectorReason == "" {
+			reason = "observer_bridge_error"
 		}
 		return responseJSON(200, map[string]any{"available": available, "reason": reason, "supported": "chat-completions-last-user-string", "retention": "not_implemented", "state": state})
 	}
 	if strings.HasSuffix(req.Path, "/objects") {
-		objects, err := a.catalog()
-		if err != nil {
-			return responseJSON(503, map[string]string{"error": "observer_unavailable"})
-		}
-		names := map[string]string{}
+		catalog, catalogErr := a.catalog()
+		known := map[string]audit.Object{}
+		history := map[string]bool{}
 		if c != nil {
-			names = c.Monitors()
+			known = c.Objects()
+			var err error
+			history, err = c.HistoryObjects()
+			if err != nil {
+				return responseJSON(503, map[string]string{"error": "storage_unavailable"})
+			}
 		}
-		for i := range objects {
-			objects[i].Name, objects[i].Monitored = names[objects[i].ID]
+		// 目录失效不妨碍已知历史查询，但不能把缓存对象当作当前可认证Key。
+		union := make(map[string]object, len(known)+len(catalog))
+		for id, meta := range known {
+			union[id] = object{ID: id, Name: meta.Name, Monitored: meta.Monitored, HasHistory: history[id]}
 		}
-		return responseJSON(200, map[string]any{"objects": objects, "available": available})
+		for id := range history {
+			if _, exists := union[id]; !exists {
+				union[id] = object{ID: id, HasHistory: true}
+			}
+		}
+		if catalogErr == nil {
+			for _, current := range catalog {
+				entry := union[current.ID]
+				entry.ID, entry.Valid = current.ID, true
+				union[current.ID] = entry
+			}
+		}
+		objects := make([]object, 0, len(union))
+		for _, entry := range union {
+			objects = append(objects, entry)
+		}
+		sort.Slice(objects, func(i, j int) bool { return objects[i].ID < objects[j].ID })
+		return responseJSON(200, map[string]any{"objects": objects, "available": available && catalogErr == nil})
 	}
 	if c == nil {
 		return responseJSON(503, map[string]string{"error": reason})
@@ -223,6 +272,34 @@ func (a *App) management(req managementRequest) any {
 		}
 		return responseJSON(200, map[string]bool{"saved": true})
 	}
+	if strings.HasSuffix(req.Path, "/rename") {
+		var selection struct {
+			ObjectID string `json:"object_id"`
+			Name     string `json:"name"`
+		}
+		if len(req.Body) > 2048 || json.Unmarshal(req.Body, &selection) != nil || c.Rename(selection.ObjectID, selection.Name) != nil {
+			return responseJSON(400, map[string]string{"error": "rename_rejected"})
+		}
+		return responseJSON(200, map[string]bool{"saved": true})
+	}
+	if strings.HasSuffix(req.Path, "/pause") {
+		var selection struct {
+			Paused *bool `json:"paused"`
+		}
+		if len(req.Body) > 2048 || json.Unmarshal(req.Body, &selection) != nil || selection.Paused == nil || c.SetPaused(*selection.Paused) != nil {
+			return responseJSON(400, map[string]string{"error": "pause_rejected"})
+		}
+		return responseJSON(200, map[string]bool{"saved": true})
+	}
+	if strings.HasSuffix(req.Path, "/remove") {
+		var selection struct {
+			ObjectID string `json:"object_id"`
+		}
+		if len(req.Body) > 2048 || json.Unmarshal(req.Body, &selection) != nil || c.Remove(selection.ObjectID) != nil {
+			return responseJSON(400, map[string]string{"error": "remove_rejected"})
+		}
+		return responseJSON(200, map[string]bool{"saved": true})
+	}
 	if strings.HasSuffix(req.Path, "/records") {
 		offset, err := queryNumber(req.Query, "offset", 0, 0, 10000000)
 		if err != nil {
@@ -232,7 +309,13 @@ func (a *App) management(req managementRequest) any {
 		if err != nil {
 			return responseJSON(400, map[string]string{"error": "invalid_pagination"})
 		}
-		records, total, err := c.List(offset, limit)
+		objectID := queryValue(req.Query, "object_id")
+		if objectID != "" {
+			if len(objectID) != 64 || strings.Trim(objectID, "0123456789abcdefABCDEF") != "" {
+				return responseJSON(400, map[string]string{"error": "invalid_object"})
+			}
+		}
+		records, total, err := c.List(offset, limit, objectID)
 		if err != nil {
 			return responseJSON(503, map[string]string{"error": "storage_unavailable"})
 		}
@@ -265,9 +348,11 @@ func (a *App) management(req managementRequest) any {
 }
 
 type object struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	Monitored bool   `json:"monitored"`
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Monitored  bool   `json:"monitored"`
+	Valid      bool   `json:"valid"`
+	HasHistory bool   `json:"has_history"`
 }
 
 func (a *App) catalog() ([]object, error) {

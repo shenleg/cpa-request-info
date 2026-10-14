@@ -2,7 +2,7 @@
 <!-- 本页面只托管无数据 shell；动态数据受宿主管理鉴权保护，管理 Key 仅在页面内存驻留。 -->
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-Ch8O2sxqKnqxYFg6WqJU04U5ZnLTDGZaX9wzvqPbuNo='; style-src 'sha256-mcEoXKWBfiRvpvTh90RoJs1oIgkKU4gVvUXfuAv9NcU='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-ZDEyyLefcrOQpCqsQFTMPDzES+hljZYMJxd2jqLGfqw='; style-src 'sha256-mcEoXKWBfiRvpvTh90RoJs1oIgkKU4gVvUXfuAv9NcU='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <title>输入审计</title>
 <style>
 :root{color-scheme:light dark;font-family:system-ui,sans-serif}body{max-width:1100px;margin:24px auto;padding:0 20px;line-height:1.6}input,select,button{font:inherit;margin:5px;padding:7px;max-width:95%}button{cursor:pointer}label{display:block}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #888;padding:9px;text-align:left;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:14px;border:1px solid #888}#notice{border-left:4px solid #888;padding-left:12px}code{overflow-wrap:anywhere}.object-id{font-size:.8em}section{margin-top:24px}
@@ -13,16 +13,17 @@
 <section id="login"><h2>宿主管理鉴权</h2><p>优先复用同源宿主已有登录状态。无法取得时，请临时输入同一个管理 Key；只存本页内存，不写入 localStorage/cookie，刷新即消失。</p><label>临时管理 Key <input id="management-key" type="password" autocomplete="off"></label><button id="connect">连接</button></section>
 <p id="message" role="status">等待管理鉴权。</p>
 <div id="content" hidden>
-<section><h2>选择监控对象</h2><p>这里只显示宿主无秘密对象 ID，不展示原 Key、片段或上游账号。选择和命名不修改宿主 Key 配置。</p><label>审计对象 <select id="objects"></select></label><label>名称 <input id="name" maxlength="256" placeholder="例如：合成业务对象"></label><button id="monitor">选择并命名</button></section>
-<section><h2>采集状态</h2><pre id="health" aria-label="采集状态"></pre><button id="refresh">刷新已保存记录</button></section>
-<section><h2>已保存输入记录</h2><p id="empty">暂无已保存记录。入队不等于落盘。</p><table id="records"><thead><tr><th>接收时间</th><th>对象</th><th>请求模型</th><th>纯文本预览</th><th>状态</th><th>详情</th></tr></thead><tbody></tbody></table><button id="previous">上一页</button><button id="next">下一页</button><span id="page"></span></section>
+<section><h2>监控对象与名称</h2><p>这里只显示宿主无秘密对象 ID，不展示原 Key、片段或上游账号。选择和命名不修改宿主 Key 配置。移除只停止后续采集，保留名称和已保存历史。</p><p id="catalog-state"></p><label>审计对象 <select id="objects"></select></label><label>名称 <input id="name" maxlength="256" placeholder="例如：合成业务对象"></label><p>名称最多 256 UTF-8 字节，不等于 256 个中文字符。</p><button id="monitor">选择并命名</button><button id="rename">仅改名</button><button id="remove">移除监控</button></section>
+<section><h2>采集状态</h2><p id="capture-state">等待采集状态。</p><button id="pause">暂停采集</button><button id="resume">恢复采集</button><pre id="health" aria-label="采集状态"></pre><button id="refresh">刷新已保存记录</button></section>
+<section><h2>已保存输入记录</h2><label>历史对象筛选 <select id="object-filter"><option value="">全部对象</option></select></label><p id="empty">暂无已保存记录。入队不等于落盘。</p><table id="records"><thead><tr><th>接收时间</th><th>对象</th><th>请求模型</th><th>纯文本预览</th><th>状态</th><th>详情</th></tr></thead><tbody></tbody></table><button id="previous">上一页</button><button id="next">下一页</button><span id="page"></span></section>
 <section><h2>单条详情</h2><p id="detail-meta"></p><pre id="detail" aria-label="已保存纯文本正文">请选择一条记录。</pre></section>
 </div>
 <script>
 'use strict';
 // 认证材料只驻留闭包；所有数据通过同源受保护 API 获取，禁止把正文/名称作为 HTML。
 (() => {
-  let key = '', offset = 0, total = 0;
+  let key = '', offset = 0, total = 0, catalogAvailable = false;
+  let knownObjects = [], selectedFilter = '', busy = false, capturePaused = false, observerAvailable = false;
   const base = '/v0/management/plugins/request-input-audit';
   const $ = id => document.getElementById(id);
   const message = text => { $('message').textContent = text; };
@@ -49,19 +50,55 @@
     if (!response.ok) throw new Error('操作未完成（HTTP '+response.status+'），请查看采集状态。');
     return response.json();
   }
+  function objectLabel(object) {
+    const status = object.monitored ? '受监控' : object.has_history ? '已移除但有历史' : object.name ? '已移除监控' : '未监控';
+    const validity = object.valid ? '' : catalogAvailable ? ' · Key 当前无效' : ' · Key 有效性未知';
+    return status + (object.name ? '：'+object.name : '') + validity + ' · ' + object.id;
+  }
+  function updateControls() {
+    const object = knownObjects.find(item => item.id === $('objects').value);
+    $('monitor').disabled = busy || !object || !catalogAvailable || !object.valid;
+    $('rename').disabled = busy || !object?.name;
+    $('remove').disabled = busy || !object?.monitored;
+    $('pause').disabled = busy || !observerAvailable || capturePaused;
+    $('resume').disabled = busy || !observerAvailable || !capturePaused;
+    $('previous').disabled = busy || offset===0;$('next').disabled = busy || offset+20>=total;
+    for (const id of ['connect','refresh','objects','name','object-filter']) $(id).disabled = busy;
+    for (const button of $('records').querySelectorAll('tbody button')) button.disabled = busy;
+  }
+  function selectObject() {
+    const object = knownObjects.find(item => item.id === $('objects').value);
+    $('name').value = object?.name ?? '';
+    updateControls();
+  }
   async function objects() {
+    const selected = $('objects').value;
     const data = await api('/objects');
+    catalogAvailable = data.available === true;
+    knownObjects = data.objects;
+    $('catalog-state').textContent = catalogAvailable ? '内置 Key 目录可用；历史对象也可筛选。' : '内置 Key 目录不可用；不能新增监控，已知历史仍可查询。';
     $('objects').replaceChildren();
-    for (const object of data.objects) {
-      const option = document.createElement('option');option.value = object.id;
-      option.textContent = (object.monitored ? '已监控：'+object.name+' · ' : '未监控 · ') + object.id;
+    $('object-filter').replaceChildren();
+    const all = document.createElement('option');all.value = '';all.textContent = '全部对象';$('object-filter').append(all);
+    for (const object of knownObjects) {
+      const option = document.createElement('option');option.value = object.id;option.textContent = objectLabel(object);
       $('objects').append(option);
+      const filter = document.createElement('option');filter.value = object.id;filter.textContent = objectLabel(object);
+      $('object-filter').append(filter);
     }
+    if (knownObjects.some(object => object.id === selected)) $('objects').value = selected;
+    if (selectedFilter && !knownObjects.some(object => object.id === selectedFilter)) {selectedFilter = '';offset = 0;}
+    $('object-filter').value = selectedFilter;
+    selectObject();
   }
   async function refresh() {
-    const [status, data] = await Promise.all([api('/status'),api('/records?offset='+offset+'&limit=20')]);
+    const [status, data] = await Promise.all([api('/status'),api('/records?offset='+offset+'&limit=20&object_id='+encodeURIComponent(selectedFilter))]);
     const state = status.state ?? {}, gaps = state.gaps ?? {};
-    $('health').textContent = '观察契约：'+(status.available?'可用':'不可用')+'\n采集状态：'+(state.state??'不可用')+'\n原因：'+(status.reason||state.reason||'无')+'\n已保存：'+(state.saved??'未知')+'；排队：'+(state.queued??'未知')+'\n保守占用：'+(state.used_bytes??'未知')+' / '+(state.budget_bytes??'未知')+' 字节\n已知缺口计数（非完整历史）：'+JSON.stringify(gaps)+'\n当前未实现过期清理和异常恢复。';
+    capturePaused = state.capture_paused === true;observerAvailable = status.available === true;
+    $('capture-state').textContent = capturePaused ? '主动暂停：后续提交不采集，已接收副本和历史保留。' : '未主动暂停：受监控对象的后续提交可采集；仍受故障和容量约束。';
+    $('health').textContent = '观察契约：'+(status.available?'可用':'不可用')+'\n故障运行状态：'+(state.state??'不可用')+'\n原因：'+(status.reason||state.reason||'无')+'\n已保存：'+(state.saved??'未知')+'；排队：'+(state.queued??'未知')+'\n保守占用：'+(state.used_bytes??'未知')+' / '+(state.budget_bytes??'未知')+' 字节\n已知缺口计数（非完整历史）：'+JSON.stringify(gaps)+'\n恢复主动采集不会解除存储故障；当前未实现过期清理和异常恢复。';
+    // 配置变更后的当前名称不能继续配上旧详情标签；下一次查看会重新取当前投影。
+    $('detail-meta').textContent = '';$('detail').textContent = '请选择一条记录。';
     total=data.total; $('empty').hidden = data.records.length>0;
     const tbody=$('records').querySelector('tbody');tbody.replaceChildren();
     for (const record of data.records) {
@@ -73,14 +110,30 @@
       button.addEventListener('click',()=>guard(async()=>{const r=await api('/detail?id='+encodeURIComponent(record.id));$('detail-meta').textContent=(r.name||r.object_id)+' · '+r.received_at+' · '+(r.truncated?'已截断':'已保存纯文本');$('detail').textContent=r.text;}));
       cell.append(button);row.append(cell);tbody.append(row);
     }
-    $('previous').disabled=offset===0;$('next').disabled=offset+20>=total;
     $('page').textContent='第 '+(Math.floor(offset/20)+1)+' 页；已保存 '+total+' 条';
+    updateControls();
   }
   async function connect() {await objects();await refresh();$('login').hidden=true;$('content').hidden=false;message('管理鉴权通过。只展示已落盘记录。');}
-  async function guard(action) {try{await action();}catch(error){message(error.message);}}
+  async function guard(action) {
+    if (busy) return;
+    // 管理写入后的目录/列表刷新必须完成后才能查看详情，避免旧异步刷新擦掉刚打开的正文标签。
+    busy = true;updateControls();
+    try {await action();}catch(error){message(error.message);}finally{busy=false;updateControls();}
+  }
   $('connect').addEventListener('click',()=>guard(async()=>{key=$('management-key').value;$('management-key').value='';await connect();}));
-  $('monitor').addEventListener('click',()=>guard(async()=>{await api('/monitor','POST',{object_id:$('objects').value,name:$('name').value});await objects();await refresh();message('监控配置已保存，后续符合条件的提交才会采集。');}));
-  $('refresh').addEventListener('click',()=>guard(refresh));
+  async function saveObject(path, success) {
+    const name = $('name').value;
+    if (path !== '/remove' && (!name.trim() || new TextEncoder().encode(name).length > 256)) throw new Error('名称不能为空，且最多 256 UTF-8 字节。');
+    const payload = {object_id:$('objects').value};if (path !== '/remove') payload.name = name;
+    await api(path,'POST',payload);await objects();await refresh();message(success);
+  }
+  $('objects').addEventListener('change',selectObject);
+  $('monitor').addEventListener('click',()=>guard(()=>saveObject('/monitor','监控配置已保存；已接收提交保留原决策，后续提交采用新配置。')));
+  $('rename').addEventListener('click',()=>guard(()=>saveObject('/rename','名称已保存；旧记录和新记录统一显示当前名称。')));
+  $('remove').addEventListener('click',()=>guard(()=>saveObject('/remove','已移除监控；后续提交不采集，已保存历史仍可查询。')));
+  for (const [id,paused] of [['pause',true],['resume',false]]) $(id).addEventListener('click',()=>guard(async()=>{await api('/pause','POST',{paused});await objects();await refresh();message(paused?'已主动暂停；不删除历史，不取消已接收副本。':'已恢复主动采集；后续提交采用新配置，存储故障不会被清除。');}));
+  $('object-filter').addEventListener('change',()=>guard(async()=>{selectedFilter=$('object-filter').value;offset=0;await refresh();}));
+  $('refresh').addEventListener('click',()=>guard(async()=>{await objects();await refresh();}));
   $('previous').addEventListener('click',()=>guard(async()=>{offset=Math.max(0,offset-20);await refresh();}));
   $('next').addEventListener('click',()=>guard(async()=>{if(offset+20<total){offset+=20;await refresh();}}));
   window.addEventListener('pagehide',()=>{key='';});

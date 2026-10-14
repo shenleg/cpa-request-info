@@ -14,9 +14,12 @@ type recordLocation struct {
 	length       int64
 }
 
-// List 按分段/追加顺序倒序返回已保存记录及总数；offset 必须非负，limit 范围为 1 至 100。
-// 返回独立记录副本；参数错误、关闭或存储读取失败返回固定错误，不读取队列和未提交尾部。
-func (c *Collector) List(offset, limit int) ([]Record, int, error) {
+// List 按分段/追加顺序倒序返回已保存记录及总数；offset 非负，limit 范围1至100，objectID空值表示所有对象。
+// 返回独立记录副本；身份/分页非法、关闭或读取失败返回固定错误，不读取队列和未提交尾部。
+func (c *Collector) List(offset, limit int, objectID string) ([]Record, int, error) {
+	if objectID != "" && !validObjectID(objectID) {
+		return nil, 0, errors.New("invalid_object")
+	}
 	if offset < 0 || limit < 1 || limit > 100 {
 		return nil, 0, errors.New("invalid_pagination")
 	}
@@ -28,6 +31,9 @@ func (c *Collector) List(offset, limit int) ([]Record, int, error) {
 	total := 0
 	for _, seg := range c.segments {
 		total += seg.count
+	}
+	if objectID != "" {
+		return c.listObject(offset, limit, objectID)
 	}
 	result := make([]Record, 0, limit)
 	c.pageHints = nil
@@ -70,6 +76,80 @@ func (c *Collector) List(offset, limit int) ([]Record, int, error) {
 	}
 	c.pageHints = hints
 	return result, total, nil
+}
+
+// listObject 两遍扫描已提交边界：先独立计数，再选取匹配序号，避免先分页后过滤导致总数和页内容错误。
+func (c *Collector) listObject(offset, limit int, objectID string) ([]Record, int, error) {
+	c.pageHints = nil
+	total := 0
+	for _, seg := range c.segments {
+		if err := c.readSegment(seg, func(record Record, _ int64) error {
+			if record.ObjectID == objectID {
+				total++
+			}
+			return nil
+		}); err != nil {
+			c.pause("storage_error")
+			return nil, 0, errors.New("storage_error")
+		}
+	}
+	result := make([]Record, 0, limit)
+	if offset >= total {
+		return result, total, nil
+	}
+	end := total - offset
+	start := end - limit
+	if start < 0 {
+		start = 0
+	}
+	hints := make(map[string]recordLocation, limit)
+	current := 0
+	for index, seg := range c.segments {
+		var position int64
+		if err := c.readSegment(seg, func(record Record, bytes int64) error {
+			if record.ObjectID == objectID {
+				if current >= start && current < end {
+					result = append(result, record)
+					hints[record.ID] = recordLocation{segmentIndex: index, offset: position, length: bytes}
+				}
+				current++
+			}
+			position += bytes
+			return nil
+		}); err != nil {
+			c.pause("storage_error")
+			return nil, total, errors.New("storage_error")
+		}
+	}
+	for left, right := 0, len(result)-1; left < right; left, right = left+1, right-1 {
+		result[left], result[right] = result[right], result[left]
+	}
+	c.pageHints = hints
+	return result, total, nil
+}
+
+// HistoryObjects 返回已有已提交历史的对象集合；无参数，最多1024个无秘密身份，不缓存正文或记录ID。
+// 关闭、读取故障或身份目录超限返回固定错误，不访问队列及未提交尾部。
+func (c *Collector) HistoryObjects() (map[string]bool, error) {
+	c.ioMu.Lock()
+	defer c.ioMu.Unlock()
+	if c.root == nil {
+		return nil, errors.New("collector_closed")
+	}
+	result := make(map[string]bool)
+	for _, seg := range c.segments {
+		if err := c.readSegment(seg, func(record Record, _ int64) error {
+			result[record.ObjectID] = true
+			if len(result) > 1024 {
+				return errors.New("object_limit")
+			}
+			return nil
+		}); err != nil {
+			c.pause("storage_error")
+			return nil, errors.New("storage_error")
+		}
+	}
+	return result, nil
 }
 
 // Detail 返回 id 的独立白名单记录；最近一页以受限位置读取，其余回退扫描已同步记录。

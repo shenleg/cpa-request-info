@@ -1,8 +1,9 @@
-// 本文件封装监控名单、末尾纯文本提取和有界异步采集；原请求正文只在 Observe 返回前借用。
+// 本文件按接收快照提取末尾纯文本并有界异步采集；原请求正文只在 Observe 返回前借用。
 package audit
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -30,15 +31,16 @@ const (
 // Event 是宿主同步借用的只读入站事件；Body 不得在 Observe 返回后继续引用。
 // 字段仅含无秘密身份、提交元数据及原协议正文，ReadError 表示宿主读取失败。
 type Event struct {
-	ID         string `json:"id"`
-	ObjectID   string `json:"object_id"`
-	ReceivedAt string `json:"received_at"`
-	Protocol   string `json:"protocol"`
-	Body       []byte `json:"body"`
-	ReadError  bool   `json:"read_error"`
+	ID         string   `json:"id"`
+	ObjectID   string   `json:"object_id"`
+	ReceivedAt string   `json:"received_at"`
+	Protocol   string   `json:"protocol"`
+	Body       []byte   `json:"body"`
+	ReadError  bool     `json:"read_error"`
+	Snapshot   Snapshot `json:"snapshot"`
 }
 
-// Record 是唯一允许持久化及查询的输入白名单；名称由管理层从当前监控名单关联。
+// Record 是唯一允许持久化及查询的输入白名单；名称由管理层从已知对象目录关联。
 type Record struct {
 	ID         string `json:"id"`
 	ObjectID   string `json:"object_id"`
@@ -51,27 +53,30 @@ type Record struct {
 
 // Status 是有界运行状态快照；Gaps 仅有固定原因码，不携带输入或底层错误上下文。
 type Status struct {
-	Available   bool              `json:"available"`
-	State       string            `json:"state"`
-	Reason      string            `json:"reason"`
-	Saved       int64             `json:"saved"`
-	Queued      int64             `json:"queued"`
-	Gaps        map[string]uint64 `json:"gaps"`
-	UsedBytes   int64             `json:"used_bytes"`
-	BudgetBytes int64             `json:"budget_bytes"`
+	CapturePaused bool              `json:"capture_paused"`
+	Available     bool              `json:"available"`
+	State         string            `json:"state"`
+	Reason        string            `json:"reason"`
+	Saved         int64             `json:"saved"`
+	Queued        int64             `json:"queued"`
+	Gaps          map[string]uint64 `json:"gaps"`
+	UsedBytes     int64             `json:"used_bytes"`
+	BudgetBytes   int64             `json:"budget_bytes"`
 }
 
 // Collector 是审计深模块；所有存储、队列、解析和缺口诊断均由它管理。
 // 须通过 Open 构造，关闭后仍可读取状态，但不能写入或查询已关闭的存储。
 type Collector struct {
-	mu        sync.Mutex
-	ioMu      sync.Mutex
-	root      *os.Root
-	lock      *os.File
-	directory *os.File
-	active    *os.File
-	monitors  map[string]string
-	segments  []segment
+	mu          sync.Mutex
+	ioMu        sync.Mutex
+	root        *os.Root
+	lock        *os.File
+	directory   *os.File
+	active      *os.File
+	config      configuration
+	configValid bool
+	generation  string
+	segments    []segment
 	// 只保留最近查询页（最多100条）的文件位置，不缓存正文或建立全量身份索引；由 ioMu 保护。
 	pageHints   map[string]recordLocation
 	queue       chan queuedRecord
@@ -94,7 +99,7 @@ type segment struct {
 
 // Open 打开独占审计目录并扫描已提交记录；dir 必须不经过符号链接。
 // budget 为总目录预算，0 使用 1 GiB，合法范围 4 MiB 至 1 GiB。
-// 返回可关闭的采集器；目录或锁不可用返回固定错误，损坏数据则返回停采但仍可管理的实例。
+// 返回可关闭的采集器；参数、随机代际来源、目录或锁不可用返回固定错误，损坏数据则返回停采实例。
 func Open(dir string, budget int64) (*Collector, error) {
 	if budget == 0 {
 		budget = defaultBudget
@@ -102,12 +107,17 @@ func Open(dir string, budget int64) (*Collector, error) {
 	if budget < minBudget || budget > defaultBudget {
 		return nil, errors.New("invalid_budget")
 	}
+	// 非持久随机代际只区分重开的采集器，避免旧请求快照跨实例采集；不改变稳定审计对象身份。
+	var generation [16]byte
+	if _, err := rand.Read(generation[:]); err != nil {
+		return nil, errors.New("generation_unavailable")
+	}
 	root, err := openDirectory(dir)
 	if err != nil {
 		return nil, errors.New("storage_unavailable")
 	}
-	c := &Collector{root: root, monitors: make(map[string]string), queue: make(chan queuedRecord, 64), done: make(chan struct{}), status: Status{Available: true, State: "active", BudgetBytes: budget, Gaps: map[string]uint64{}}}
-	for _, key := range []string{"read_error", "invalid_event", "invalid_json", "unsupported_protocol", "unsupported_content", "metadata_too_large", "queue_full", "storage_error", "budget_exhausted"} {
+	c := &Collector{root: root, generation: hex.EncodeToString(generation[:]), config: configuration{Version: 2, Objects: make(map[string]Object)}, queue: make(chan queuedRecord, 64), done: make(chan struct{}), status: Status{Available: true, State: "active", BudgetBytes: budget, Gaps: map[string]uint64{}}}
+	for _, key := range []string{"read_error", "invalid_event", "invalid_json", "unsupported_protocol", "unsupported_content", "metadata_too_large", "queue_full", "storage_error", "budget_exhausted", "observer_unavailable"} {
 		c.status.Gaps[key] = 0
 	}
 	if err = c.initialize(); err != nil {
@@ -118,65 +128,27 @@ func Open(dir string, budget int64) (*Collector, error) {
 	return c, nil
 }
 
-// Monitor 新增或更新对象的运行名称并原子同步配置；objectID 必须为 64 位十六进制身份，name 最多 256 UTF-8 字节。
-// 返回验证、容量或存储固定错误；失败不发布新的名单，不删除历史。
-func (c *Collector) Monitor(objectID, name string) error {
-	if !validObjectID(objectID) || !utf8.ValidString(name) || strings.TrimSpace(name) == "" || len(name) > 256 {
-		return errors.New("invalid_monitor")
-	}
-	c.ioMu.Lock()
-	defer c.ioMu.Unlock()
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return errors.New("collector_closed")
-	}
-	next := make(map[string]string, len(c.monitors)+1)
-	for id, n := range c.monitors {
-		next[id] = n
-	}
-	next[strings.Clone(objectID)] = strings.Clone(name)
-	c.mu.Unlock()
-	if len(next) > 1024 {
-		return errors.New("monitor_limit")
-	}
-	data, err := json.Marshal(next)
-	if err != nil || len(data) > maxLine {
-		return errors.New("monitor_limit")
-	}
-	if err = c.saveMonitors(data); err != nil {
-		reason := "storage_error"
-		if err.Error() == "budget_exhausted" {
-			reason = "budget_exhausted"
-		}
-		c.pause(reason)
-		return err
-	}
-	c.mu.Lock()
-	c.monitors = next
-	c.mu.Unlock()
-	return nil
-}
-
-// Monitors 返回当前对象到名称的独立副本；无参数，无 I/O 异常，调用者修改不会影响采集器。
-func (c *Collector) Monitors() map[string]string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	result := make(map[string]string, len(c.monitors))
-	for id, name := range c.monitors {
-		result[id] = name
-	}
-	return result
-}
-
-// Observe 同步提取 event 的末尾 user 字符串，随后非阻塞入队；不等待任何落盘。
+// Observe 按 event 的接收快照同步提取末尾 user 字符串并非阻塞入队，不复核当前名单或主动暂停。
 // 无返回值，解析及容量失败仅增加固定缺口诊断，不影响宿主请求；Body 不进入采集器。
 func (c *Collector) Observe(event Event) {
 	c.mu.Lock()
-	_, monitored := c.monitors[event.ObjectID]
 	accepting := !c.closed && c.status.State == "active"
+	generation := c.generation
 	c.mu.Unlock()
-	if !monitored || !accepting {
+	if event.Snapshot.Version != 2 || event.Snapshot.CollectorGeneration != generation {
+		c.gap("observer_unavailable")
+		return
+	}
+	if event.Snapshot.Decision == "skip" {
+		return
+	}
+	if event.Snapshot.Decision != "capture" || event.Snapshot.MaxTextBytes < 1 || event.Snapshot.MaxTextBytes > maxText {
+		c.gap("invalid_event")
+		return
+	}
+	// 名单和主动暂停只在 Prepare 决定；此处只能因真实存储故障/关闭拒绝旧副本。
+	if !accepting {
+		c.gap("storage_error")
 		return
 	}
 	if event.ReadError {
@@ -239,9 +211,9 @@ func (c *Collector) Observe(event Event) {
 		c.gap("metadata_too_large")
 		return
 	}
-	truncated := len(text) > maxText
+	truncated := len(text) > event.Snapshot.MaxTextBytes
 	if truncated {
-		end := maxText
+		end := event.Snapshot.MaxTextBytes
 		for end > 0 && !utf8.RuneStart(text[end]) {
 			end--
 		}
@@ -273,6 +245,7 @@ func (c *Collector) Status() Status {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	result := c.status
+	result.CapturePaused = c.config.CapturePaused
 	result.Gaps = make(map[string]uint64, len(c.status.Gaps))
 	for key, value := range c.status.Gaps {
 		result.Gaps[key] = value

@@ -8,17 +8,25 @@
   "patches": [
     {
       "path": "patches/0001-readonly-input-audit.patch",
-      "sha256": "cb7e513770f1cfde5b325b7b1a2fd737314b6dda280e3595dc324f26003c45cc"
+      "sha256": "9f8fa9d38d033286e514fa59c0441d30c7d37a228e72b54c55f4e072101aa6a2"
     }
   ],
   "input_audit": {
-    "contract_version": 1,
+    "contract_version": 2,
     "capability": "input_audit_observer",
+    "snapshot_capability": "input_audit_snapshot",
+    "prepare_method": "input_audit.prepare",
+    "prepare_fields": ["id", "object_id", "received_at", "protocol"],
+    "snapshot_fields": ["version", "decision", "max_text_bytes", "collector_generation"],
+    "prepare_timing": "after-final-native-authentication-before-handler-body-read",
+    "snapshot_lifetime": "request-private-bound-to-original-observer-instance",
     "observe_method": "input_audit.observe",
     "capabilities_method": "host.input_audit.capabilities",
+    "bridge_diagnostics": "host-lifetime-saturating-failures-fixed-reason-no-input",
+    "bridge_capability_fields": ["bridge_failures", "bridge_reason"],
     "catalog_method": "host.input_audit.catalog",
     "protocols": ["chat-completions"],
-    "event_fields": ["id", "object_id", "received_at", "protocol", "body", "read_error"],
+    "event_fields": ["id", "object_id", "received_at", "protocol", "snapshot", "body", "read_error"],
     "body_encoding": "base64",
     "read_error_body": "omitted",
     "identity_provider": "config-inline",

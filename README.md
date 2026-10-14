@@ -1,13 +1,15 @@
 # CPA 请求输入审计：最小安全闭环
 
-本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前实施 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
+本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md) 与 [ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md) 的本地验收范围，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
 
 ## 已实现范围
 
-- 固定官方 commit `bf9341629ef2300ac9d846a2e80fe2756f63a671`，保持 C ABI 1 / RPC schema 6，新增独立只读观察契约 1。
-- 宿主在内置客户端 Key 鉴权成功、原协议读取后、业务改写及模型路由前观察。不是 usage queue 或执行请求拦截器。
+- 固定官方 commit `bf9341629ef2300ac9d846a2e80fe2756f63a671`，保持 C ABI 1 / RPC schema 6，新增独立只读观察契约 2；旧契约不静默降级。
+- 宿主在最终内置客户端 Key 鉴权后、读体前同步冻结本次提交的无秘密身份与采集决策；读体后、业务改写及模型路由前只读观察，不重新按名单或主动暂停决定资格。不是 usage queue 或执行请求拦截器。
 - 宿主随机 seed + HMAC-SHA-256 产生稳定无秘密对象 ID；不同 Key 分开，目录和认证采用同一算法，不依赖配置下标/名称。标识不能登录。
-- 默认监控名单为空。管理员选择 ID 并命名；不粘贴原客户端 Key，不改变宿主 Key 配置。
+- 默认监控名单为空。管理员选择 ID 并命名、仅改名、移除或重新加入；名称仅在对象目录保存，旧/新记录显示当前名称。同 Key 重返名单沿用历史，不同 Key 即使同名也独立。不粘贴原客户端 Key，不改变宿主 Key 配置。
+- 全局主动暂停/恢复单独持久化，不解除存储故障、不把预期跳过记为缺口；后续变更不取消已接收/入队副本。对象名称、停用及暂停状态正常重启后保留。
+- 当前有效 Key、已移除但有历史及 Key 已无效的对象具有独立状态；管理员可按对象筛选历史，查询不要求原 Key 仍有效。已知对象总数最多1024（包含停用对象），名称最多256 UTF-8字节。
 - 仅保存 Chat Completions 最后一个 `user.content` 字符串。末尾 `assistant` / `tool` 不回找；空字符串跳过，空白原样保存。未支持内容和解析失败有诊断，不保存完整请求兜底。
 - 正文最多 64 KiB UTF-8 安全前缀，只截断审计副本。请求模型缺失/非字符串时记为未知，不猜测。普通文本里的 URL、秘密、Base64 **不会自动脱敏**。
 - 64 条 / 8 MiB 有界副本队列，约 1 MiB 分段 JSONL，写入并同步成功后才允许管理查询；入队不等于保存。
@@ -17,7 +19,7 @@
 
 ## 未完成与风险
 
-尚无其他协议、复杂内容块、WebSocket、完整 SSE/重试/断开矩阵、组合搜索、七天过期清理、动态预算管理、满额自动恢复、异常退出恢复、完整缺口历史或 Linux 双架构运行验收。**已保存输入目前不会自动到期清理。** 配置保留和正常重启的最小检查不等于完成 ticket 02/11。
+尚无其他协议、复杂内容块、WebSocket、完整 SSE/重试/断开矩阵、组合搜索、七天过期清理、动态预算管理、满额自动恢复、异常退出恢复、完整缺口历史或 Linux 双架构运行验收。**已保存输入目前不会自动到期清理。** 本票只实现配置生命周期；暂停、移除不会改变接收时间或删除历史，保留期限/清理由后续票完成，正常重启不等于异常恢复 ticket 11 已完成。
 
 应用层不加密。专用目录为 `0700`、文件为 `0600`，仍需保护主机、磁盘、快照和备份。没有安全擦除或 native 进程崩溃隔离保证；常规解析/队列/存储错误 fail-open，不代表零丢失、零延迟或吞吐承诺。诊断是有界运行期原因码和已知计数，不是完整可恢复缺口历史。
 
@@ -87,9 +89,9 @@ go build -o .build/bin/audit-demo ./cmd/audit-demo
 
 固定官方管理前端为 `v1.26.2`，摘要见 `host/management-ui.json`。复用的 `cli-proxy-auth` 状态格式是此版本的兼容契约，不声称官方有临时 token 桥或未来前端自动兼容。插件不新增凭据持久化；宿主管理前端自身的“记住密码”行为不由插件改变。
 
-自动验收只需 `make browser`：构建固定宿主/插件及 demo、核对管理页面、启动真实实例、运行两个场景各两轮并停止进程，不依赖 MCP。已有构建产物时可用 `make browser-run`。启动 JSON 只有健康检查通过后才发 `ready`，失败/超时有明确退出；runner 不保存子进程 stderr 原文或 Playwright 可能含凭据的调用日志，只报告固定阶段/原因和本项目场景行号。
+自动验收只需 `make browser`：构建固定宿主/插件及 demo、核对管理页面、启动真实实例、运行三个场景各两轮并停止进程，不依赖 MCP。已有构建产物时可用 `make browser-run`。启动 JSON 只有健康检查通过后才发 `ready`，失败/超时有明确退出；runner 不保存子进程 stderr 原文或 Playwright 可能含凭据的调用日志，只报告固定阶段/原因和本项目场景行号。
 
-场景位于 `tests/browser/smoke.js`、`tests/browser/truncation.js`。前者验证菜单、选择、单条详情、HTML/Markdown 字面显示、无外部加载及插件不新增凭据存储；后者验证截断标签、65,535 字节安全前缀与超限尾部不可见。同一宿主连续两轮且每次使用唯一标记/记录 ID，旧数据不能冒充本轮通过。有限证据保存在 `.test-data/verification-*/result.json` 和状态标签截图；没有成功验收的结果不会报告为通过。
+场景位于 `tests/browser/smoke.js`、`tests/browser/truncation.js`、`tests/browser/lifecycle.js`。分别验证菜单与纯文本安全展示、65,535字节截断标签，以及页面改名、移除后历史筛选、同Key重新加入、主动暂停/恢复。同一宿主连续两轮且每次使用唯一标记/记录 ID，旧数据不能冒充本轮通过。有限证据保存在 `.test-data/verification-*/result.json` 和状态标签截图；没有成功验收的结果不会报告为通过。
 
 浏览器环境使用精确版本 Playwright 和明确的 `zh-CN` locale，匹配固定管理前端；不宣称所有浏览器/语言/未来前端已验证。验收责任与工作区审查的项目约定见 `docs/agents/verification.md`；个人技能文件不修改。
 
@@ -99,9 +101,12 @@ go build -o .build/bin/audit-demo ./cmd/audit-demo
 
 | 方法 | 路径（前缀 `/v0/management/plugins/request-input-audit`） | 行为 |
 | --- | --- | --- |
-| GET | `/objects` | 当前内置 Key 的无秘密对象与选择状态 |
-| POST | `/monitor` | `{"object_id":"64hex","name":"名称"}`；名称最多 256 UTF-8 字节 |
-| GET | `/records?offset=0&limit=20` | 已保存记录短预览，`limit` 为 1–100 |
+| GET | `/objects` | 当前内置 Key 与已知/历史对象的联合目录，含 `valid`、`monitored`、`has_history`；目录不可用时 `available=false`，不将缓存对象冒充有效 Key |
+| POST | `/monitor` | `{"object_id":"64hex","name":"名称"}`；只添加/启用当前有效内置对象，名称最多256 UTF-8字节 |
+| POST | `/rename` | 相同参数；仅更新已知对象的当前名称，不改启用状态，允许无效 Key 的历史对象 |
+| POST | `/remove` | `{"object_id":"64hex"}`；停用后续采集，不删除名称或历史 |
+| POST | `/pause` | `{"paused":true}` 或 `false`；成功提交不解除既有存储故障；保存失败可能新增存储故障 |
+| GET | `/records?offset=0&limit=20&object_id=<64hex>` | 可选对象精确筛选；分页前过滤，总数仅统计匹配记录，`limit`为1–100 |
 | GET | `/detail?id=<recordID>` | 独立记录正文和白名单元数据 |
 | GET | `/status` | 实时观察契约状态和基础采集诊断 |
 
@@ -109,4 +114,8 @@ go build -o .build/bin/audit-demo ./cmd/audit-demo
 
 记录只持久化：`id`、`object_id`、`received_at`、`protocol`、`model`、`text`、`truncated`。名称存在对象配置中，查询时关联，不逐条快照保存。配置、状态和新增诊断不能包含原认证 Key、历史、指令、工具数据、模型回复、请求头、完整 URL 或上游账号。
 
-设计取舍见 [CONTEXT.md](CONTEXT.md) 和 [ADR-0001](docs/adr/0001-minimal-audit-loop.md)。
+对象配置采用版本化 `monitors.json`，兼容旧 `map[id]name`；旧格式在下一次成功修改时升级，不在启动时擅自改写。损坏、未知版本、歧义字段或超限配置会明确停采，不能以管理操作覆盖成空名单。新配置也纳入总目录预算；没有删除已知对象的管理功能。配置保存失败不发布本轮内存变更，但替换文件后的目录同步/扫描失败不能保证磁盘回滚：会停采，重启可能加载已替换值，管理员应核对结果，不把错误响应理解成必然维持旧磁盘配置。
+
+接收快照不持久化。请求只携带固定小决策、上限与随机采集器代际，不保存待提交映射或旧配置副本；观察者替换/采集器重开导致旧快照失效，属于能力故障，不伪装为主动暂停。普通关闭、存储或容量故障仍可能丢失副本，不承诺零丢失。宿主准备/投递桥接的可恢复错误、无效快照及旧实例失效使用实例内有界饱和计数，管理状态合并到 `gaps.observer_unavailable` 并在无活动故障时保留 `observer_bridge_error` 提示（已有存储故障原因优先展示）；后续成功不抹去历史计数，正常重启会重置该运行期计数，不冒充完整可恢复缺口历史。
+
+生命周期系统验收见 `tests/system/lifecycle_test.go`、`tests/system/snapshot_test.go`。慢体测试使用 chunked + `Expect: 100-continue` 屏障，验证配置只影响下一提交；普通小 Content-Length 会被宿主既有日志中间件提前读体，不能用其100响应证明接收快照时序。设计取舍见 [CONTEXT.md](CONTEXT.md)、[ADR-0001](docs/adr/0001-minimal-audit-loop.md) 与 [ADR-0002](docs/adr/0002-admission-snapshot.md)。
