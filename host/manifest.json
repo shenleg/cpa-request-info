@@ -1,5 +1,5 @@
 {
-  "_description": "本清单固定 Chat Completions 与 Responses HTTP 宿主扩展的官方基线、完整增量补丁和独立观察契约；不声明 WebSocket、后续票据或其他平台已通过验收。",
+  "_description": "本清单固定 Chat Completions、Responses HTTP 与 Anthropic Messages 宿主扩展的官方基线、完整增量补丁和独立观察契约；不声明 WebSocket、后续票据或其他平台已通过验收。",
   "repository": "https://github.com/router-for-me/CLIProxyAPI",
   "tag": "v8.0.27",
   "commit": "bf9341629ef2300ac9d846a2e80fe2756f63a671",
@@ -8,7 +8,7 @@
   "patches": [
     {
       "path": "patches/0001-readonly-input-audit.patch",
-      "sha256": "0fdf93ef09ae1e96604d7347006413dd6037ff8323958f7c4bf30385044e36e8"
+      "sha256": "207b7fe353062027716620ad75ec028c278b0d118577ea7b226db8bfce43edb2"
     }
   ],
   "input_audit": {
@@ -25,9 +25,9 @@
     "bridge_diagnostics": "host-lifetime-saturating-failures-fixed-reason-no-input",
     "bridge_capability_fields": ["bridge_failures", "bridge_reason"],
     "catalog_method": "host.input_audit.catalog",
-    "protocols": ["chat-completions", "responses"],
-    "protocol_negotiation": "host-capabilities-must-advertise-both-http-protocols",
-    "http_routes": ["/v1/chat/completions", "/v1/responses", "/v1/responses/compact", "/backend-api/codex/responses", "/backend-api/codex/responses/compact"],
+    "protocols": ["chat-completions", "responses", "anthropic-messages"],
+    "protocol_negotiation": "host-capabilities-must-advertise-all-three-http-protocols",
+    "http_routes": ["/v1/messages", "/v1/chat/completions", "/v1/responses", "/v1/responses/compact", "/backend-api/codex/responses", "/backend-api/codex/responses/compact"],
     "responses_websocket": false,
     "event_fields": ["id", "object_id", "received_at", "protocol", "snapshot", "body", "read_error"],
     "body_encoding": "base64",
@@ -58,6 +58,7 @@
       "./sdk/pluginapi",
       "./sdk/pluginabi",
       "./sdk/api/handlers",
+      "./sdk/api/handlers/claude",
       "./sdk/api/handlers/openai",
       "./internal/api"
     ]

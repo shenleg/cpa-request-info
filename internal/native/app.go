@@ -62,7 +62,7 @@ func (a *App) Handle(method string, raw []byte) (any, error) {
 		return struct {
 			Routes    []route    `json:"routes"`
 			Resources []resource `json:"resources"`
-		}{[]route{{"GET", "/plugins/request-input-audit/objects"}, {"POST", "/plugins/request-input-audit/monitor"}, {"POST", "/plugins/request-input-audit/remove"}, {"POST", "/plugins/request-input-audit/rename"}, {"POST", "/plugins/request-input-audit/pause"}, {"GET", "/plugins/request-input-audit/records"}, {"GET", "/plugins/request-input-audit/detail"}, {"GET", "/plugins/request-input-audit/status"}}, []resource{{"/index.html", "输入审计", "Chat Completions 与 Responses HTTP 输入审计"}}}, nil
+		}{[]route{{"GET", "/plugins/request-input-audit/objects"}, {"POST", "/plugins/request-input-audit/monitor"}, {"POST", "/plugins/request-input-audit/remove"}, {"POST", "/plugins/request-input-audit/rename"}, {"POST", "/plugins/request-input-audit/pause"}, {"GET", "/plugins/request-input-audit/records"}, {"GET", "/plugins/request-input-audit/detail"}, {"GET", "/plugins/request-input-audit/status"}}, []resource{{"/index.html", "输入审计", "Chat Completions、Responses HTTP 与 Anthropic Messages 输入审计"}}}, nil
 	case "management.handle":
 		var req managementRequest
 		if err := json.Unmarshal(raw, &req); err != nil {
@@ -101,9 +101,9 @@ func (a *App) Handle(method string, raw []byte) (any, error) {
 	}
 }
 
-// supportsHTTPAudit 拒绝只具备旧 Chat 接入点的同版本宿主，避免管理页静默宣称 Responses 全覆盖。
+// supportsHTTPAudit 要求三协议接入点齐备，拒绝同契约版本但接入不完整的旧宿主，避免静默漏采。
 func supportsHTTPAudit(protocols []string) bool {
-	return slices.Contains(protocols, "chat-completions") && slices.Contains(protocols, "responses")
+	return slices.Contains(protocols, "chat-completions") && slices.Contains(protocols, "responses") && slices.Contains(protocols, "anthropic-messages")
 }
 
 func (a *App) configure(raw []byte) {
@@ -210,7 +210,7 @@ func (a *App) management(req managementRequest) any {
 		if live.BridgeFailures > 0 && reason == "" && collectorReason == "" {
 			reason = "observer_bridge_error"
 		}
-		return responseJSON(200, map[string]any{"available": available, "reason": reason, "supported": "chat-completions-and-responses-http-last-user-content", "supported_protocols": []string{"chat-completions", "responses"}, "responses_websocket": false, "retention": "not_implemented", "state": state})
+		return responseJSON(200, map[string]any{"available": available, "reason": reason, "supported": "chat-completions-responses-anthropic-http-last-user-content", "supported_protocols": []string{"chat-completions", "responses", "anthropic-messages"}, "responses_websocket": false, "retention": "not_implemented", "state": state})
 	}
 	if strings.HasSuffix(req.Path, "/objects") {
 		catalog, catalogErr := a.catalog()

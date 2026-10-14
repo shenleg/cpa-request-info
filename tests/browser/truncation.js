@@ -124,6 +124,40 @@ module.exports = async (page, options = {}) => {
     await frame.locator('#detail-meta').screenshot({path:labelScreenshot});
     extraScreenshots.push(require('node:path').basename(labelScreenshot));
   }
-  assert((await frame.locator('#notice').textContent()).includes('Responses HTTP'), '页面未说明实际 HTTP 支持范围');
-  return {screenshot,extraScreenshots,modelStatus:200,listTruncationLabel:true,detailTruncationLabel:true,incompleteLabels:true,combinedLabels:true,visibleGap:true,literalPlaceholders:true,responsesProtocolLabels:true,responsesRequestModel:true,unknownRequestModel:true,externalLoads,visibleBytes:visible.bytes,tailVisible:false,brokenUTF8:false};
+  // Anthropic 的工具结果即使带嵌套文本/附件也不是新用户输入；页面只显示允许正文与固定占位符。
+  const anthropicMarker = 'BROWSER-ANTHROPIC-' + Date.now() + '-';
+  const anthropicLimitMarker = 'BROWSER-ANTHROPIC-LIMIT-' + Date.now() + '-';
+  const anthropicPrefix = anthropicLimitMarker + 'a'.repeat(65535 - anthropicLimitMarker.length);
+  const toolResult = {type:'tool_result',tool_use_id:'FORBIDDEN_BROWSER_ANTHROPIC_TOOL_ID',content:[{type:'text',text:'FORBIDDEN_BROWSER_ANTHROPIC_TOOL_TEXT'},{type:'image',source:{type:'url',url:'FORBIDDEN_BROWSER_ANTHROPIC_TOOL_IMAGE'}},{type:'document',source:{type:'file',file_id:'FORBIDDEN_BROWSER_ANTHROPIC_TOOL_FILE'}}]};
+  const anthropicCases = [
+    {marker:anthropicMarker,content:[toolResult,{type:'text',text:anthropicMarker+hostile},{type:'image',source:{type:'url',url:'FORBIDDEN_BROWSER_ANTHROPIC_IMAGE'}},{type:'document',source:{type:'text',data:'FORBIDDEN_BROWSER_ANTHROPIC_DOCUMENT'}},unknown,{type:'text',text:'后'}],want:anthropicMarker+hostile+'[图片][文件]后',truncated:false,label:'提取不完整'},
+    {marker:anthropicLimitMarker,content:[{type:'text',text:anthropicPrefix},{type:'text',text:'🙂FORBIDDEN_BROWSER_ANTHROPIC_TAIL'},unknown],want:anthropicPrefix,truncated:true,label:'已截断 · 提取不完整'}
+  ];
+  page.on('request', onRequest);
+  try {
+    for (const [i,tc] of anthropicCases.entries()) {
+      const submitted = await page.request.post(origin + '/v1/messages', {
+        headers:{Authorization:'Bearer synthetic-client-audit-a-only'},
+        data:{model:'audit-test-model',max_tokens:32,system:'FORBIDDEN_BROWSER_ANTHROPIC_SYSTEM',messages:[{role:'user',content:'FORBIDDEN_BROWSER_ANTHROPIC_HISTORY'},{role:'user',content:tc.content}]}
+      });
+      assert(submitted.status()===200, 'Anthropic 审计改变了原模型调用结果');
+      const detail = await openSavedDetail({...tc,incomplete:true});
+      assert(detail.protocol==='anthropic-messages' && detail.model==='audit-test-model' && detail.text===tc.want, 'Anthropic 原始内容、请求模型或协议错误');
+      const row = frame.locator('#records tbody tr').filter({hasText:tc.marker});
+      await row.getByRole('cell', {name:'Anthropic Messages',exact:true}).waitFor();
+      await row.getByRole('cell', {name:'audit-test-model',exact:true}).waitFor();
+      await frame.locator('#detail-meta').filter({hasText:'Anthropic Messages · audit-test-model'}).waitFor();
+      assert((await frame.locator('#detail').textContent())===tc.want, 'Anthropic 详情未展示已保存纯文本');
+      assert((await frame.locator('#detail img, #detail a, #detail script').count())===0, 'Anthropic 输入生成了外部资源节点');
+      const labelScreenshot = screenshot.replace(/\.png$/, i===0?'-anthropic.png':'-anthropic-combined.png');
+      await frame.locator('#detail-meta').screenshot({path:labelScreenshot});
+      extraScreenshots.push(require('node:path').basename(labelScreenshot));
+    }
+    assert(externalLoads===0, 'Anthropic 正文触发了外部资源加载');
+  } finally {
+    page.off('request', onRequest);
+  }
+  const notice = await frame.locator('#notice').textContent();
+  assert(notice.includes('Responses HTTP') && notice.includes('Anthropic Messages') && notice.includes('tool_result'), '页面未说明实际 HTTP 支持及工具结果边界');
+  return {screenshot,extraScreenshots,modelStatus:200,listTruncationLabel:true,detailTruncationLabel:true,incompleteLabels:true,combinedLabels:true,visibleGap:true,literalPlaceholders:true,responsesProtocolLabels:true,responsesRequestModel:true,unknownRequestModel:true,anthropicProtocolLabels:true,anthropicToolBoundary:true,anthropicCombinedLabels:true,externalLoads,visibleBytes:visible.bytes,tailVisible:false,brokenUTF8:false};
 }

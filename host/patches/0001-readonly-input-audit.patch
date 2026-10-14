@@ -53,13 +53,15 @@ index efe1e58f222426b653caee57cc7868859ca3808e..7a0d7f625d03028ac89fbd4c384f2557
  	return func(c *gin.Context) {
  		if manager == nil {
  			c.Next()
-@@ -208,6 +209,15 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
+@@ -208,6 +209,17 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
  				reqCtx := coreusage.WithAPIKey(c.Request.Context(), result.Principal)
  				reqCtx = coreusage.WithAccessProvider(reqCtx, result.Provider)
  				reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(result.Provider))
 +				if result.NativeConfigKey && result.Provider == sdkaccess.DefaultAccessProviderName && len(auditHost) > 0 && c.Request.Method == http.MethodPost {
 +					// Exact POST routes exclude WebSocket handshakes and unrelated API submissions.
 +					switch c.FullPath() {
++					case "/v1/messages":
++						reqCtx = handlers.WithInputAuditEntry(reqCtx, result.Principal, "anthropic-messages", auditHost[0])
 +					case "/v1/chat/completions":
 +						reqCtx = handlers.WithInputAuditEntry(reqCtx, result.Principal, "chat-completions", auditHost[0])
 +					case "/v1/responses", "/v1/responses/compact", "/backend-api/codex/responses", "/backend-api/codex/responses/compact":
@@ -263,7 +265,7 @@ index 0000000000000000000000000000000000000000..ef3df7c98b3214ed5d4a7ce249ca6fcf
 +	if reason == "" {
 +		_, reason = inputAuditSeed(dir)
 +	}
-+	response := inputAuditCapabilities{ContractVersion: 2, Protocols: []string{"chat-completions", "responses"}, Available: reason == "", Reason: reason}
++	response := inputAuditCapabilities{ContractVersion: 2, Protocols: []string{"chat-completions", "responses", "anthropic-messages"}, Available: reason == "", Reason: reason}
 +	if h != nil {
 +		response.BridgeFailures = h.inputAuditBridgeFailures.Load()
 +		if response.BridgeFailures > 0 {
@@ -678,6 +680,30 @@ index e257f27658dddf942dac59f9f08065c2540ef184..cb48709adce5065c20437d65440ccd4a
  }
  
  var (
+diff --git a/sdk/api/handlers/claude/code_handlers.go b/sdk/api/handlers/claude/code_handlers.go
+--- a/sdk/api/handlers/claude/code_handlers.go
++++ b/sdk/api/handlers/claude/code_handlers.go
+@@ -63,15 +63,14 @@
+ 	return modelRegistry.GetAvailableModels("claude")
+ }
+
+-// ClaudeMessages handles Claude-compatible streaming chat completions.
+-// This function implements a sophisticated client rotation and quota management system
+-// to ensure high availability and optimal resource utilization across multiple backend clients.
+-//
+-// Parameters:
+-//   - c: The Gin context for the request.
++// ClaudeMessages handles a Claude-compatible submission using c for transport and authentication.
++// It observes the original decoded body before model rewriting, translation, or routing.
++// It returns no value; read and execution failures retain the existing HTTP error responses.
+ func (h *ClaudeCodeAPIHandler) ClaudeMessages(c *gin.Context) {
+ 	// Extract raw JSON data from the incoming request
+ 	rawJSON, err := c.GetRawData()
++	// Audit failures are fail-open and must not change the body or the model call.
++	h.ObserveInputAudit(c, rawJSON, err != nil)
+ 	// If data retrieval fails, return a 400 Bad Request error.
+ 	if err != nil {
+ 		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{
 diff --git a/sdk/api/handlers/input_audit.go b/sdk/api/handlers/input_audit.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..8b36e4690f3eb9a641c2586dd9788100723a079d
@@ -888,7 +914,7 @@ index 6060977886cd9c24d5493dc873c9ba1858af5ac8..b0a11ba693ca0b45abe32c4adeed96bf
  	ResponseBeforeTranslator ResponseNormalizer
  	// ResponseAfterTranslator normalizes translated responses before delivery.
  	ResponseAfterTranslator ResponseNormalizer
-+	// InputAuditObserver freezes v2 admission and receives isolated, read-only authenticated Chat Completions inputs.
++	// InputAuditObserver freezes v2 admission and receives isolated, read-only authenticated HTTP protocol inputs.
 +	InputAuditObserver InputAuditObserver
  	// RequestInterceptor rewrites execution requests before and after credential selection.
  	RequestInterceptor RequestInterceptor

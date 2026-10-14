@@ -1,6 +1,6 @@
 # CPA 请求输入审计：最小安全闭环
 
-本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)、[ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md)、[ticket 03](.scratch/request-input-audit/issues/03-chat-input-boundaries.md) 与 [ticket 04](.scratch/request-input-audit/issues/04-responses-http.md) 的本地验收范围，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
+本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)、[ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md)、[ticket 03](.scratch/request-input-audit/issues/03-chat-input-boundaries.md)、[ticket 04](.scratch/request-input-audit/issues/04-responses-http.md) 与 [ticket 05](.scratch/request-input-audit/issues/05-anthropic-messages.md) 的本地验收范围，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
 
 ## 已实现范围
 
@@ -15,7 +15,8 @@
 - 未知/畸形块不序列化：安全部分保存并标记 `extraction_incomplete`，每次提交增加一次 `unsupported_content` 缺口；完全无法安全提取则只报缺口。缺失字段、重复键和大小写别名不静默回退为完整输入，也不保存整请求兜底。空字符串、显式 `null`、空数组、仅合法空文本或工具块正常跳过，空白文本不 trim。
 - 文本与占位符合计最多 64 KiB UTF-8 安全前缀，不含元数据；恰好上限不误报，首次字符越界后不再拼后续短块。只截断审计副本，列表和详情分别显示截断/提取不完整，两种状态可同时存在。请求模型缺失/非字符串时记为未知，不猜测。普通文本里的 URL、秘密、Base64 **不会自动脱敏**。
 - Responses HTTP 覆盖标准、compact 与 Codex direct 别名 POST 入口；GET WebSocket 握手不观察。字符串 `input` 是本次用户文本，结构化列表只取末尾明确 `user` 消息（`type` 省略或为 `message`），不回找/拼接历史。`input_text` 原样提取；`input_image`、`input_file`、固定宿主支持的 `input_audio` 和 `input_video` 只留占位符。已知工具/模型生成项整体排除，未知项与无法判断的 `item_reference` 报解析缺口，不解析引用。
-- `previous_response_id` 不参与历史回查或持久化，显式重发独立记录；客户端请求模型先于路由及上游别名映射提取，不从回复补猜。宿主 capabilities 必须显式声明两种 HTTP 协议，只有旧 Chat 接入点的 contract v2 宿主也拒绝采集，不静默显示 Responses 覆盖。
+- `previous_response_id` 不参与历史回查或持久化，显式重发独立记录；客户端请求模型先于路由及上游别名映射提取，不从回复补猜。宿主 capabilities 必须显式声明三种 HTTP 协议，缺少任一接入点的旧 contract v2 宿主也拒绝采集，不静默显示全覆盖。
+- Anthropic Messages 在 `/v1/messages` 认证后、模型 DD 名称改写/协议转换/路由之前观察原始消息。末尾连续 `user` 只取最后一条；纯 `tool_result` 正常跳过，混合消息只提取新 `text` 和固定附件占位符，不提取工具结果内嵌文本、图片、文件或引用。`image` 只留 `[图片]`，`document`（包括 text/content 来源）只留 `[文件]`；未知类型/来源报告提取不完整或解析缺口，不猜测其他协议的内容类型。
 - 64 条 / 8 MiB 有界副本队列，约 1 MiB 分段 JSONL，写入并同步成功后才允许管理查询；入队不等于保存。
 - 默认总预算 1 GiB，合法启动预算 4 MiB–1 GiB；保守核算整个专用目录及辅助文件，预留 1 MiB 配置更新等维护空间。满额停采，不覆盖或删除旧记录。
 - 宿主插件菜单、无数据静态 shell、受保护对象/选择/状态/列表/详情 API。正文和名称只按纯文本展示，不渲染 HTML/Markdown，不自动加载外部资源。
@@ -23,7 +24,7 @@
 
 ## 未完成与风险
 
-尚无 Anthropic Messages、上述白名单以外的内容类型、Responses WebSocket、完整 SSE/重试/断开矩阵、组合搜索、七天过期清理、动态预算管理、满额自动恢复、异常退出恢复、完整缺口历史或 Linux 双架构运行验收。**已保存输入目前不会自动到期清理。** 当前只实现最小闭环、配置生命周期、Chat 输入边界与 Responses HTTP；暂停、移除不会改变接收时间或删除历史，保留期限/清理由后续票完成，正常重启不等于异常恢复 ticket 11 已完成。
+尚无上述白名单以外的内容类型、Responses WebSocket、完整 SSE/重试/断开矩阵、组合搜索、七天过期清理、动态预算管理、满额自动恢复、异常退出恢复、完整缺口历史或 Linux 双架构运行验收。**已保存输入目前不会自动到期清理。** 当前只实现最小闭环、配置生命周期、Chat 输入边界、Responses HTTP 与 Anthropic Messages；暂停、移除不会改变接收时间或删除历史，保留期限/清理由后续票完成，正常重启不等于异常恢复 ticket 11 已完成。
 
 应用层不加密。专用目录为 `0700`、文件为 `0600`，仍需保护主机、磁盘、快照和备份。没有安全擦除或 native 进程崩溃隔离保证；常规解析/队列/存储错误 fail-open，不代表零丢失、零延迟或吞吐承诺。诊断是有界运行期原因码和已知计数，不是完整可恢复缺口历史。
 
@@ -95,7 +96,7 @@ go build -o .build/bin/audit-demo ./cmd/audit-demo
 
 自动验收只需 `make browser`：构建固定宿主/插件及 demo、核对管理页面、启动真实实例、运行三个场景各两轮并停止进程，不依赖 MCP。已有构建产物时可用 `make browser-run`。启动 JSON 只有健康检查通过后才发 `ready`，失败/超时有明确退出；runner 不保存子进程 stderr 原文或 Playwright 可能含凭据的调用日志，只报告固定阶段/原因和本项目场景行号。
 
-场景位于 `tests/browser/smoke.js`、`tests/browser/truncation.js`、`tests/browser/lifecycle.js`。分别验证菜单与纯文本安全展示、65,535字节截断标签/提取不完整/双状态及可见缺口、Responses 协议与请求模型/未知模型展示，以及页面改名、移除后历史筛选、同Key重新加入、主动暂停/恢复。同一宿主连续两轮且每次使用唯一标记/记录 ID，旧数据不能冒充本轮通过。有限证据保存在 `.test-data/verification-*/result.json` 和状态标签截图；没有成功验收的结果不会报告为通过。
+场景位于 `tests/browser/smoke.js`、`tests/browser/truncation.js`、`tests/browser/lifecycle.js`。分别验证菜单与纯文本安全展示、65,535字节截断标签/提取不完整/双状态及可见缺口、Responses 协议与请求模型/未知模型展示、Anthropic 工具混合输入与原协议/双状态展示，以及页面改名、移除后历史筛选、同Key重新加入、主动暂停/恢复。同一宿主连续两轮且每次使用唯一标记/记录 ID，旧数据不能冒充本轮通过。有限证据保存在 `.test-data/verification-*/result.json` 和状态标签截图；没有成功验收的结果不会报告为通过。
 
 浏览器环境使用精确版本 Playwright 和明确的 `zh-CN` locale，匹配固定管理前端；不宣称所有浏览器/语言/未来前端已验证。验收责任与工作区审查的项目约定见 `docs/agents/verification.md`；个人技能文件不修改。
 
@@ -123,6 +124,19 @@ make test-one TEST='TestResponsesHTTP'
 ```
 
 固定内容白名单：`input_image` 要有非空字符串 `image_url` 或 `file_id`；`input_file` 要有 `file_data`、`file_url` 或 `file_id`；`input_audio` 识别嵌套 `input_audio.data` 或扁平 `data`；`input_video` 识别 `video_url` 字符串或对象内的 `url`。这些字段只用于瞬时判断占位，不持久化来源或数据。畸形/未知形状报告缺口，不用宿主转换后消息替代。协议类型依据 [OpenAI Responses schema](https://github.com/openai/openai-openapi/blob/main/openapi.yaml) 与固定宿主已支持形状限定，不承诺未来新增类型自动兼容。
+
+## Anthropic Messages 输入边界验收
+
+`tests/system/anthropic_messages_test.go` 与 `tests/system/anthropic_execution_test.go` 使用相同公开系统边界，覆盖末尾用户选择、纯工具续跑/混合新内容、附件/文档内部内容排除、未知块、空白、字段歧义、认证/未监控跳过、管理鉴权、UTF-8 安全前缀及正常重启。`/v1/messages/count_tokens` 不属于模型提交，不采集。附件 `source` 白名单依据 [Anthropic Messages schema](https://github.com/anthropics/anthropic-sdk-typescript/blob/main/src/resources/messages/messages.ts)：`image` 识别 `base64`/`url`/`file`，`document` 另识别 `text`/`content`；只判定来源，不保存或递归提取载荷。音频、视频和未来类型不因其他协议支持就推断为已识别，报告缺口。
+
+本地原生 Anthropic 上游逐次比较审计开启/关闭的请求字节和 HTTP/SSE 响应，核对历史、系统指令、超限尾部和未知块仍由原宿主正常转发。宿主既有 system 内容数组规范化及 `cache_control` 注入不由审计改变；测试另核对业务内容保持完整。客户端 DD 模型名经宿主解码和上游别名映射后仍以原请求名进入审计，证明观察先于业务改写。阻塞上游直到受保护详情已查到本轮输入，再返回失败，证明不等待回复。审计目录/诊断扫描只检查字段白名单及禁存标记，不复制输入或日志原文为报告。
+
+```bash
+make test-one TEST='TestAnthropic'
+make browser-run
+```
+
+本票未宣称重试/断开完整矩阵、Responses WebSocket、其他平台或后续票据已完成。
 
 ## 管理 API
 

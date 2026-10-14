@@ -129,7 +129,7 @@ func Open(dir string, budget int64) (*Collector, error) {
 	return c, nil
 }
 
-// Observe 按 event 的接收快照同步提取 Chat/Responses 本次允许输入并非阻塞入队，不复核当前名单或主动暂停。
+// Observe 按 event 的接收快照同步提取三协议 HTTP 本次允许输入并非阻塞入队，不复核当前名单或主动暂停。
 // 无返回值，解析及容量失败仅增加固定缺口诊断，不影响宿主请求；Body 不进入采集器。
 func (c *Collector) Observe(event Event) {
 	c.mu.Lock()
@@ -160,7 +160,7 @@ func (c *Collector) Observe(event Event) {
 		c.gap("invalid_event")
 		return
 	}
-	if event.Protocol != "chat-completions" && event.Protocol != "responses" {
+	if !supportedHTTPProtocol(event.Protocol) {
 		c.gap("unsupported_protocol")
 		return
 	}
@@ -197,7 +197,11 @@ func (c *Collector) Observe(event Event) {
 			c.gap("unsupported_content")
 			return
 		}
-		text, truncated, incomplete = chatContent(last["content"], event.Snapshot.MaxTextBytes)
+		if event.Protocol == "anthropic-messages" {
+			text, truncated, incomplete = anthropicContent(last["content"], event.Snapshot.MaxTextBytes)
+		} else {
+			text, truncated, incomplete = chatContent(last["content"], event.Snapshot.MaxTextBytes)
+		}
 	}
 	if incomplete {
 		// 一次提交只计一次提取缺口；仍允许安全部分入队，不把未知内容归为空输入。
@@ -321,6 +325,11 @@ func protocolObject(raw []byte) (map[string]json.RawMessage, error) {
 		return nil, errors.New("invalid_json")
 	}
 	return fields, nil
+}
+
+// supportedHTTPProtocol 同时限定入站与持久化读取，避免新增协议能采集却在重启时被判为损坏。
+func supportedHTTPProtocol(protocol string) bool {
+	return protocol == "chat-completions" || protocol == "responses" || protocol == "anthropic-messages"
 }
 
 func validObjectID(id string) bool {

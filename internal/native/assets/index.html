@@ -2,14 +2,14 @@
 <!-- 本页面只托管无数据 shell；动态数据受宿主管理鉴权保护，管理 Key 仅在页面内存驻留。 -->
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-aSmwKfQUOCKJ2B8wyknEUU4LC/G8eULmSdBqC/lkfOE='; style-src 'sha256-mcEoXKWBfiRvpvTh90RoJs1oIgkKU4gVvUXfuAv9NcU='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-QSzn2dGJXvklbIdssCFXlhp74ygupxKzHTIKmiFOpyg='; style-src 'sha256-mcEoXKWBfiRvpvTh90RoJs1oIgkKU4gVvUXfuAv9NcU='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <title>输入审计</title>
 <style>
 :root{color-scheme:light dark;font-family:system-ui,sans-serif}body{max-width:1100px;margin:24px auto;padding:0 20px;line-height:1.6}input,select,button{font:inherit;margin:5px;padding:7px;max-width:95%}button{cursor:pointer}label{display:block}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #888;padding:9px;text-align:left;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:14px;border:1px solid #888}#notice{border-left:4px solid #888;padding-left:12px}code{overflow-wrap:anywhere}.object-id{font-size:.8em}section{margin-top:24px}
 </style></head>
 <body>
 <h1>输入审计</h1>
-<p id="notice">当前支持 Chat Completions 与 Responses HTTP：仅审查本次末尾新用户消息；Responses 字符串 input 直接作为本次用户文本。图片/音频/视频/文件只保存固定占位符，不保存附件载荷或工具内容，不回查 previous_response_id 或会话历史。未知块会产生提取不完整标记与缺口诊断；普通文本中的链接、Base64 和秘密不自动脱敏。正文最多 64 KiB UTF-8 前缀；应用层不加密。尚不支持 Anthropic Messages、Responses WebSocket、七天自动过期清理和完整故障恢复，仅供隔离合成数据验收，不适用于生产审计。</p>
+<p id="notice">当前支持 Chat Completions、Responses HTTP 与 Anthropic Messages：仅审查本次末尾新用户消息；Responses 字符串 input 直接作为本次用户文本；Anthropic 仅含 tool_result 的末尾 user 正常跳过，混合消息只保留新内容，不提取工具结果内部数据。图片/音频/视频/文件只保存固定占位符，不保存附件载荷或工具内容，不回查 previous_response_id 或会话历史。未知块会产生提取不完整标记与缺口诊断；普通文本中的链接、Base64 和秘密不自动脱敏。正文最多 64 KiB UTF-8 前缀；应用层不加密。尚不支持 Responses WebSocket、七天自动过期清理和完整故障恢复，仅供隔离合成数据验收，不适用于生产审计。</p>
 <section id="login"><h2>宿主管理鉴权</h2><p>优先复用同源宿主已有登录状态。无法取得时，请临时输入同一个管理 Key；只存本页内存，不写入 localStorage/cookie，刷新即消失。</p><label>临时管理 Key <input id="management-key" type="password" autocomplete="off"></label><button id="connect">连接</button></section>
 <p id="message" role="status">等待管理鉴权。</p>
 <div id="content" hidden>
@@ -93,7 +93,7 @@
   }
   // 协议和模型来自本次客户端提交，不能用实际上游名称或模型回复替代未知值。
   function protocolLabel(protocol) {
-    return protocol === 'responses' ? 'Responses HTTP' : protocol === 'chat-completions' ? 'Chat Completions' : '未知';
+    return protocol === 'anthropic-messages' ? 'Anthropic Messages' : protocol === 'responses' ? 'Responses HTTP' : protocol === 'chat-completions' ? 'Chat Completions' : '未知';
   }
   // 两个标记彼此独立，不能以截断标签掩盖未知块导致的不完整。
   function contentStatus(record) {

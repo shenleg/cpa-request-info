@@ -86,30 +86,30 @@ func responsesPiece(raw []byte) (string, bool) {
 			return text, true
 		}
 	case "input_image":
-		if responsesPayloadString(block, "image_url", "file_id") {
+		if hasNonEmptyStringField(block, "image_url", "file_id") {
 			return "[图片]", true
 		}
 	case "input_file":
-		if responsesPayloadString(block, "file_data", "file_url", "file_id") {
+		if hasNonEmptyStringField(block, "file_data", "file_url", "file_id") {
 			return "[文件]", true
 		}
 	case "input_audio":
 		// 固定宿主接受嵌套和扁平音频字节；只识别容器，不把 data/format 转成正文。
 		audio, err := protocolObject(block["input_audio"])
-		if (err == nil && responsesPayloadString(audio, "data")) || responsesPayloadString(block, "data") {
+		if (err == nil && hasNonEmptyStringField(audio, "data")) || hasNonEmptyStringField(block, "data") {
 			return "[音频]", true
 		}
 	case "input_video":
 		video, err := protocolObject(block["video_url"])
-		if responsesPayloadString(block, "video_url") || (err == nil && responsesPayloadString(video, "url")) {
+		if hasNonEmptyStringField(block, "video_url") || (err == nil && hasNonEmptyStringField(video, "url")) {
 			return "[视频]", true
 		}
 	}
 	return "", false
 }
 
-// responsesPayloadString 只判定附件来源是非空字符串；返回值不携带 URL、引用标识或载荷。
-func responsesPayloadString(block map[string]json.RawMessage, fields ...string) bool {
+// hasNonEmptyStringField 只判定附件来源是非空字符串；返回值不携带 URL、引用标识或载荷。
+func hasNonEmptyStringField(block map[string]json.RawMessage, fields ...string) bool {
 	for _, field := range fields {
 		value := block[field]
 		var text string
