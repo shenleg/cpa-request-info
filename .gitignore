@@ -20,6 +20,7 @@
 .build/
 .test-data/
 artifacts/
+node_modules/
 .playwright-mcp/
 audit-loop-browser.png
 *.dylib

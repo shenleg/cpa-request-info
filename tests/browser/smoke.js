@@ -1,15 +1,18 @@
 // 本文件通过真实宿主管理页、插件菜单及同源受保护接口验收；仅使用合成 Key，不保存认证材料。
-// 用 Playwright 的 browser_run_code 工具读取此文件；先导航到 audit-demo 输出的 management.html。
-async (page) => {
+// 场景由独立 runner 导入，page 已导航到本轮合成实例；成功返回有限证据，验收失败抛错。
+module.exports = async (page) => {
   /** 验证 condition；失败时以 message 抛出错误，成功无返回值，不输出凭据或正文。 */
   const assert = (condition, message) => { if (!condition) throw new Error(message); };
   const admin = 'synthetic-admin-audit-test-only';
   const base = new URL(page.url()).origin;
   const clientKeys = ['synthetic-client-audit-a-only', 'synthetic-client-audit-b-only'];
-  const text = '<script>window.__auditInjected=true</script>\n<img src="https://example.invalid/audit-forbidden-image">\n![图片](https://example.invalid/audit-forbidden-markdown)';
+  const marker = 'BROWSER-SMOKE-' + Date.now() + '-';
+  const focusMarker=marker+'FOCUS-';
+  const text = focusMarker + '<script>window.__auditInjected=true</script>\n<img src="https://example.invalid/audit-forbidden-image">\n![图片](https://example.invalid/audit-forbidden-markdown)';
   const external = [];
   page.on('request', request => { if (request.url().includes('audit-forbidden')) external.push(request.url()); });
   await page.goto(base + '/management.html');
+  await page.waitForFunction(() => document.querySelector('input[type="password"]') || document.querySelector('a[href="#/plugin-pages/request-input-audit/0"]'));
   if (await page.getByRole('textbox', {name:'管理密钥:'}).count()) {
     await page.getByRole('textbox', {name:'管理密钥:'}).fill(admin);
     await page.getByRole('checkbox', {name:'记住密码'}).uncheck();
@@ -30,15 +33,29 @@ async (page) => {
     assert((await response).status() === 200, '监控配置未保存');
     await frame.locator('#objects option').filter({hasText:'浏览器合成对象'+i}).waitFor({state:'attached'});
   }
-  for (const key of clientKeys) {
-    const result = await page.request.post(base+'/v1/chat/completions',{headers:{Authorization:'Bearer '+key},data:{model:'audit-test-model',messages:[{role:'system',content:'FORBIDDEN_BROWSER_SYSTEM'},{role:'user',content:'FORBIDDEN_BROWSER_HISTORY'},{role:'user',content:text}]}});
+  for (const [i,key] of clientKeys.entries()) {
+    const input=i===clientKeys.length-1?text:marker+'OTHER-<script>window.__auditInjected=true</script>';
+    const result = await page.request.post(base+'/v1/chat/completions',{headers:{Authorization:'Bearer '+key},data:{model:'audit-test-model',messages:[{role:'system',content:'FORBIDDEN_BROWSER_SYSTEM'},{role:'user',content:'FORBIDDEN_BROWSER_HISTORY'},{role:'user',content:input}]}});
     assert(result.status() === 200,'实际可控模型应成功');
   }
-  // 等待本次已保存数据真正替换旧行，不能把旧页面文本误当作本次请求结果。
+  // 从受保护结果确认本轮落盘，再定位本轮标记，不能把旧记录当作新的结果。
+  let savedId='';
+  const deadline=Date.now()+10000;
+  while (!savedId && Date.now()<deadline) {
+    const response=await page.request.get(base+'/v0/management/plugins/request-input-audit/records',{headers:{Authorization:'Bearer '+admin}});
+    assert(response.status()===200,'受保护结果查询失败');
+    const list=await response.json();
+    const record=list.records.find(r=>r.preview.startsWith(focusMarker));
+    if(record)savedId=record.id;
+  }
+  assert(savedId!=='','本轮输入没有落盘');
   await frame.getByRole('button',{name:'刷新已保存记录'}).click();
-  await frame.locator('#records tbody tr').first().filter({hasText:'![图片]'}).waitFor();
-  await frame.getByRole('button',{name:'查看',exact:true}).first().click();
-  await frame.locator('#detail').filter({hasText:'![图片]'}).waitFor();
+  const row=frame.locator('#records tbody tr').filter({hasText:focusMarker}).first();
+  await row.waitFor();
+  const detailResponse=page.waitForResponse(r=>r.url().includes('/request-input-audit/detail?')&&new URL(r.url()).searchParams.get('id')===savedId);
+  await row.getByRole('button',{name:'查看',exact:true}).click();
+  assert((await detailResponse).status()===200,'本轮详情查询失败');
+  await frame.locator('#detail').filter({hasText:focusMarker}).waitFor();
   const result = await frame.locator('body').evaluate(body => {
     const w = body.ownerDocument.defaultView;
     return {injected:w.__auditInjected === true,images:body.querySelectorAll('#detail img,#records img').length,text:body.querySelector('#detail').textContent,keyFieldEmpty:body.querySelector('#management-key').value==='',pluginStorage:Object.keys(w.localStorage).filter(k=>k.includes('audit'))};

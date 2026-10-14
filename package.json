@@ -1,0 +1,16 @@
+{
+  "name": "cpa-request-info-verification",
+  "private": true,
+  "description": "真实浏览器验收与进程生命周期检查，不发布 npm 包。",
+  "scripts": {
+    "test": "node --test tests/tooling/runner.test.cjs",
+    "browser": "node scripts/browser-runner.cjs",
+    "browser:install": "playwright install chromium"
+  },
+  "devDependencies": {
+    "playwright": "1.64.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

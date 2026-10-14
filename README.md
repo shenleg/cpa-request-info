@@ -29,11 +29,17 @@
 需要 Go ≥ 1.26、启用 CGO、C 编译器、Git、Python 3、`tar` 和 `patch`。已在 macOS arm64 / Go 1.27.2 验证；仅交叉编译不算目标平台运行通过。
 
 ```bash
-make build
-make check
+make deps              # 明确准备 Go/Node 依赖；不执行 npm 生命周期脚本
+make browser-install   # 明确下载固定 Playwright 所需 Chromium
+make check             # 快速格式、vet 与编译检查，不启动宿主
+make hooks-install     # 只给本仓库安装暂存快照检查；遇已有 hook 冲突即停止
 make test-one TEST=TestSavedLatestInput
-make test
+make verify            # 全部系统/工具/浏览器验收；正常停止进程，保留证据
 ```
+
+快速检查离线执行，缺少依赖会失败，需先 `make deps`。pre-commit 通过 `git write-tree` 导出真实 index 的独立快照，避免部分暂存时工作树的未暂存修复掩盖坏代码；它不自动格式化、不修改 index、不下载依赖、不跑压力或磁盘故障测试。导出快照保留在 `.test-data/`。可显式运行 `make check-staged`。
+
+CI 使用 `macos-15` arm64，复用 `make verify`，权限为 `contents: read`；只上传有限结果 JSON 和状态标签截图，不上传正文、认证材料、宿主日志或磁盘镜像。本地通过不等于远端 CI 已运行；首次远端验证需要提交并推送 workflow 后观察真实结果。
 
 构建脚本核实 Git commit 和补丁摘要，从精确 Git 对象导出**全新隔离目录**，应用无 fuzz 补丁，避免把旧工作树改动混入构建。不执行下载的安装脚本，不自动删除目录。
 
@@ -78,7 +84,11 @@ go build -o .build/bin/audit-demo ./cmd/audit-demo
 
 固定官方管理前端为 `v1.26.2`，摘要见 `host/management-ui.json`。复用的 `cli-proxy-auth` 状态格式是此版本的兼容契约，不声称官方有临时 token 桥或未来前端自动兼容。插件不新增凭据持久化；宿主管理前端自身的“记住密码”行为不由插件改变。
 
-少量自动浏览器验收脚本位于 `tests/browser/smoke.js` 和 `tests/browser/truncation.js`，可通过 Playwright `browser_run_code` 的 `filename` 执行；先导航到 demo 实例地址。前者验证真实菜单、选择、详情、字面 HTML/Markdown、无外部加载及插件不新增凭据存储；后者实际提交超限多字节文本，等待已落盘后验证列表和详情的“已截断”提示、65,535 字节安全前缀、无坏字符且不展示超限尾部。
+自动验收只需 `make browser`：构建固定宿主/插件及 demo、核对管理页面、启动真实实例、运行两个场景各两轮并停止进程，不依赖 MCP。已有构建产物时可用 `make browser-run`。启动 JSON 只有健康检查通过后才发 `ready`，失败/超时有明确退出；runner 不保存子进程 stderr 原文或 Playwright 可能含凭据的调用日志，只报告固定阶段/原因和本项目场景行号。
+
+场景位于 `tests/browser/smoke.js`、`tests/browser/truncation.js`。前者验证菜单、选择、单条详情、HTML/Markdown 字面显示、无外部加载及插件不新增凭据存储；后者验证截断标签、65,535 字节安全前缀与超限尾部不可见。同一宿主连续两轮且每次使用唯一标记/记录 ID，旧数据不能冒充本轮通过。有限证据保存在 `.test-data/verification-*/result.json` 和状态标签截图；没有成功验收的结果不会报告为通过。
+
+浏览器环境使用精确版本 Playwright 和明确的 `zh-CN` locale，匹配固定管理前端；不宣称所有浏览器/语言/未来前端已验证。验收责任与工作区审查的项目约定见 `docs/agents/verification.md`；个人技能文件不修改。
 
 ## 管理 API
 

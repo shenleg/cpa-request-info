@@ -1,6 +1,7 @@
 // 本文件通过真实宿主管理菜单验证超长输入的列表/详情截断提示；只用合成凭据，不读私有存储。
-// 先导航到 audit-demo 输出的 management.html，再用 Playwright browser_run_code filename 执行。
-async (page) => {
+// 场景由独立 runner 导入；page 位于合成实例，options 指定本轮截图路径。
+// 返回本轮截断显示及字节边界的有限验收证据；鉴权、落盘或页面校验失败抛错。
+module.exports = async (page, options = {}) => {
   /** 验证 condition 的用户可见结果；失败以 message 抛错，成功无返回，不输出凭据或超长正文。 */
   const assert = (condition, message) => { if (!condition) throw new Error(message); };
   const origin = new URL(page.url()).origin;
@@ -59,7 +60,7 @@ async (page) => {
     return {bytes:new TextEncoder().encode(value).length,prefix:value.startsWith(expectedPrefix),onlyExpectedASCII:!(/[^x]/u.test(value.slice(expectedPrefix.length))),tail:value.includes('FORBIDDEN_BROWSER_TAIL'),broken:value.includes('�'),instructions:value.includes('FORBIDDEN_BROWSER_SYSTEM')};
   },prefix);
   assert(visible.bytes===65535 && visible.prefix && visible.onlyExpectedASCII && !visible.tail && !visible.broken && !visible.instructions, '浏览器展示不是已保存的字符安全前缀');
-  const screenshot = '.test-data/browser-truncation-label-' + Date.now() + '.png';
+  const screenshot = options.screenshot ?? '.test-data/browser-truncation-label-' + Date.now() + '.png';
   await frame.locator('#detail-meta').screenshot({path:screenshot});
   return {screenshot,modelStatus:200,listTruncationLabel:true,detailTruncationLabel:true,visibleBytes:visible.bytes,tailVisible:false,brokenUTF8:false};
 }
