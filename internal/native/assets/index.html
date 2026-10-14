@@ -1,0 +1,89 @@
+<!doctype html>
+<!-- 本页面只托管无数据 shell；动态数据受宿主管理鉴权保护，管理 Key 仅在页面内存驻留。 -->
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-Ch8O2sxqKnqxYFg6WqJU04U5ZnLTDGZaX9wzvqPbuNo='; style-src 'sha256-mcEoXKWBfiRvpvTh90RoJs1oIgkKU4gVvUXfuAv9NcU='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<title>输入审计</title>
+<style>
+:root{color-scheme:light dark;font-family:system-ui,sans-serif}body{max-width:1100px;margin:24px auto;padding:0 20px;line-height:1.6}input,select,button{font:inherit;margin:5px;padding:7px;max-width:95%}button{cursor:pointer}label{display:block}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #888;padding:9px;text-align:left;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:14px;border:1px solid #888}#notice{border-left:4px solid #888;padding-left:12px}code{overflow-wrap:anywhere}.object-id{font-size:.8em}section{margin-top:24px}
+</style></head>
+<body>
+<h1>输入审计</h1>
+<p id="notice">当前仅支持 Chat Completions 末尾 user 的纯文本。正文最多 64 KiB；应用层不加密。尚无七天自动过期清理、其他协议、WebSocket 和完整故障恢复，仅供隔离合成数据验收，不适用于生产审计。</p>
+<section id="login"><h2>宿主管理鉴权</h2><p>优先复用同源宿主已有登录状态。无法取得时，请临时输入同一个管理 Key；只存本页内存，不写入 localStorage/cookie，刷新即消失。</p><label>临时管理 Key <input id="management-key" type="password" autocomplete="off"></label><button id="connect">连接</button></section>
+<p id="message" role="status">等待管理鉴权。</p>
+<div id="content" hidden>
+<section><h2>选择监控对象</h2><p>这里只显示宿主无秘密对象 ID，不展示原 Key、片段或上游账号。选择和命名不修改宿主 Key 配置。</p><label>审计对象 <select id="objects"></select></label><label>名称 <input id="name" maxlength="256" placeholder="例如：合成业务对象"></label><button id="monitor">选择并命名</button></section>
+<section><h2>采集状态</h2><pre id="health" aria-label="采集状态"></pre><button id="refresh">刷新已保存记录</button></section>
+<section><h2>已保存输入记录</h2><p id="empty">暂无已保存记录。入队不等于落盘。</p><table id="records"><thead><tr><th>接收时间</th><th>对象</th><th>请求模型</th><th>纯文本预览</th><th>状态</th><th>详情</th></tr></thead><tbody></tbody></table><button id="previous">上一页</button><button id="next">下一页</button><span id="page"></span></section>
+<section><h2>单条详情</h2><p id="detail-meta"></p><pre id="detail" aria-label="已保存纯文本正文">请选择一条记录。</pre></section>
+</div>
+<script>
+'use strict';
+// 认证材料只驻留闭包；所有数据通过同源受保护 API 获取，禁止把正文/名称作为 HTML。
+(() => {
+  let key = '', offset = 0, total = 0;
+  const base = '/v0/management/plugins/request-input-audit';
+  const $ = id => document.getElementById(id);
+  const message = text => { $('message').textContent = text; };
+  function inheritedKey() {
+    try {
+      let raw = localStorage.getItem('cli-proxy-auth');
+      if (!raw) return '';
+      if (raw.startsWith('enc::v1::')) {
+        const data = Uint8Array.from(atob(raw.slice(9)), c => c.charCodeAt(0));
+        const mask = new TextEncoder().encode(['cli-proxy-api-webui::secure-storage',location.host,navigator.userAgent].join('|'));
+        raw = new TextDecoder().decode(data.map((v,i) => v ^ mask[i % mask.length]));
+      }
+      const parsed = JSON.parse(raw), state = parsed.state ?? parsed;
+      if (new URL(state.apiBase).origin !== location.origin) return '';
+      return typeof state.managementKey === 'string' ? state.managementKey : '';
+    } catch { return ''; }
+  }
+  async function api(path, method = 'GET', payload) {
+    const response = await fetch(base + path, {method, credentials:'omit', cache:'no-store', headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'}, body:payload === undefined ? undefined : JSON.stringify(payload)});
+    if (response.status === 401 || response.status === 403) {
+      key = ''; $('login').hidden = false; $('content').hidden = true;
+      throw new Error('管理鉴权失败，请重新输入临时管理 Key。');
+    }
+    if (!response.ok) throw new Error('操作未完成（HTTP '+response.status+'），请查看采集状态。');
+    return response.json();
+  }
+  async function objects() {
+    const data = await api('/objects');
+    $('objects').replaceChildren();
+    for (const object of data.objects) {
+      const option = document.createElement('option');option.value = object.id;
+      option.textContent = (object.monitored ? '已监控：'+object.name+' · ' : '未监控 · ') + object.id;
+      $('objects').append(option);
+    }
+  }
+  async function refresh() {
+    const [status, data] = await Promise.all([api('/status'),api('/records?offset='+offset+'&limit=20')]);
+    const state = status.state ?? {}, gaps = state.gaps ?? {};
+    $('health').textContent = '观察契约：'+(status.available?'可用':'不可用')+'\n采集状态：'+(state.state??'不可用')+'\n原因：'+(status.reason||state.reason||'无')+'\n已保存：'+(state.saved??'未知')+'；排队：'+(state.queued??'未知')+'\n保守占用：'+(state.used_bytes??'未知')+' / '+(state.budget_bytes??'未知')+' 字节\n已知缺口计数（非完整历史）：'+JSON.stringify(gaps)+'\n当前未实现过期清理和异常恢复。';
+    total=data.total; $('empty').hidden = data.records.length>0;
+    const tbody=$('records').querySelector('tbody');tbody.replaceChildren();
+    for (const record of data.records) {
+      const row=document.createElement('tr');
+      for (const text of [record.received_at,record.name||record.object_id,record.model||'未知',record.preview,record.truncated?'已截断':'已保存 · 纯文本']) {
+        const cell=document.createElement('td');cell.textContent=text;row.append(cell);
+      }
+      const cell=document.createElement('td'), button=document.createElement('button');button.textContent='查看';
+      button.addEventListener('click',()=>guard(async()=>{const r=await api('/detail?id='+encodeURIComponent(record.id));$('detail-meta').textContent=(r.name||r.object_id)+' · '+r.received_at+' · '+(r.truncated?'已截断':'已保存纯文本');$('detail').textContent=r.text;}));
+      cell.append(button);row.append(cell);tbody.append(row);
+    }
+    $('previous').disabled=offset===0;$('next').disabled=offset+20>=total;
+    $('page').textContent='第 '+(Math.floor(offset/20)+1)+' 页；已保存 '+total+' 条';
+  }
+  async function connect() {await objects();await refresh();$('login').hidden=true;$('content').hidden=false;message('管理鉴权通过。只展示已落盘记录。');}
+  async function guard(action) {try{await action();}catch(error){message(error.message);}}
+  $('connect').addEventListener('click',()=>guard(async()=>{key=$('management-key').value;$('management-key').value='';await connect();}));
+  $('monitor').addEventListener('click',()=>guard(async()=>{await api('/monitor','POST',{object_id:$('objects').value,name:$('name').value});await objects();await refresh();message('监控配置已保存，后续符合条件的提交才会采集。');}));
+  $('refresh').addEventListener('click',()=>guard(refresh));
+  $('previous').addEventListener('click',()=>guard(async()=>{offset=Math.max(0,offset-20);await refresh();}));
+  $('next').addEventListener('click',()=>guard(async()=>{if(offset+20<total){offset+=20;await refresh();}}));
+  window.addEventListener('pagehide',()=>{key='';});
+  key=inheritedKey();if(key)guard(connect);
+})();
+</script></body></html>

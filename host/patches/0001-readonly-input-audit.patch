@@ -1,0 +1,628 @@
+diff --git a/internal/access/config_access/provider.go b/internal/access/config_access/provider.go
+index b6d371ae1540e5b359d3c81c5dbcdf41c303a361..c589ba167cbd4e40bd0a5cac631a86f81276938f 100644
+--- a/internal/access/config_access/provider.go
++++ b/internal/access/config_access/provider.go
+@@ -1,3 +1,4 @@
++// This file authenticates frontend requests against canonical inline configuration keys.
+ package configaccess
+ 
+ import (
+@@ -91,8 +92,9 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
+ 		}
+ 		if _, ok := p.keys[candidate.value]; ok {
+ 			return &sdkaccess.Result{
+-				Provider:  p.Identifier(),
+-				Principal: candidate.value,
++				Provider:        p.Identifier(),
++				Principal:       candidate.value,
++				NativeConfigKey: true,
+ 				Metadata: map[string]string{
+ 					"source": candidate.source,
+ 				},
+diff --git a/internal/api/server_middleware.go b/internal/api/server_middleware.go
+index efe1e58f222426b653caee57cc7868859ca3808e..0dea9c5597009b4e604635b44f7dfec7d3476675 100644
+--- a/internal/api/server_middleware.go
++++ b/internal/api/server_middleware.go
+@@ -1,3 +1,4 @@
++// This file applies shared HTTP limits, authentication, and response middleware.
+ package api
+ 
+ import (
+@@ -208,6 +209,9 @@ func accessAuthMiddleware(manager *sdkaccess.Manager, realtimeError bool) gin.Ha
+ 				reqCtx := coreusage.WithAPIKey(c.Request.Context(), result.Principal)
+ 				reqCtx = coreusage.WithAccessProvider(reqCtx, result.Provider)
+ 				reqCtx = coreusage.WithIsNativeKey(reqCtx, coreusage.IsNativeAccessProvider(result.Provider))
++				if result.NativeConfigKey && result.Provider == sdkaccess.DefaultAccessProviderName {
++					reqCtx = handlers.WithInputAuditEntry(reqCtx, result.Principal)
++				}
+ 				c.Request = c.Request.WithContext(reqCtx)
+ 			}
+ 			c.Next()
+diff --git a/internal/pluginhost/host_callbacks.go b/internal/pluginhost/host_callbacks.go
+index 4af872a9f83feb6df7de6ccef14a70022b0e8db7..7e8e9186336e3d5487b5a6797a9358d70201d485 100644
+--- a/internal/pluginhost/host_callbacks.go
++++ b/internal/pluginhost/host_callbacks.go
+@@ -1,3 +1,4 @@
++// This file dispatches plugin callbacks to host-owned services and scoped operations.
+ package pluginhost
+ 
+ import (
+@@ -145,6 +146,10 @@ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte
+ 		return nil, fmt.Errorf("host plugin callback instance is closed")
+ 	}
+ 	switch method {
++	case pluginabi.MethodHostInputAuditCapabilities:
++		return h.callHostInputAuditCapabilities()
++	case pluginabi.MethodHostInputAuditCatalog:
++		return h.callHostInputAuditCatalog()
+ 	case pluginabi.MethodHostModelExecute:
+ 		return h.callHostModelExecute(ctx, request)
+ 	case pluginabi.MethodHostModelExecuteStream:
+diff --git a/internal/pluginhost/rpc_client.go b/internal/pluginhost/rpc_client.go
+index 96e3785d25963a40c676f3b4ae20c08339c09090..c762e67a78867d64086bd8237292228f655ff2a3 100644
+--- a/internal/pluginhost/rpc_client.go
++++ b/internal/pluginhost/rpc_client.go
+@@ -1,3 +1,4 @@
++// This file adapts negotiated plugin capabilities to the native JSON RPC client.
+ package pluginhost
+ 
+ import (
+@@ -130,6 +131,9 @@ func registerRPCPlugin(ctx context.Context, host *Host, id string, client plugin
+ 	if resp.Capabilities.RequestNormalizer {
+ 		plugin.Capabilities.RequestNormalizer = adapter
+ 	}
++	if resp.Capabilities.InputAuditObserver {
++		plugin.Capabilities.InputAuditObserver = adapter
++	}
+ 	if resp.Capabilities.RequestInterceptor {
+ 		plugin.Capabilities.RequestInterceptor = adapter
+ 	}
+@@ -583,6 +587,13 @@ func (a *rpcPluginAdapter) InterceptStreamChunk(ctx context.Context, req plugina
+ 	})
+ }
+ 
++// ObserveInputAudit sends event through the existing guarded native client; returns only delivery errors.
++// Plugin results cannot change the input or execution, and no credential callback context is granted.
++func (a *rpcPluginAdapter) ObserveInputAudit(ctx context.Context, event pluginapi.InputAuditEvent) error {
++	_, errCall := callPlugin[rpcEmptyResponse](ctx, a.client, pluginabi.MethodInputAuditObserve, event)
++	return errCall
++}
++
+ func (a *rpcPluginAdapter) ObserveWebSocketResponseEvent(ctx context.Context, event pluginapi.WebSocketResponseEvent) error {
+ 	callbackID, closeCallback := a.openHostCallbackContext(ctx)
+ 	defer closeCallback()
+diff --git a/internal/pluginhost/rpc_schema.go b/internal/pluginhost/rpc_schema.go
+index 188ed246c73e7973573f68d9fdda58292723d1c6..f95190ab7724bf8eb8090b0301e2e66094e58db8 100644
+--- a/internal/pluginhost/rpc_schema.go
++++ b/internal/pluginhost/rpc_schema.go
+@@ -1,3 +1,4 @@
++// This file defines JSON RPC registration and capability schemas for native plugins.
+ package pluginhost
+ 
+ import (
+@@ -33,6 +34,7 @@ type rpcCapabilities struct {
+ 	ExecutorOutputFormats         []string                     `json:"executor_output_formats,omitempty"`
+ 	RequestTranslator             bool                         `json:"request_translator"`
+ 	RequestNormalizer             bool                         `json:"request_normalizer"`
++	InputAuditObserver            bool                         `json:"input_audit_observer"`
+ 	RequestInterceptor            bool                         `json:"request_interceptor"`
+ 	RequestLifecyclePlugin        bool                         `json:"request_lifecycle_plugin"`
+ 	ResponseTranslator            bool                         `json:"response_translator"`
+@@ -175,6 +177,7 @@ func rpcCapabilitiesFromPlugin(plugin pluginapi.Plugin) rpcCapabilities {
+ 		ExecutorOutputFormats:         append([]string(nil), caps.ExecutorOutputFormats...),
+ 		RequestTranslator:             caps.RequestTranslator != nil,
+ 		RequestNormalizer:             caps.RequestNormalizer != nil,
++		InputAuditObserver:            caps.InputAuditObserver != nil,
+ 		RequestInterceptor:            caps.RequestInterceptor != nil,
+ 		RequestLifecyclePlugin:        caps.RequestLifecyclePlugin != nil,
+ 		ResponseTranslator:            caps.ResponseTranslator != nil,
+diff --git a/sdk/access/registry.go b/sdk/access/registry.go
+index e257f27658dddf942dac59f9f08065c2540ef184..cb48709adce5065c20437d65440ccd4ad487c60b 100644
+--- a/sdk/access/registry.go
++++ b/sdk/access/registry.go
+@@ -1,3 +1,4 @@
++// This file owns frontend authentication provider registration and result provenance.
+ package access
+ 
+ import (
+@@ -18,6 +19,8 @@ type Result struct {
+ 	Provider  string
+ 	Principal string
+ 	Metadata  map[string]string
++	// NativeConfigKey is set only by the built-in inline-key provider, never by native RPC decoding.
++	NativeConfigKey bool `json:"-"`
+ }
+ 
+ var (
+diff --git a/sdk/api/handlers/openai/openai_handlers.go b/sdk/api/handlers/openai/openai_handlers.go
+index 4077ee5b8c1cd502128e417638cd1817e41139b6..a97a65b928999debd7f1cf14d7c02e7bd62f7ff3 100644
+--- a/sdk/api/handlers/openai/openai_handlers.go
++++ b/sdk/api/handlers/openai/openai_handlers.go
+@@ -116,6 +116,9 @@ func (h *OpenAIAPIHandler) OpenAIModels(c *gin.Context) {
+ //   - c: The Gin context containing the HTTP request and response
+ func (h *OpenAIAPIHandler) ChatCompletions(c *gin.Context) {
+ 	rawJSON, err := handlers.ReadRequestBody(c)
++	// Observe the exact authenticated input before parsing, conversion, routing, or upstream execution.
++	// Read failures carry no partial body and retain the handler's existing error response.
++	h.ObserveInputAudit(c, rawJSON, err != nil)
+ 	// If data retrieval fails, return a 400 Bad Request error.
+ 	if err != nil {
+ 		c.JSON(clienterror.HTTPStatusFromErrorOr(err, http.StatusBadRequest), handlers.ErrorResponse{
+diff --git a/sdk/pluginabi/types.go b/sdk/pluginabi/types.go
+index e79fd8c16fe73dbad1ac9f38ec7900167740c455..8aec62cbb2b33e02b9d470dcebbc274c5f9a0708 100644
+--- a/sdk/pluginabi/types.go
++++ b/sdk/pluginabi/types.go
+@@ -1,3 +1,4 @@
++// Package pluginabi defines the native ABI and JSON RPC method contracts.
+ package pluginabi
+ 
+ import "encoding/json"
+@@ -76,6 +77,13 @@ const (
+ 
+ 	MethodWebSocketResponseEvent = "websocket.response_event"
+ 
++	// MethodInputAuditObserve delivers a read-only input-audit contract v1 event.
++	MethodInputAuditObserve = "input_audit.observe"
++	// MethodHostInputAuditCapabilities discovers the independent audit contract and safe state directory.
++	MethodHostInputAuditCapabilities = "host.input_audit.capabilities"
++	// MethodHostInputAuditCatalog lists opaque identities for current built-in inline configuration keys.
++	MethodHostInputAuditCatalog = "host.input_audit.catalog"
++
+ 	MethodThinkingIdentifier = "thinking.identifier"
+ 	MethodThinkingApply      = "thinking.apply"
+ 
+diff --git a/sdk/pluginapi/types.go b/sdk/pluginapi/types.go
+index 6060977886cd9c24d5493dc873c9ba1858af5ac8..44bc1d523c4d0e05c018cdc4ddfe28b387df29cb 100644
+--- a/sdk/pluginapi/types.go
++++ b/sdk/pluginapi/types.go
+@@ -108,6 +108,8 @@ type Capabilities struct {
+ 	ResponseBeforeTranslator ResponseNormalizer
+ 	// ResponseAfterTranslator normalizes translated responses before delivery.
+ 	ResponseAfterTranslator ResponseNormalizer
++	// InputAuditObserver receives isolated, read-only authenticated Chat Completions inputs.
++	InputAuditObserver InputAuditObserver
+ 	// RequestInterceptor rewrites execution requests before and after credential selection.
+ 	RequestInterceptor RequestInterceptor
+ 	// RequestLifecyclePlugin asynchronously receives one terminal event for each request that reached request interception.
+diff --git a/internal/pluginhost/input_audit.go b/internal/pluginhost/input_audit.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fcc95b744acd45bf17fc91037824d816cd962819
+--- /dev/null
++++ b/internal/pluginhost/input_audit.go
+@@ -0,0 +1,314 @@
++// This file owns private inline-key identities and isolated, fail-open input-audit observer delivery.
++package pluginhost
++
++import (
++	"bytes"
++	"context"
++	"crypto/hmac"
++	"crypto/rand"
++	"crypto/sha256"
++	"encoding/hex"
++	"io"
++	"os"
++	"path/filepath"
++	"sort"
++	"strings"
++	"sync"
++
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++	log "github.com/sirupsen/logrus"
++)
++
++const inputAuditPluginID = "request-input-audit"
++
++// The domain prevents object IDs from sharing a namespace with any other use of the seed.
++const inputAuditIdentityDomain = "cpa-request-input-audit/object/v1\x00"
++const inputAuditSeedSize = 32 // 256 bits of independent random secret for HMAC-SHA256.
++
++// Serialize initial exclusive creation and subsequent reads within this process.
++// Cross-process races fail closed rather than reading a partially written seed.
++var inputAuditIdentityMu sync.Mutex
++
++type inputAuditCapabilities struct {
++	ContractVersion int    `json:"contract_version"`
++	Available       bool   `json:"available"`
++	StateDir        string `json:"state_dir,omitempty"`
++	Reason          string `json:"reason,omitempty"`
++}
++type inputAuditObject struct {
++	ID string `json:"id"`
++}
++type inputAuditCatalog struct {
++	ContractVersion int                `json:"contract_version"`
++	Available       bool               `json:"available"`
++	Objects         []inputAuditObject `json:"objects"`
++	Reason          string             `json:"reason,omitempty"`
++}
++
++// inputAuditConfig takes only the current inline keys and configured directory; none leave the host.
++func (h *Host) inputAuditConfig() (string, []string, string) {
++	if h == nil {
++		return "", nil, "host_config_unavailable"
++	}
++	h.mu.Lock()
++	defer h.mu.Unlock()
++	cfg := h.runtimeConfig
++	if cfg == nil {
++		return "", nil, "host_config_unavailable"
++	}
++	item, ok := cfg.Plugins.Configs[inputAuditPluginID]
++	if !cfg.Plugins.Enabled || !ok || item.Enabled == nil || !*item.Enabled {
++		return "", nil, "audit_config_unavailable"
++	}
++	stateDir := yamlScalarString(yamlMappingValue(&item.Raw, "state-dir"))
++	if stateDir == "" {
++		return "", nil, "state_dir_unavailable"
++	}
++	absolute, errAbsolute := filepath.Abs(stateDir)
++	if errAbsolute != nil {
++		return "", nil, "state_dir_unavailable"
++	}
++	keys := make([]string, 0, len(cfg.APIKeys))
++	seen := make(map[string]struct{}, len(cfg.APIKeys))
++	for _, key := range cfg.APIKeys {
++		key = strings.TrimSpace(key)
++		if key == "" {
++			continue
++		}
++		if _, duplicate := seen[key]; duplicate {
++			continue
++		}
++		seen[key] = struct{}{}
++		keys = append(keys, key)
++	}
++	return absolute, keys, ""
++}
++
++func (h *Host) callHostInputAuditCapabilities() ([]byte, error) {
++	dir, _, reason := h.inputAuditConfig()
++	if reason == "" {
++		_, reason = inputAuditSeed(dir)
++	}
++	response := inputAuditCapabilities{ContractVersion: 1, Available: reason == "", Reason: reason}
++	if response.Available {
++		response.StateDir = dir
++	}
++	return marshalRPCResult(response)
++}
++
++func (h *Host) callHostInputAuditCatalog() ([]byte, error) {
++	dir, keys, reason := h.inputAuditConfig()
++	var seed []byte
++	if reason == "" {
++		seed, reason = inputAuditSeed(dir)
++	}
++	response := inputAuditCatalog{ContractVersion: 1, Available: reason == "", Reason: reason, Objects: []inputAuditObject{}}
++	if response.Available {
++		for _, key := range keys {
++			response.Objects = append(response.Objects, inputAuditObject{ID: inputAuditObjectID(seed, key)})
++		}
++		sort.Slice(response.Objects, func(i, j int) bool { return response.Objects[i].ID < response.Objects[j].ID })
++	}
++	return marshalRPCResult(response)
++}
++
++func inputAuditObjectID(seed []byte, key string) string {
++	mac := hmac.New(sha256.New, seed)
++	_, _ = mac.Write([]byte(inputAuditIdentityDomain))
++	_, _ = mac.Write([]byte(key))
++	return hex.EncodeToString(mac.Sum(nil))
++}
++
++// inputAuditSeed refuses symlinks, broad permissions, and identity rotation after any persisted state.
++// Root-relative operations keep all seed access anchored even if a path component is replaced.
++func inputAuditSeed(dir string) ([]byte, string) {
++	inputAuditIdentityMu.Lock()
++	defer inputAuditIdentityMu.Unlock()
++	if !filepath.IsAbs(dir) {
++		return nil, "state_dir_unavailable"
++	}
++	// Reject preexisting symlink components before creating anything through the configured path.
++	for path := dir; ; path = filepath.Dir(path) {
++		info, errStat := os.Lstat(path)
++		if errStat == nil {
++			if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
++				return nil, "unsafe_state_dir"
++			}
++		} else if !os.IsNotExist(errStat) {
++			return nil, "state_dir_unavailable"
++		}
++		if parent := filepath.Dir(path); parent == path {
++			break
++		}
++	}
++	if errMkdir := os.MkdirAll(dir, 0700); errMkdir != nil {
++		return nil, "state_dir_unavailable"
++	}
++	dirInfo, errStat := os.Lstat(dir)
++	if errStat != nil || !dirInfo.IsDir() || dirInfo.Mode()&os.ModeSymlink != 0 || dirInfo.Mode().Perm() != 0700 {
++		return nil, "unsafe_state_dir"
++	}
++	root, errOpen := os.OpenRoot(dir)
++	if errOpen != nil {
++		return nil, "state_dir_unavailable"
++	}
++	defer func() {
++		if errClose := root.Close(); errClose != nil {
++			log.Warn("input audit identity close failed")
++		}
++	}()
++	anchored, errAnchored := root.Stat(".")
++	if errAnchored != nil || !os.SameFile(dirInfo, anchored) {
++		return nil, "unsafe_state_dir"
++	}
++
++	info, errSeedStat := root.Lstat("identity.seed")
++	if os.IsNotExist(errSeedStat) {
++		entriesDir, errEntriesOpen := root.Open(".")
++		if errEntriesOpen != nil {
++			return nil, "state_dir_unavailable"
++		}
++		entries, errEntries := entriesDir.ReadDir(1)
++		errEntriesClose := entriesDir.Close()
++		if errEntriesClose != nil || (errEntries != nil && errEntries != io.EOF) {
++			return nil, "state_dir_unavailable"
++		}
++		if len(entries) != 0 {
++			return nil, "identity_seed_missing"
++		}
++		seed := make([]byte, inputAuditSeedSize)
++		if _, errRandom := rand.Read(seed); errRandom != nil {
++			return nil, "identity_seed_unavailable"
++		}
++		file, errCreate := root.OpenFile("identity.seed", os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
++		if os.IsExist(errCreate) {
++			return readInputAuditSeed(root)
++		}
++		if errCreate != nil {
++			return nil, "identity_seed_unavailable"
++		}
++		written, errWrite := file.Write(seed)
++		errSync := file.Sync()
++		errClose := file.Close()
++		if errWrite != nil || written != len(seed) || errSync != nil || errClose != nil {
++			return nil, "identity_seed_unavailable"
++		}
++		return readInputAuditSeed(root)
++	}
++	if errSeedStat != nil {
++		return nil, "identity_seed_unavailable"
++	}
++	if !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() != inputAuditSeedSize {
++		return nil, "identity_seed_invalid"
++	}
++	return readInputAuditSeed(root)
++}
++
++func readInputAuditSeed(root *os.Root) ([]byte, string) {
++	info, errStat := root.Lstat("identity.seed")
++	if errStat != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() != inputAuditSeedSize {
++		return nil, "identity_seed_invalid"
++	}
++	file, errOpen := root.Open("identity.seed")
++	if errOpen != nil {
++		return nil, "identity_seed_unavailable"
++	}
++	defer func() {
++		if errClose := file.Close(); errClose != nil {
++			log.Warn("input audit identity close failed")
++		}
++	}()
++	openedInfo, errOpenedStat := file.Stat()
++	if errOpenedStat != nil || !os.SameFile(info, openedInfo) || openedInfo.Mode().Perm() != 0600 {
++		return nil, "identity_seed_invalid"
++	}
++	seed, errRead := io.ReadAll(io.LimitReader(file, inputAuditSeedSize+1))
++	if errRead != nil || len(seed) != inputAuditSeedSize {
++		return nil, "identity_seed_invalid"
++	}
++	// File Sync does not make its new directory entry durable. Sync the anchored parent
++	// before accepting the seed, including reopen attempts after a previous sync failure.
++	directory, errOpenDirectory := root.Open(".")
++	if errOpenDirectory != nil {
++		log.Warn("input audit identity directory sync failed")
++		return nil, "identity_seed_sync_unavailable"
++	}
++	errDirectorySync := directory.Sync()
++	errDirectoryClose := directory.Close()
++	if errDirectorySync != nil || errDirectoryClose != nil {
++		log.Warn("input audit identity directory sync failed")
++		return nil, "identity_seed_sync_unavailable"
++	}
++	return seed, ""
++}
++
++// ObserveInputAudit resolves principal against current canonical inline keys and synchronously observes event.
++// Each observer receives a separate body copy; returns nothing, ignores plugin results, and fails open on
++// identity failures, delivery errors, or ordinary panics. Native process crashes are outside this guarantee.
++func (h *Host) ObserveInputAudit(ctx context.Context, principal string, event pluginapi.InputAuditEvent) {
++	if h == nil {
++		return
++	}
++	records := h.activeRecords()
++	hasObserver := false
++	for _, record := range records {
++		if record.plugin.Capabilities.InputAuditObserver != nil && !h.isPluginFused(record.id) {
++			hasObserver = true
++			break
++		}
++	}
++	if !hasObserver {
++		return
++	}
++	dir, keys, reason := h.inputAuditConfig()
++	if reason != "" {
++		log.Warn("input audit identity unavailable")
++		return
++	}
++	matched := false
++	for _, key := range keys {
++		if key == principal {
++			matched = true
++			break
++		}
++	}
++	if !matched {
++		return
++	}
++	seed, seedReason := inputAuditSeed(dir)
++	if seedReason != "" {
++		log.Warn("input audit identity unavailable")
++		return
++	}
++	event.ObjectID = inputAuditObjectID(seed, principal)
++	// A completed inbound body is still a submission after the client disconnects.
++	// Keep delivery synchronous through the guarded native client without inheriting request cancellation.
++	if ctx == nil {
++		ctx = context.Background()
++	} else {
++		ctx = context.WithoutCancel(ctx)
++	}
++	if event.ReadError {
++		event.Body = nil
++	}
++	for _, record := range records {
++		observer := record.plugin.Capabilities.InputAuditObserver
++		if observer == nil || h.isPluginFused(record.id) || !h.recordCurrent(record) {
++			continue
++		}
++		copyEvent := event
++		copyEvent.Body = bytes.Clone(event.Body)
++		observeInputAudit(ctx, observer, copyEvent)
++	}
++}
++
++func observeInputAudit(ctx context.Context, observer pluginapi.InputAuditObserver, event pluginapi.InputAuditEvent) {
++	defer func() {
++		if recover() != nil {
++			log.Warn("input audit observer panic")
++		}
++	}()
++	if errObserve := observer.ObserveInputAudit(ctx, event); errObserve != nil {
++		log.Warn("input audit observer failed")
++	}
++}
+diff --git a/sdk/api/handlers/input_audit.go b/sdk/api/handlers/input_audit.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..28cff026502ca5ba881bdab0776f971055ef05fe
+--- /dev/null
++++ b/sdk/api/handlers/input_audit.go
+@@ -0,0 +1,62 @@
++// This file carries trusted authentication entry timing to the single Chat Completions audit hook.
++package handlers
++
++import (
++	"context"
++	"time"
++
++	"github.com/gin-gonic/gin"
++	"github.com/google/uuid"
++	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
++	log "github.com/sirupsen/logrus"
++)
++
++type inputAuditEntryKey struct{}
++type inputAuditEntry struct {
++	id         string
++	receivedAt time.Time
++	principal  string
++}
++
++type inputAuditHost interface {
++	ObserveInputAudit(context.Context, string, pluginapi.InputAuditEvent)
++}
++
++// WithInputAuditEntry attaches entry UUID/time and the canonical authenticated principal to ctx.
++// Called only after the final built-in inline-key authentication result; returns a derived context.
++// Random-source failure leaves capture disabled without affecting authentication or returning an error.
++func WithInputAuditEntry(ctx context.Context, principal string) context.Context {
++	id, errUUID := uuid.NewRandom()
++	if errUUID != nil {
++		log.Warn("input audit entry unavailable")
++		return ctx
++	}
++	return context.WithValue(ctx, inputAuditEntryKey{}, inputAuditEntry{id: id.String(), receivedAt: time.Now().UTC(), principal: principal})
++}
++
++// ObserveInputAudit delivers body from the existing body reader to the optional read-only host.
++// c carries trusted authentication timing; readError suppresses all body bytes. Returns nothing;
++// absent provenance, delivery errors, and ordinary observer panics never change the HTTP response.
++func (h *BaseAPIHandler) ObserveInputAudit(c *gin.Context, body []byte, readError bool) {
++	if h == nil || c == nil || c.Request == nil {
++		return
++	}
++	entry, ok := c.Request.Context().Value(inputAuditEntryKey{}).(inputAuditEntry)
++	if !ok {
++		return
++	}
++	host, okHost := h.interceptorHost().(inputAuditHost)
++	if !okHost || host == nil {
++		return
++	}
++	defer func() {
++		if recover() != nil {
++			log.Warn("input audit observer panic")
++		}
++	}()
++	event := pluginapi.InputAuditEvent{ID: entry.id, ReceivedAt: entry.receivedAt, Protocol: "chat-completions", ReadError: readError}
++	if !readError {
++		event.Body = body
++	}
++	host.ObserveInputAudit(c.Request.Context(), entry.principal, event)
++}
+diff --git a/sdk/pluginapi/input_audit.go b/sdk/pluginapi/input_audit.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cdf32c939a7b856c3705fb0aaa55cf44ae0679ab
+--- /dev/null
++++ b/sdk/pluginapi/input_audit.go
+@@ -0,0 +1,48 @@
++// This file defines the independent, read-only input-audit contract without changing ABI or schema versions.
++package pluginapi
++
++import (
++	"context"
++	"encoding/json"
++	"time"
++)
++
++// InputAuditEvent is the authenticated entry snapshot, excluding credentials and request metadata.
++// Body contains the original bytes; read failures must not include partial bytes.
++type InputAuditEvent struct {
++	ID         string    `json:"id"`
++	ObjectID   string    `json:"object_id"`
++	ReceivedAt time.Time `json:"received_at"`
++	Protocol   string    `json:"protocol"`
++	Body       []byte    `json:"body"`
++	ReadError  bool      `json:"read_error,omitempty"`
++}
++
++// MarshalJSON encodes event bytes as base64, omitting Body on read failure.
++// Successful empty inputs remain an empty base64 string. Returns JSON or an encoding error.
++func (event InputAuditEvent) MarshalJSON() ([]byte, error) {
++	type wireEvent struct {
++		ID         string    `json:"id"`
++		ObjectID   string    `json:"object_id"`
++		ReceivedAt time.Time `json:"received_at"`
++		Protocol   string    `json:"protocol"`
++		Body       *[]byte   `json:"body,omitempty"`
++		ReadError  bool      `json:"read_error,omitempty"`
++	}
++	wire := wireEvent{ID: event.ID, ObjectID: event.ObjectID, ReceivedAt: event.ReceivedAt, Protocol: event.Protocol, ReadError: event.ReadError}
++	if !event.ReadError {
++		body := event.Body
++		if body == nil {
++			body = []byte{}
++		}
++		wire.Body = &body
++	}
++	return json.Marshal(wire)
++}
++
++// InputAuditObserver receives a private copy of the raw authenticated Chat Completions entry.
++// ObserveInputAudit treats event as read-only, returns delivery errors, and cannot influence execution.
++// Ordinary panics and errors are fail-open; native process faults cannot be recovered by this contract.
++type InputAuditObserver interface {
++	ObserveInputAudit(context.Context, InputAuditEvent) error
++}

@@ -15,3 +15,13 @@
 .env.*
 !.env.example
 !.env.*.example
+
+# 固定宿主源码、本地构建产物与隔离合成验收数据。
+.build/
+.test-data/
+artifacts/
+.playwright-mcp/
+audit-loop-browser.png
+*.dylib
+*.so
+*.dll

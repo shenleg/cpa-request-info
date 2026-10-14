@@ -1,0 +1,2 @@
+# 统一 diff 的上下文前缀空格是补丁格式，不能按源码缩进清除；实际新增源码由补丁应用及 gofmt 检查。
+host/patches/*.patch -whitespace

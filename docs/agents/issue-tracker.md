@@ -7,7 +7,10 @@
 - 每个 feature 使用独立目录：`.scratch/<feature-slug>/`
 - spec 文件路径为 `.scratch/<feature-slug>/spec.md`
 - 每个实现 issue 单独存放在 `.scratch/<feature-slug>/issues/<NN>-<slug>.md`，从 `01` 开始编号；不要把多个 issue 合并到一个文件。
-- 每个 issue 文件顶部附近使用 `Status:` 记录状态，值使用 `triage-labels.md` 中对应的标签字符串。
+- 实现 issue 的 `Status:` 记录进度：`open`（尚未完成）、`in-progress`（实施中）、`completed`（本票范围已实现并通过约定验收）。`completed` 不要求已经 Git 提交或发布，也不代表整个父 spec 完成。
+- 未完成 issue 使用独立的 `Triage:` 记录分诊，值见 `triage-labels.md`。`ready-for-human` 只表示需要人工实现，不表示等待验收。
+- 兼容旧格式：`Status:` 若仍是五种分诊标签之一，视为 `Status: open` 加对应的 `Triage:`；实际更新该票时再迁移，不批量改其他票。
+- 完成时设置 `Status: completed`，移除不再适用的 `Triage:`，勾选有证据的验收项并在 Comments 记录验证结果和未覆盖范围。所依赖的实现票全部 `completed` 后，才解除实现依赖；仅有 `ready-for-agent` 不表示依赖已完成。
 - 对话和评论追加到文件末尾的 `## Comments` 标题下。
 
 ## 技能要求“发布到 issue tracker”时

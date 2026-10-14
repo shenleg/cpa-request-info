@@ -1,0 +1,54 @@
+{
+  "_description": "本清单固定最小 Chat Completions 宿主扩展的官方基线、完整增量补丁和独立观察契约；不声明后续票据或其他平台已通过验收。",
+  "repository": "https://github.com/router-for-me/CLIProxyAPI",
+  "tag": "v8.0.27",
+  "commit": "bf9341629ef2300ac9d846a2e80fe2756f63a671",
+  "abi_version": 1,
+  "schema_version": 6,
+  "patches": [
+    {
+      "path": "patches/0001-readonly-input-audit.patch",
+      "sha256": "cb7e513770f1cfde5b325b7b1a2fd737314b6dda280e3595dc324f26003c45cc"
+    }
+  ],
+  "input_audit": {
+    "contract_version": 1,
+    "capability": "input_audit_observer",
+    "observe_method": "input_audit.observe",
+    "capabilities_method": "host.input_audit.capabilities",
+    "catalog_method": "host.input_audit.catalog",
+    "protocols": ["chat-completions"],
+    "event_fields": ["id", "object_id", "received_at", "protocol", "body", "read_error"],
+    "body_encoding": "base64",
+    "read_error_body": "omitted",
+    "identity_provider": "config-inline",
+    "state_dir_config": "plugins.configs.request-input-audit.state-dir",
+    "seed_file": "identity.seed",
+    "seed_bytes": 32,
+    "directory_mode": "0700",
+    "seed_mode": "0600",
+    "seed_durability": "file-sync-and-parent-directory-sync",
+    "object_id_algorithm": "HMAC-SHA256",
+    "object_id_domain": "cpa-request-input-audit/object/v1\u0000",
+    "object_id_encoding": "hex",
+    "delivery": "synchronous-readonly-isolated-copy-fail-open",
+    "native_crash_isolation": false
+  },
+  "build_validation": {
+    "go_version": "go1.27.2",
+    "goos": "darwin",
+    "goarch": "arm64",
+    "target": "./cmd/server",
+    "binary": ".build/bin/cliproxyapi",
+    "existing_test_packages": [
+      "./internal/pluginhost",
+      "./sdk/access",
+      "./internal/access/config_access",
+      "./sdk/pluginapi",
+      "./sdk/pluginabi",
+      "./sdk/api/handlers",
+      "./sdk/api/handlers/openai",
+      "./internal/api"
+    ]
+  }
+}
