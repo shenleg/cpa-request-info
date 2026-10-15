@@ -28,7 +28,7 @@
 
 ## 未完成与风险
 
-尚无上述白名单以外的内容类型、三协议完整 SSE/重试/断开回归矩阵、动态预算管理、满额自动恢复、异常退出恢复、完整缺口历史或 Linux 双架构运行验收。当前已增加统一到期隐藏、周期回收与保留设置；暂停、移除不会改变接收时间或提前删除未到期历史。周期清理不代表预算恢复和完整故障恢复已完成，正常重启也不等于异常恢复 ticket 11 已完成。
+尚无上述白名单以外的内容类型、三协议完整 SSE/重试/断开回归矩阵、动态预算管理、满额自动恢复、异常退出恢复或完整缺口历史。Linux amd64 已在 Debian 13 原生构建并完成现有系统、工具及浏览器回归；Linux arm64 和 Linux 真实 ENOSPC/只读卷故障仍未验证，详见[验收记录](docs/verification/linux-amd64-2026-10-15.md)。当前已增加统一到期隐藏、周期回收与保留设置；暂停、移除不会改变接收时间或提前删除未到期历史。周期清理不代表预算恢复和完整故障恢复已完成，正常重启也不等于异常恢复 ticket 11 已完成。
 
 应用层不加密。专用目录为 `0700`、文件为 `0600`，仍需保护主机、磁盘、快照和备份。逻辑到期和文件空间回收不等于磁盘、数据库空闲页、文件系统、快照或备份安全擦除；应用不控制外部副本的保留。没有安全擦除或 native 进程崩溃隔离保证；常规解析/队列/存储错误 fail-open，不代表零丢失、零延迟或吞吐承诺。诊断是有界运行期原因码和已知计数，不是完整可恢复缺口历史。
 
@@ -38,7 +38,7 @@
 
 ## 本地构建
 
-需要 Go ≥ 1.26、启用 CGO、C 编译器、Git、Python 3、`tar` 和 `patch`。已在 macOS arm64 / Go 1.27.2 验证；仅交叉编译不算目标平台运行通过。
+需要 Go ≥ 1.26、启用 CGO、C 编译器、Git、Python 3、`tar` 和 `patch`。已在 macOS arm64 和 Debian 13 / Linux amd64 上使用 Go 1.27.2 原生构建并运行验收；仅交叉编译不算目标平台运行通过。Linux 浏览器还需 Chromium 系统运行库，具体环境和未验证项见[Linux amd64 验收记录](docs/verification/linux-amd64-2026-10-15.md)。
 
 ```bash
 make deps              # 明确准备 Go/Node 依赖；不执行 npm 生命周期脚本
@@ -59,7 +59,7 @@ make verify            # 全部系统/工具/浏览器验收；正常停止进�
 
 ```text
 .build/bin/cliproxyapi
-.build/plugins/request-input-audit.dylib  # macOS；Linux 为 .so，运行尚未验收
+.build/plugins/request-input-audit.dylib  # macOS；Linux amd64 为 .so，已完成 Debian 13 原生运行验收
 ```
 
 `go test ./...` 的系统测试要求先构建宿主及插件，不因产物缺失静默跳过。测试仅创建合成配置和受控 HTTP 上游，数据保留在 `.test-data/`；正常停止本测试创建的进程，不自动删除数据。
@@ -176,7 +176,7 @@ make test-one TEST='TestResponsesWebsocket|TestSettings'
 make browser-run
 ```
 
-管理页面复用原列表/单条详情，`responses-websocket` 显示为 Responses WebSocket，截断和提取不完整独立标记。浏览器四场景各两轮，仅保存有限状态截图/结果。当前仅 macOS arm64 实际运行验收；异常恢复、Linux 双架构与三协议最终失败矩阵仍由后续票执行，未宣称完整第一版已交付。
+管理页面复用原列表/单条详情，`responses-websocket` 显示为 Responses WebSocket，截断和提取不完整独立标记。当前浏览器六场景各两轮，仅保存有限状态截图/结果；macOS arm64 和 Debian 13 / Linux amd64 均已实际运行。异常恢复、Linux arm64、Linux 磁盘故障及三协议最终失败矩阵仍未完成，未宣称完整第一版已交付。
 
 ## 保留期与配置验收
 

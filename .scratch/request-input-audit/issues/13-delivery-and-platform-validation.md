@@ -6,7 +6,8 @@
 
 **Blocked by:** 05 — Anthropic Messages 输入审计；06 — HTTP 调用失败、流式与重试的一次提交语义；07 — Responses WebSocket 消息级审计；08 — 筛选、关键词搜索与安全浏览；12 — 缺口历史、已阅确认与持续告警。
 
-Status: ready-for-agent
+Status: open
+Triage: ready-for-agent
 
 **Spec:** [请求输入审计 spec](../spec.md)。覆盖全部行为验收矩阵及 User Stories 60–62。其他前置票由上述直接阻塞票传递约束，不重复列为直接依赖。
 
@@ -36,3 +37,4 @@ Status: ready-for-agent
 ## Comments
 
 - 2026-10-13：用户批准拆分后创建，尚未开始实施。
+- 2026-10-15：在不认定本票完整交付的前提下，补充提交 `bfa392e` 的 Debian 13 / Linux amd64 原生运行证据：固定宿主与普通/隔离时间插件构建、完整现有Go回归、工具测试及六个浏览器场景各两轮通过；111个顶层测试、160个子测试通过，Node工具测试7/7，浏览器12/12、`cleanup=true`，普通用户下运行且无遗留测试进程。两项macOS `hdiutil`磁盘故障测试明确跳过，不表示Linux ENOSPC/只读卷已验收；arm64、后续前置功能和完整三协议失败矩阵仍未完成，保留所有完整交付验收项未勾选及本票open状态。详细环境、实际命令和有限证据见[Linux amd64验收记录](../../../docs/verification/linux-amd64-2026-10-15.md)。
