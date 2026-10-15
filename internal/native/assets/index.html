@@ -2,19 +2,19 @@
 <!-- 本页面只托管无数据 shell；动态数据受宿主管理鉴权保护，管理 Key 仅在页面内存驻留。 -->
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-qROgWupsSfhBf2kEn5P1HQ7Tzc9F4yyhFvCN8c/SWRc='; style-src 'sha256-mcEoXKWBfiRvpvTh90RoJs1oIgkKU4gVvUXfuAv9NcU='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-aUoeolg2dUv5rFoH4/WBH0cuNHgmQV3yOYLRqd0x9lw='; style-src 'sha256-mcEoXKWBfiRvpvTh90RoJs1oIgkKU4gVvUXfuAv9NcU='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <title>输入审计</title>
 <style>
 :root{color-scheme:light dark;font-family:system-ui,sans-serif}body{max-width:1100px;margin:24px auto;padding:0 20px;line-height:1.6}input,select,button{font:inherit;margin:5px;padding:7px;max-width:95%}button{cursor:pointer}label{display:block}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #888;padding:9px;text-align:left;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:14px;border:1px solid #888}#notice{border-left:4px solid #888;padding-left:12px}code{overflow-wrap:anywhere}.object-id{font-size:.8em}section{margin-top:24px}
 </style></head>
 <body>
 <h1>输入审计</h1>
-<p id="notice">当前支持 Chat Completions、Responses HTTP、Responses WebSocket 与 Anthropic Messages：仅审查本次末尾新用户消息；WebSocket 按每次客户端模型提交独立记录，不记录握手或控制消息；Responses 字符串 input 直接作为本次用户文本；Anthropic 仅含 tool_result 的末尾 user 正常跳过，混合消息只保留新内容，不提取工具结果内部数据。图片/音频/视频/文件只保存固定占位符，不保存附件载荷或工具内容，不回查 previous_response_id 或会话历史。未知块会产生提取不完整标记与缺口诊断；普通文本中的链接、Base64 和秘密不自动脱敏。正文按配置保存 1–65536 字节内的 UTF-8 前缀；配置变更只影响后续提交，无须重连。应用层不加密，尚不支持七天自动过期清理和完整故障恢复；仅供隔离合成数据验收，不适用于生产审计。</p>
+<p id="notice">当前支持 Chat Completions、Responses HTTP、Responses WebSocket 与 Anthropic Messages：仅审查本次末尾新用户消息；WebSocket 按每次客户端模型提交独立记录，不记录握手或控制消息；Responses 字符串 input 直接作为本次用户文本；Anthropic 仅含 tool_result 的末尾 user 正常跳过，混合消息只保留新内容，不提取工具结果内部数据。图片/音频/视频/文件只保存固定占位符，不保存附件载荷或工具内容，不回查 previous_response_id 或会话历史。未知块会产生提取不完整标记与缺口诊断；普通文本中的链接、Base64 和秘密不自动脱敏。正文按配置保存 1–65536 字节内的 UTF-8 前缀；单条上限变更只影响后续提交，无须重连。应用层不加密，尚不支持完整故障恢复；仅供隔离合成数据验收，不适用于生产审计。</p>
 <section id="login"><h2>宿主管理鉴权</h2><p>优先复用同源宿主已有登录状态。无法取得时，请临时输入同一个管理 Key；只存本页内存，不写入 localStorage/cookie，刷新即消失。</p><label>临时管理 Key <input id="management-key" type="password" autocomplete="off"></label><button id="connect">连接</button></section>
 <p id="message" role="status">等待管理鉴权。</p>
 <div id="content" hidden>
 <section><h2>监控对象与名称</h2><p>这里只显示宿主无秘密对象 ID，不展示原 Key、片段或上游账号。选择和命名不修改宿主 Key 配置。移除只停止后续采集，保留名称和已保存历史。</p><p id="catalog-state"></p><label>审计对象 <select id="objects"></select></label><label>名称 <input id="name" maxlength="256" placeholder="例如：合成业务对象"></label><p>名称最多 256 UTF-8 字节，不等于 256 个中文字符。</p><button id="monitor">选择并命名</button><button id="rename">仅改名</button><button id="remove">移除监控</button></section>
-<section><h2>单条正文上限</h2><label>UTF-8 字节上限 <input id="max-text-bytes" type="number" min="1" max="65536" step="1" required></label><button id="save-settings">保存上限</button><p>合法范围为 1–65536 字节；仅改变后续提交，已接收副本保留原上限，不改变模型收到的完整输入。</p></section>
+<section><h2>保留期限与单条正文上限</h2><label>保留天数 <input id="retention-days" type="number" min="1" max="30" step="1" required></label><p>合法范围为 1–30 天，默认 7 天，从服务端接收提交起算；暂停、移除监控和停机不冻结期限。到期立即退出查询，后台每分钟清理。调长保留期不延长已有历史；缩短会使现有历史提前到期，保存前必须确认。</p><label>UTF-8 字节上限 <input id="max-text-bytes" type="number" min="1" max="65536" step="1" required></label><p>合法范围为 1–65536 字节；仅改变后续提交，已接收副本保留原上限，旧正文不重新截断，不改变模型收到的完整输入。</p><button id="save-settings">保存设置</button><p>两项设置一起保存；取消缩短确认时两项都不提交。逻辑到期和空间回收不等于磁盘、数据库空闲页、快照或备份的安全擦除；应用层不加密。</p></section>
 <section><h2>采集状态</h2><p id="capture-state">等待采集状态。</p><button id="pause">暂停采集</button><button id="resume">恢复采集</button><pre id="health" aria-label="采集状态"></pre><button id="refresh">刷新已保存记录</button></section>
 <section><h2>已保存输入记录</h2><label>历史对象筛选 <select id="object-filter"><option value="">全部对象</option></select></label><label>接收时间起点 <input id="from-filter" type="datetime-local" step="0.001"></label><label>接收时间终点 <input id="to-filter" type="datetime-local" step="0.001"></label><p>按服务端接收时刻筛选，包含起点和终点；输入使用浏览器本地时间。</p><label>客户端请求模型筛选 <input id="model-filter" maxlength="1024" placeholder="客户端提交的精确模型名"></label><label>正文关键词 <input id="keyword-filter" maxlength="65536" placeholder="已保存正文中的字面子串"></label><p>条件取交集；模型名精确匹配，关键词仅忽略英文字母大小写，不解释正则或搜索语法，不搜索未保存部分。模型最多1024 UTF-8字节，关键词最多65536字节。</p><button id="apply-filters">应用筛选</button><button id="clear-filters">清空筛选</button><p id="empty">没有匹配的已保存记录。入队不等于落盘。</p><table id="records"><thead><tr><th>接收时间</th><th>对象</th><th>协议</th><th>请求模型</th><th>纯文本预览</th><th>状态</th><th>详情</th></tr></thead><tbody></tbody></table><button id="previous">上一页</button><button id="next">下一页</button><span id="page"></span></section>
 <section><h2>单条详情</h2><p id="detail-meta"></p><pre id="detail" aria-label="已保存纯文本正文">请选择一条记录。</pre></section>
@@ -25,7 +25,7 @@
 (() => {
   let key = '', offset = 0, total = 0, catalogAvailable = false;
   let knownObjects = [], selectedFilter = '', busy = false, capturePaused = false, observerAvailable = false;
-  let appliedFilters = {};
+  let appliedFilters = {}, currentRetentionDays;
   const base = '/v0/management/plugins/request-input-audit';
   const $ = id => document.getElementById(id);
   const message = text => { $('message').textContent = text; };
@@ -49,6 +49,7 @@
       key = ''; $('login').hidden = false; $('content').hidden = true;
       throw new Error('管理鉴权失败，请重新输入临时管理 Key。');
     }
+    if (response.status === 409 && path === '/settings') throw new Error('保留期已变化，缩短需要确认；请刷新设置后重试，现有历史将提前到期。');
     if (!response.ok) throw new Error('操作未完成（HTTP '+response.status+'），请查看采集状态。');
     return response.json();
   }
@@ -66,6 +67,7 @@
     $('resume').disabled = busy || !observerAvailable || !capturePaused;
     $('save-settings').disabled = busy || !observerAvailable;
     $('max-text-bytes').disabled = busy || !observerAvailable;
+    $('retention-days').disabled = busy || !observerAvailable;
     $('previous').disabled = busy || offset===0;$('next').disabled = busy || offset+20>=total;
     for (const id of ['connect','refresh','objects','name','object-filter','from-filter','to-filter','model-filter','keyword-filter','apply-filters','clear-filters']) $(id).disabled = busy;
     for (const button of $('records').querySelectorAll('tbody button')) button.disabled = busy;
@@ -110,10 +112,11 @@
     const query = new URLSearchParams({offset,limit:20,object_id:selectedFilter,...appliedFilters});
     const [status, data, settings] = await Promise.all([api('/status'),api('/records?'+query),api('/settings')]);
     $('max-text-bytes').value = settings.max_text_bytes;
+    currentRetentionDays = settings.retention_days;$('retention-days').value = currentRetentionDays;
     const state = status.state ?? {}, gaps = state.gaps ?? {};
     capturePaused = state.capture_paused === true;observerAvailable = status.available === true;
-    $('capture-state').textContent = capturePaused ? '主动暂停：后续提交不采集，已接收副本和历史保留。' : '未主动暂停：受监控对象的后续提交可采集；仍受故障和容量约束。';
-    $('health').textContent = '观察契约：'+(status.available?'可用':'不可用')+'\n故障运行状态：'+(state.state??'不可用')+'\n原因：'+(status.reason||state.reason||'无')+'\n已保存：'+(state.saved??'未知')+'；排队：'+(state.queued??'未知')+'\n保守占用：'+(state.used_bytes??'未知')+' / '+(state.budget_bytes??'未知')+' 字节\n已知缺口计数（非完整历史）：'+JSON.stringify(gaps)+'\n恢复主动采集不会解除存储故障；当前未实现过期清理和异常恢复。';
+    $('capture-state').textContent = capturePaused ? '主动暂停：后续提交不采集，已接收副本和历史仍按保留期到期。' : '未主动暂停：受监控对象的后续提交可采集；仍受故障和容量约束。';
+    $('health').textContent = '观察契约：'+(status.available?'可用':'不可用')+'\n故障运行状态：'+(state.state??'不可用')+'\n原因：'+(status.reason||state.reason||'无')+'\n已保存：'+(state.saved??'未知')+'；排队：'+(state.queued??'未知')+'\n保守占用：'+(state.used_bytes??'未知')+' / '+(state.budget_bytes??'未知')+' 字节\n已知缺口计数（非完整历史）：'+JSON.stringify(gaps)+'\n恢复主动采集不会解除存储故障；过期数据后台每分钟清理，尚不支持完整故障恢复。';
     // 配置变更后的当前名称不能继续配上旧详情标签；下一次查看会重新取当前投影。
     $('detail-meta').textContent = '';$('detail').textContent = '请选择一条记录。';
     total=data.total; $('empty').hidden = data.records.length>0;
@@ -145,9 +148,16 @@
     await api(path,'POST',payload);await objects();await refresh();message(success);
   }
   $('save-settings').addEventListener('click',()=>guard(async()=>{
-    const limit = $('max-text-bytes').valueAsNumber;
+    const limit = $('max-text-bytes').valueAsNumber, days = $('retention-days').valueAsNumber;
     if (!Number.isInteger(limit) || limit < 1 || limit > 65536) throw new Error('正文上限必须是 1–65536 之间的整数。');
-    await api('/settings','POST',{max_text_bytes:limit});await refresh();message('正文上限已保存；仅后续提交采用新上限，已接收副本不变。');
+    if (!Number.isInteger(days) || days < 1 || days > 30) throw new Error('保留期必须是 1–30 之间的整数。');
+    const payload = {max_text_bytes:limit,retention_days:days};
+    // 缩短可能使已有历史立即到期；取消必须在任何写入之前返回，两项设置不能分别提交。
+    if (days < currentRetentionDays) {
+      if (!window.confirm('将保留期从 '+currentRetentionDays+' 天缩短至 '+days+' 天，现有历史将提前到期；已到期记录将退出查询并由后台清理。确认保存两项设置吗？')) {message('已取消保存；两项设置均未提交。');return;}
+      payload.confirm_retention_shortening = true;
+    }
+    await api('/settings','POST',payload);await refresh();message('正文上限已保存；仅后续提交采用新上限，已接收副本不变。保留期已保存；调长不延长已有历史。');
   }));
   $('objects').addEventListener('change',selectObject);
   $('monitor').addEventListener('click',()=>guard(()=>saveObject('/monitor','监控配置已保存；已接收提交保留原决策，后续提交采用新配置。')));

@@ -1,4 +1,4 @@
-// 本文件提供已同步记录的有界查询；仅缓存最近一页的文件位置，避免详情核对反复解析历史正文。
+// 本文件统一已同步且未到期记录的查询；只缓存最近一页位置，详情仍逐次核验到期状态。
 package audit
 
 import (
@@ -63,65 +63,19 @@ func (c *Collector) List(offset, limit int, query Query) ([]Record, int, error) 
 	if c.root == nil {
 		return nil, 0, errors.New("collector_closed")
 	}
-	total := 0
-	for _, seg := range c.segments {
-		total += seg.count
-	}
-	if query != (Query{}) {
-		query.Keyword = lowerASCII(query.Keyword)
-		return c.listFiltered(offset, limit, query)
-	}
-	result := make([]Record, 0, limit)
-	c.pageHints = nil
-	hints := make(map[string]recordLocation, limit)
-	if offset >= total {
-		return result, total, nil
-	}
-	remainingOffset := offset
-	for index := len(c.segments) - 1; index >= 0 && len(result) < limit; index-- {
-		seg := c.segments[index]
-		if remainingOffset >= seg.count {
-			remainingOffset -= seg.count
-			continue
-		}
-		end := seg.count - remainingOffset
-		start := end - (limit - len(result))
-		if start < 0 {
-			start = 0
-		}
-		selected := make([]Record, 0, end-start)
-		current := 0
-		var position int64
-		err := c.readSegment(seg, func(record Record, bytes int64) error {
-			if current >= start && current < end {
-				selected = append(selected, record)
-				hints[record.ID] = recordLocation{segmentIndex: index, offset: position, length: bytes}
-			}
-			position += bytes
-			current++
-			return nil
-		})
-		if err != nil {
-			c.pause("storage_error")
-			return nil, total, errors.New("storage_error")
-		}
-		for i := len(selected) - 1; i >= 0; i-- {
-			result = append(result, selected[i])
-		}
-		remainingOffset = 0
-	}
-	c.pageHints = hints
-	return result, total, nil
+	query.Keyword = lowerASCII(query.Keyword)
+	// 物理条数包含尚待清理的过期记录；空查询也必须先判定可见性再计数和分页。
+	return c.listFiltered(offset, limit, query, auditNow())
 }
 
 // listFiltered 两遍扫描已提交边界：先独立计数，再选取匹配序号，避免先分页后过滤导致总数和页内容错误。
 // 列表与搜索共用记录读取入口；到期可见性应在查询模块统一实现，不能只在关键词分支过滤。
-func (c *Collector) listFiltered(offset, limit int, query Query) ([]Record, int, error) {
+func (c *Collector) listFiltered(offset, limit int, query Query, now time.Time) ([]Record, int, error) {
 	c.pageHints = nil
 	total := 0
 	for _, seg := range c.segments {
 		if err := c.readSegment(seg, func(record Record, _ int64) error {
-			if query.matches(record) {
+			if !c.expired(record, now) && query.matches(record) {
 				total++
 			}
 			return nil
@@ -144,7 +98,7 @@ func (c *Collector) listFiltered(offset, limit int, query Query) ([]Record, int,
 	for index, seg := range c.segments {
 		var position int64
 		if err := c.readSegment(seg, func(record Record, bytes int64) error {
-			if query.matches(record) {
+			if !c.expired(record, now) && query.matches(record) {
 				if current >= start && current < end {
 					result = append(result, record)
 					hints[record.ID] = recordLocation{segmentIndex: index, offset: position, length: bytes}
@@ -173,9 +127,13 @@ func (c *Collector) HistoryObjects() (map[string]bool, error) {
 	if c.root == nil {
 		return nil, errors.New("collector_closed")
 	}
+	now := auditNow()
 	result := make(map[string]bool)
 	for _, seg := range c.segments {
 		if err := c.readSegment(seg, func(record Record, _ int64) error {
+			if c.expired(record, now) {
+				return nil
+			}
 			result[record.ObjectID] = true
 			if len(result) > 1024 {
 				return errors.New("object_limit")
@@ -201,11 +159,15 @@ func (c *Collector) Detail(id string) (Record, error) {
 	if c.root == nil {
 		return Record{}, errors.New("collector_closed")
 	}
+	now := auditNow()
 	if location, ok := c.pageHints[id]; ok {
 		record, err := c.readLocated(location)
 		if err != nil || record.ID != id {
 			c.pause("storage_error")
 			return Record{}, errors.New("storage_error")
+		}
+		if c.expired(record, now) {
+			return Record{}, errors.New("not_found")
 		}
 		return record, nil
 	}
@@ -213,7 +175,7 @@ func (c *Collector) Detail(id string) (Record, error) {
 	var result Record
 	for index := len(c.segments) - 1; index >= 0; index-- {
 		err := c.readSegment(c.segments[index], func(record Record, _ int64) error {
-			if record.ID == id {
+			if record.ID == id && !c.expired(record, now) {
 				result = record
 				return found
 			}

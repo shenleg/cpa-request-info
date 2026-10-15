@@ -1,4 +1,4 @@
-// 本文件管理安全目录、独占进程锁、配置原子替换与单写入者分段 JSONL；失败绝不截尾或删除历史。
+// 本文件管理安全目录、独占锁、配置原子替换与单写入者分段JSONL；仅完整校验后的到期历史可由维护回收。
 package audit
 
 import (
@@ -133,7 +133,11 @@ func (c *Collector) initialize() error {
 			return nil
 		}
 	}
-	if used+auxiliaryReserve >= c.status.BudgetBytes {
+	if err := c.sweepExpired(auditNow()); err != nil {
+		c.pause("storage_error")
+		return nil
+	}
+	if c.status.UsedBytes+auxiliaryReserve+maintenanceReserve >= c.status.BudgetBytes {
 		c.pause("budget_exhausted")
 	}
 	return nil
@@ -300,7 +304,7 @@ func (c *Collector) saveMonitors(data []byte) error {
 	c.status.UsedBytes = used
 	budget := c.status.BudgetBytes
 	c.mu.Unlock()
-	if used+rounded(int64(len(data)))+auxiliaryReserve > budget {
+	if used+rounded(int64(len(data)))+auxiliaryReserve+maintenanceReserve > budget {
 		c.pause("budget_exhausted")
 		return errors.New("budget_exhausted")
 	}
@@ -329,7 +333,24 @@ func (c *Collector) saveMonitors(data []byte) error {
 
 func (c *Collector) writeLoop() {
 	defer close(c.done)
-	for queued := range c.queue {
+	ticks, stop := newMaintenanceTimer()
+	defer stop()
+	for {
+		var queued queuedRecord
+		select {
+		case <-ticks:
+			c.ioMu.Lock()
+			if err := c.sweepExpired(auditNow()); err != nil {
+				c.pause("storage_error")
+			}
+			c.ioMu.Unlock()
+			continue
+		case record, ok := <-c.queue:
+			if !ok {
+				return
+			}
+			queued = record
+		}
 		c.ioMu.Lock()
 		c.mu.Lock()
 		active := c.status.State == "active"
@@ -377,7 +398,7 @@ func (c *Collector) appendRecord(record Record) error {
 		old := c.segments[len(c.segments)-1].committed
 		growth = rounded(old+int64(len(data))) - rounded(old)
 	}
-	if used+growth+auxiliaryReserve > budget {
+	if used+growth+auxiliaryReserve+maintenanceReserve > budget {
 		return errors.New("budget_exhausted")
 	}
 	if rotate {

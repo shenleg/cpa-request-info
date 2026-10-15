@@ -64,6 +64,7 @@ type Status struct {
 	UsedBytes     int64             `json:"used_bytes"`
 	BudgetBytes   int64             `json:"budget_bytes"`
 	MaxTextBytes  int               `json:"max_text_bytes"`
+	RetentionDays int               `json:"retention_days"`
 }
 
 // Collector 是审计深模块；所有存储、队列、解析和缺口诊断均由它管理。
@@ -118,7 +119,7 @@ func Open(dir string, budget int64) (*Collector, error) {
 	if err != nil {
 		return nil, errors.New("storage_unavailable")
 	}
-	c := &Collector{root: root, generation: hex.EncodeToString(generation[:]), config: configuration{Version: 2, MaxTextBytes: maxText, Objects: make(map[string]Object)}, queue: make(chan queuedRecord, 64), done: make(chan struct{}), status: Status{Available: true, State: "active", BudgetBytes: budget, Gaps: map[string]uint64{}}}
+	c := &Collector{root: root, generation: hex.EncodeToString(generation[:]), config: configuration{Version: 2, MaxTextBytes: maxText, RetentionDays: defaultRetentionDays, RetentionCaps: []retentionCap{}, Objects: make(map[string]Object)}, queue: make(chan queuedRecord, 64), done: make(chan struct{}), status: Status{Available: true, State: "active", BudgetBytes: budget, Gaps: map[string]uint64{}}}
 	for _, key := range []string{"read_error", "invalid_event", "invalid_json", "unsupported_protocol", "unsupported_content", "metadata_too_large", "queue_full", "storage_error", "budget_exhausted", "observer_unavailable"} {
 		c.status.Gaps[key] = 0
 	}
@@ -270,6 +271,7 @@ func (c *Collector) Status() Status {
 	result := c.status
 	result.CapturePaused = c.config.CapturePaused
 	result.MaxTextBytes = c.config.MaxTextBytes
+	result.RetentionDays = c.config.RetentionDays
 	result.Gaps = make(map[string]uint64, len(c.status.Gaps))
 	for key, value := range c.status.Gaps {
 		result.Gaps[key] = value

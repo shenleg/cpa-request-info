@@ -25,12 +25,13 @@ const keyB = "synthetic-client-audit-b-only"
 const api = "/v0/management/plugins/request-input-audit"
 
 type instance struct {
-	base   string
-	dir    string
-	log    *os.File
-	cmd    *exec.Cmd
-	client *http.Client
-	stop   func()
+	base     string
+	dir      string
+	stateDir string
+	log      *os.File
+	cmd      *exec.Cmd
+	client   *http.Client
+	stop     func()
 }
 
 // startHost 在独立目录启动真实宿主；budget 设置有限预算，plugin 控制加载，upstream 指向本地可控模型。
@@ -60,11 +61,39 @@ func startHostWithConfiguration(t *testing.T, budget int64, plugin bool, upstrea
 // 其余参数同 startHostWithConfiguration；返回真实入口，配置或启动失败终止测试，不污染其他测试的插件目录。
 func startHostWithPluginDirectory(t *testing.T, budget int64, plugin bool, upstream string, environmentAuth bool, extraConfig, pluginDirectory, pluginConfig string, stateDir ...string) *instance {
 	t.Helper()
+	return startHostWithRuntime(t, budget, plugin, upstream, environmentAuth, extraConfig, pluginDirectory, pluginConfig, "", "", stateDir...)
+}
+
+// startRetentionHost 用独立时钟验收宿主和插件启动合成实例；clockPath 是原子更新的文件时钟路径。
+// budget/upstream/stateDir 同 startHost，返回入口及实际 stateDir；路径或启动失败终止测试，不修改全局环境。
+func startRetentionHost(t *testing.T, budget int64, upstream, clockPath string, stateDir ...string) *instance {
+	t.Helper()
 	root, err := filepath.Abs("../..")
 	if err != nil {
 		t.Fatal(err)
 	}
-	host := os.Getenv("CPA_HOST")
+	if clockPath != "" {
+		clockPath, err = filepath.Abs(clockPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	out := filepath.Join(root, ".build/retention-test")
+	return startHostWithRuntime(t, budget, true, upstream, false, "", filepath.Join(out, "plugins"), "", filepath.Join(out, "bin/cliproxyapi"), clockPath, stateDir...)
+}
+
+// startHostWithRuntime 启动指定产物，hostOverride/clockPath 仅供隔离验收使用；其余参数同原启动器。
+// 返回真实入口与实际数据目录；显式传入控制路径，配置、文件或进程失败终止测试，不继承测试时钟环境。
+func startHostWithRuntime(t *testing.T, budget int64, plugin bool, upstream string, environmentAuth bool, extraConfig, pluginDirectory, pluginConfig, hostOverride, clockPath string, stateDir ...string) *instance {
+	t.Helper()
+	root, err := filepath.Abs("../..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host := hostOverride
+	if host == "" {
+		host = os.Getenv("CPA_HOST")
+	}
 	if host == "" {
 		host = filepath.Join(root, ".build/bin/cliproxyapi")
 	}
@@ -149,6 +178,9 @@ plugins:
 	cmd.Dir = dir
 	// 不继承真实云凭据、代理、远程存储或插件 token，只提供运行所需的本地环境。
 	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "TMPDIR=" + dir}
+	if clockPath != "" {
+		cmd.Env = append(cmd.Env, "CPA_AUDIT_TEST_CLOCK="+clockPath)
+	}
 	if environmentAuth {
 		// 宿主原生管理入口使用恒定时间比较；避免每条详情都做 bcrypt 掩盖队列/落盘验收的成本。
 		cmd.Env = append(cmd.Env, "MANAGEMENT_PASSWORD="+adminKey)
@@ -157,7 +189,7 @@ plugins:
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	h := &instance{base: fmt.Sprintf("http://127.0.0.1:%d", port), dir: dir, log: log, cmd: cmd, client: &http.Client{Timeout: 5 * time.Second}}
+	h := &instance{base: fmt.Sprintf("http://127.0.0.1:%d", port), dir: dir, stateDir: auditDir, log: log, cmd: cmd, client: &http.Client{Timeout: 5 * time.Second}}
 	var stopOnce sync.Once
 	h.stop = func() {
 		stopOnce.Do(func() {

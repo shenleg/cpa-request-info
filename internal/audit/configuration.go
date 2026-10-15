@@ -1,4 +1,4 @@
-// 本文件维护有界审计对象目录与正文上限；配置仅在持久化成功后发布，停用保留名称和历史。
+// 本文件维护有界审计对象目录、正文上限及保留配置；持久化成功后才发布，停用不删除未到期历史。
 package audit
 
 import (
@@ -19,6 +19,8 @@ type configuration struct {
 	CapturePaused bool              `json:"capture_paused"`
 	MaxTextBytes  int               `json:"max_text_bytes"`
 	Objects       map[string]Object `json:"objects"`
+	RetentionDays int               `json:"retention_days"`
+	RetentionCaps []retentionCap    `json:"retention_caps"`
 }
 
 // Monitor 添加或重新启用 objectID 并设置当前 name；名称最多256 UTF-8字节，身份为64位十六进制。
@@ -79,13 +81,7 @@ func (c *Collector) SetPaused(paused bool) error {
 // SetMaxTextBytes 同步保存后续提交的正文上限；limit 为1至65536个UTF-8字节，不追溯已接收副本。
 // 成功无返回值，非法上限、关闭或存储失败返回固定错误；保存失败不发布新上限，并遵循配置失败停采规则。
 func (c *Collector) SetMaxTextBytes(limit int) error {
-	if limit < 1 || limit > maxText {
-		return errors.New("invalid_max_text_bytes")
-	}
-	return c.changeConfiguration(func(next *configuration) error {
-		next.MaxTextBytes = limit
-		return nil
-	})
+	return c.SetSettings(SettingsChange{MaxTextBytes: &limit})
 }
 
 // Objects 返回已知对象目录的独立副本；无参数或 I/O 异常，包含已停用对象，调用者修改不影响配置。
@@ -130,6 +126,8 @@ func (c *Collector) changeConfiguration(change func(*configuration) error) error
 		return errors.New("configuration_unavailable")
 	}
 	next := c.config
+	next.Version = 3
+	next.RetentionCaps = append([]retentionCap{}, c.config.RetentionCaps...)
 	next.Objects = cloneObjects(c.config.Objects)
 	c.mu.Unlock()
 	if err := change(&next); err != nil {
@@ -162,7 +160,7 @@ func decodeConfiguration(data []byte) (configuration, error) {
 	if err != nil {
 		return configuration{}, errors.New("invalid_configuration")
 	}
-	config := configuration{Version: 2, MaxTextBytes: maxText, Objects: make(map[string]Object)}
+	config := configuration{Version: 3, MaxTextBytes: maxText, RetentionDays: defaultRetentionDays, RetentionCaps: []retentionCap{}, Objects: make(map[string]Object)}
 	if _, versioned := fields["version"]; versioned {
 		var version *int
 		var paused *bool
@@ -175,8 +173,22 @@ func decodeConfiguration(data []byte) (configuration, error) {
 			}
 			config.MaxTextBytes = *limit
 		}
-		// 指针区分显式null与整数2，不能让null沿用初始化版本并被视为有效配置。
-		if len(fields) != expectedFields || json.Unmarshal(fields["version"], &version) != nil || version == nil || *version != 2 || json.Unmarshal(fields["capture_paused"], &paused) != nil || paused == nil {
+		// 旧version2缺省保留期为七天；新版要求完整期限字段，不能把损坏配置当作默认设置。
+		if json.Unmarshal(fields["version"], &version) != nil || version == nil || (*version != 2 && *version != 3) {
+			return configuration{}, errors.New("invalid_configuration")
+		}
+		if *version == 3 {
+			expectedFields += 2
+			var days *int
+			if json.Unmarshal(fields["retention_days"], &days) != nil || days == nil || *days < 1 || *days > maxRetentionDays || decodeRetentionCaps(fields["retention_caps"], *days, &config.RetentionCaps) != nil {
+				return configuration{}, errors.New("invalid_configuration")
+			}
+			config.RetentionDays = *days
+			if _, present := fields["max_text_bytes"]; !present {
+				return configuration{}, errors.New("invalid_configuration")
+			}
+		}
+		if len(fields) != expectedFields || json.Unmarshal(fields["capture_paused"], &paused) != nil || paused == nil {
 			return configuration{}, errors.New("invalid_configuration")
 		}
 		config.CapturePaused = *paused

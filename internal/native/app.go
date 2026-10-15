@@ -213,7 +213,7 @@ func (a *App) management(req managementRequest) any {
 		if live.BridgeFailures > 0 && reason == "" && collectorReason == "" {
 			reason = "observer_bridge_error"
 		}
-		return responseJSON(200, map[string]any{"available": available, "reason": reason, "supported": "chat-completions-responses-anthropic-http-responses-websocket-last-user-content", "supported_protocols": []string{"chat-completions", "responses", "anthropic-messages", "responses-websocket"}, "responses_websocket": true, "retention": "not_implemented", "state": state})
+		return responseJSON(200, map[string]any{"available": available, "reason": reason, "supported": "chat-completions-responses-anthropic-http-responses-websocket-last-user-content", "supported_protocols": []string{"chat-completions", "responses", "anthropic-messages", "responses-websocket"}, "responses_websocket": true, "retention": "receive_time_expiry_periodic_cleanup", "state": state})
 	}
 	if strings.HasSuffix(req.Path, "/objects") {
 		catalog, catalogErr := a.catalog()
@@ -256,16 +256,20 @@ func (a *App) management(req managementRequest) any {
 	}
 	if strings.HasSuffix(req.Path, "/settings") {
 		if req.Method == "GET" {
-			return responseJSON(200, map[string]int{"max_text_bytes": c.Status().MaxTextBytes})
+			state := c.Status()
+			return responseJSON(200, map[string]int{"max_text_bytes": state.MaxTextBytes, "retention_days": state.RetentionDays})
 		}
 		if len(req.Body) > 2048 {
 			return responseJSON(400, map[string]string{"error": "invalid_settings"})
 		}
-		limit, err := maxTextBytesSetting(req.Body)
+		change, err := settingsChange(req.Body)
 		if err != nil {
 			return responseJSON(400, map[string]string{"error": "invalid_settings"})
 		}
-		if err := c.SetMaxTextBytes(limit); err != nil {
+		if err := c.SetSettings(change); err != nil {
+			if err.Error() == "retention_confirmation_required" {
+				return responseJSON(409, map[string]string{"error": err.Error()})
+			}
 			return responseJSON(400, map[string]string{"error": "settings_rejected"})
 		}
 		return responseJSON(200, map[string]bool{"saved": true})
@@ -377,27 +381,57 @@ func (a *App) management(req managementRequest) any {
 	return responseJSON(404, map[string]string{"error": "not_found"})
 }
 
-// maxTextBytesSetting 逐token读取唯一字段，拒绝Go结构体解码默认接受的大小写别名、重复键和额外字段。
-func maxTextBytesSetting(raw []byte) (int, error) {
+// settingsChange 精确读取部分更新字段；拒绝大小写别名、重复键、null及无设置的确认请求。
+func settingsChange(raw []byte) (audit.SettingsChange, error) {
+	var change audit.SettingsChange
+	invalid := errors.New("invalid_settings")
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	if token, err := decoder.Token(); err != nil || token != json.Delim('{') {
-		return 0, errors.New("invalid_settings")
+		return change, invalid
 	}
-	if token, err := decoder.Token(); err != nil || token != "max_text_bytes" {
-		return 0, errors.New("invalid_settings")
-	}
-	var limit int
-	if decoder.Decode(&limit) != nil || limit < 1 || limit > 65536 {
-		return 0, errors.New("invalid_settings")
+	seen := make(map[string]bool)
+	for decoder.More() {
+		token, err := decoder.Token()
+		name, ok := token.(string)
+		if err != nil || !ok || seen[name] {
+			return change, invalid
+		}
+		seen[name] = true
+		switch name {
+		case "max_text_bytes", "retention_days":
+			var value *int
+			if decoder.Decode(&value) != nil || value == nil {
+				return change, invalid
+			}
+			if name == "max_text_bytes" {
+				if *value < 1 || *value > 65536 {
+					return change, invalid
+				}
+				change.MaxTextBytes = value
+			} else {
+				if *value < 1 || *value > 30 {
+					return change, invalid
+				}
+				change.RetentionDays = value
+			}
+		case "confirm_retention_shortening":
+			var confirmed *bool
+			if decoder.Decode(&confirmed) != nil || confirmed == nil {
+				return change, invalid
+			}
+			change.ConfirmRetentionShortening = *confirmed
+		default:
+			return change, invalid
+		}
 	}
 	if token, err := decoder.Token(); err != nil || token != json.Delim('}') {
-		return 0, errors.New("invalid_settings")
+		return change, invalid
 	}
 	var trailing any
-	if decoder.Decode(&trailing) != io.EOF {
-		return 0, errors.New("invalid_settings")
+	if decoder.Decode(&trailing) != io.EOF || change.MaxTextBytes == nil && change.RetentionDays == nil {
+		return change, invalid
 	}
-	return limit, nil
+	return change, nil
 }
 
 type object struct {
