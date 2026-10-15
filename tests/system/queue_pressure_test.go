@@ -333,9 +333,18 @@ func TestQueueFullPreservesUpstreamAndDrains(t *testing.T) {
 	if int64(len(seenInputs)) != final.State.Saved {
 		t.Fatal("管理 API 返回的完整已保存记录数量不匹配")
 	}
+	if restartStatus(t, h).State.GapHistory["queue_full"] == "" {
+		t.Fatal("真实队列满没有保留基础缺口信号")
+	}
+	assertChatPrivacy(t, h)
 	afterQueries := queuePressureStatus(t, adminClient, h)
 	if afterQueries.State.Saved != final.State.Saved || afterQueries.State.Queued != 0 || afterQueries.State.Gaps["queue_full"] != final.State.Gaps["queue_full"] {
 		t.Fatal("排空后查询改变了保存或缺口计数")
 	}
 	t.Logf("全部已保存详情完整摘要校验通过: records_total=%d verified_details=%d；captured 不另造计数，HTTP提交=%d=已保存%d+queue_full缺口%d", len(seenIDs), len(seenInputs), attempted, final.State.Saved, final.State.Gaps["queue_full"])
+	h.stop()
+	restarted := startHostWithManagementAuth(t, 1<<30, true, upstream.URL+"/v1", true, h.stateDir)
+	if restartStatus(t, restarted).State.GapHistory["queue_full"] == "" {
+		t.Fatal("正常排空重启抹掉了队列满缺口")
+	}
 }

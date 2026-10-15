@@ -32,7 +32,7 @@ diff --git a/internal/logging/gin_logger.go b/internal/logging/gin_logger.go
 +		if path != "/v0/management/plugins/request-input-audit" && !strings.HasPrefix(path, "/v0/management/plugins/request-input-audit/") {
 +			raw = util.MaskSensitiveQuery(c.Request.URL.RawQuery)
 +		}
-
+ 
  		// Only generate request ID for AI API paths
  		var requestID string
 diff --git a/internal/api/server_middleware.go b/internal/api/server_middleware.go
@@ -126,16 +126,18 @@ diff --git a/internal/pluginhost/host.go b/internal/pluginhost/host.go
  package pluginhost
  
  import (
-@@ -92,6 +93,8 @@
+@@ -92,6 +93,10 @@
  	modelStreams           *modelStreamBridge
  	callbackContexts       *callbackContextRegistry
  	snapshot               atomic.Value
 +	// Bridge failures precede collector admission and survive successful calls for this host lifetime.
 +	inputAuditBridgeFailures atomic.Uint64
++	inputAuditRegistering atomic.Int64
++	inputAuditUnavailable atomic.Bool
  }
  
  func New() *Host {
-@@ -1088,17 +1091,17 @@
+@@ -1088,17 +1093,17 @@
  		return capabilityRecord{}, pluginFile{}, false
  	}
  	return capabilityRecord{
@@ -164,6 +166,14 @@ diff --git a/internal/pluginhost/host.go b/internal/pluginhost/host.go
  }
  
  func (h *Host) callRegister(ctx context.Context, lp *loadedPlugin, item runtimeItemConfig) (pluginapi.Plugin, bool) {
+@@ -1205,6 +1210,7 @@
+ 		caps.Executor != nil ||
+ 		caps.RequestTranslator != nil ||
+ 		caps.RequestNormalizer != nil ||
++		caps.InputAuditObserver != nil ||
+ 		caps.RequestInterceptor != nil ||
+ 		caps.RequestLifecyclePlugin != nil ||
+ 		caps.ResponseTranslator != nil ||
 diff --git a/internal/pluginhost/host_callbacks.go b/internal/pluginhost/host_callbacks.go
 --- a/internal/pluginhost/host_callbacks.go
 +++ b/internal/pluginhost/host_callbacks.go
@@ -172,7 +182,14 @@ diff --git a/internal/pluginhost/host_callbacks.go b/internal/pluginhost/host_ca
  package pluginhost
  
  import (
-@@ -145,6 +146,10 @@
+@@ -143,8 +144,17 @@
+ func (h *Host) callFromPlugin(ctx context.Context, method string, request []byte) ([]byte, error) {
+ 	if instance := hostCallbackInstanceFromContext(ctx); instance != nil && instance.closed.Load() {
++		// Unloading closes execution callbacks before native shutdown. This final host-owned
++		// counter is still safe to read: no instance, configuration, identity, or disk access.
++		if method == pluginabi.MethodHostInputAuditCapabilities && hostCallbackPluginIDFromContext(ctx) == inputAuditPluginID {
++			return marshalRPCResult(inputAuditCapabilities{ContractVersion: 3, Available: false, Reason: "observer_bridge_unavailable", BridgeFailures: h.inputAuditBridgeFailures.Load()})
++		}
  		return nil, fmt.Errorf("host plugin callback instance is closed")
  	}
  	switch method {
@@ -187,7 +204,7 @@ diff --git a/internal/pluginhost/input_audit.go b/internal/pluginhost/input_audi
 new file mode 100644
 --- /dev/null
 +++ b/internal/pluginhost/input_audit.go
-@@ -0,0 +1,430 @@
+@@ -0,0 +1,454 @@
 +// This file owns private inline-key identities and isolated, fail-open input-audit observer delivery.
 +package pluginhost
 +
@@ -282,6 +299,10 @@ new file mode 100644
 +	dir, _, reason := h.inputAuditConfig()
 +	if reason == "" {
 +		_, reason = inputAuditSeed(dir)
++	}
++	// Registration verifies identity before its observer exists; runtime checks must use the real bridge.
++	if reason == "" && h.inputAuditRegistering.Load() == 0 && !h.inputAuditBridgeAvailable() {
++		reason = "observer_bridge_unavailable"
 +	}
 +	response := inputAuditCapabilities{ContractVersion: 3, Protocols: []string{"chat-completions", "responses", "anthropic-messages", "responses-websocket"}, Available: reason == "", Reason: reason}
 +	if h != nil {
@@ -499,8 +520,13 @@ new file mode 100644
 +	}
 +	observer := record.plugin.Capabilities.InputAuditObserver
 +	if observer == nil {
++		h.recordInputAuditBridgeFailure()
++		if !h.inputAuditUnavailable.Swap(true) {
++			log.WithField("reason", "observer_bridge_unavailable").Warn("input audit observer unavailable")
++		}
 +		return nil
 +	}
++	h.inputAuditUnavailable.Store(false)
 +	h.mu.Lock()
 +	instance := h.loaded[record.id]
 +	if instance != nil {
@@ -543,6 +569,21 @@ new file mode 100644
 +		}
 +		h.observeInputAudit(inputAuditContext(deliveryContext), observer, copyEvent)
 +	}
++}
++
++// inputAuditBridgeAvailable checks negotiated capabilities and the current live, unfused instance.
++func (h *Host) inputAuditBridgeAvailable() bool {
++	for _, record := range h.activeRecords() {
++		if record.id != inputAuditPluginID || record.plugin.Capabilities.InputAuditObserver == nil {
++			continue
++		}
++		h.mu.Lock()
++		instance := h.loaded[record.id]
++		ready := instance != nil && instance.plugin.Capabilities.InputAuditObserver != nil
++		h.mu.Unlock()
++		return ready && h.inputAuditInstanceCurrent(record, instance)
++	}
++	return false
 +}
 +
 +func (h *Host) inputAuditInstanceCurrent(record capabilityRecord, instance *loadedPlugin) bool {
@@ -618,6 +659,31 @@ new file mode 100644
 +		}
 +	}
 +}
+diff --git a/internal/pluginhost/management.go b/internal/pluginhost/management.go
+--- a/internal/pluginhost/management.go
++++ b/internal/pluginhost/management.go
+@@ -1,3 +1,4 @@
++// This file registers protected plugin management routes and diagnoses unavailable audit management.
+ package pluginhost
+ 
+ import (
+@@ -98,6 +99,16 @@
+ 	h.managementRoutes = nextRoutes
+ 	h.resourceRoutes = nextResources
+ 	h.mu.Unlock()
++	// No plugin callback can report status when its management route was not registered.
++	if _, _, reason := h.inputAuditConfig(); reason == "" {
++		if _, exists := nextRoutes[managementRouteKey(http.MethodGet, managementBasePath+"/plugins/request-input-audit/status")]; !exists {
++			reason = "management_unavailable"
++			if !h.inputAuditBridgeAvailable() {
++				reason = "observer_bridge_unavailable"
++			}
++			log.WithField("reason", reason).Warn("input audit management unavailable")
++		}
++	}
+ }
+ 
+ func (h *Host) callManagementRegistrar(ctx context.Context, record capabilityRecord, plugin pluginapi.ManagementAPI) (resp pluginapi.ManagementRegistrationResponse, err error) {
 diff --git a/internal/pluginhost/rpc_client.go b/internal/pluginhost/rpc_client.go
 --- a/internal/pluginhost/rpc_client.go
 +++ b/internal/pluginhost/rpc_client.go
@@ -634,7 +700,18 @@ diff --git a/internal/pluginhost/rpc_client.go b/internal/pluginhost/rpc_client.
  
  	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginabi"
  	"github.com/router-for-me/CLIProxyAPI/v8/sdk/pluginapi"
-@@ -129,6 +131,10 @@
+@@ -66,6 +68,10 @@
+ 	if client == nil {
+ 		return pluginapi.Plugin{}, fmt.Errorf("plugin client is nil")
+ 	}
++	if id == inputAuditPluginID {
++		host.inputAuditRegistering.Add(1)
++		defer host.inputAuditRegistering.Add(-1)
++	}
+ 	resp, errCall := callPlugin[rpcRegistration](ctx, client, method, rpcLifecycleRequest{
+ 		ConfigYAML:    bytes.Clone(configYAML),
+ 		SchemaVersion: pluginabi.SchemaVersion,
+@@ -129,6 +135,10 @@
  	}
  	if resp.Capabilities.RequestNormalizer {
  		plugin.Capabilities.RequestNormalizer = adapter
@@ -645,7 +722,7 @@ diff --git a/internal/pluginhost/rpc_client.go b/internal/pluginhost/rpc_client.
  	}
  	if resp.Capabilities.RequestInterceptor {
  		plugin.Capabilities.RequestInterceptor = adapter
-@@ -583,6 +589,25 @@
+@@ -583,6 +593,25 @@
  	})
  }
  

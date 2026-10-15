@@ -1,9 +1,11 @@
 # 本文件统一快速检查、暂存门禁、真实系统/浏览器验收；不提交、部署或删除数据。
-.PHONY: build build-retention-test check check-staged hooks-install deps browser-install demo test test-one tools-test browser browser-run verify
+.PHONY: build build-retention-test build-compatibility-test check check-staged hooks-install deps browser-install demo test test-one tools-test browser browser-run verify
 build:
 	bash scripts/build.sh
 build-retention-test:
 	bash scripts/build-retention-test.sh
+build-compatibility-test:
+	bash scripts/build-compatibility-test.sh
 check:
 	bash scripts/check-fast.sh
 check-staged:
@@ -18,7 +20,7 @@ browser-install:
 demo:
 	bash scripts/fetch-management-ui.sh
 	go build -o .build/bin/audit-demo ./cmd/audit-demo
-test: build build-retention-test
+test: build build-retention-test build-compatibility-test
 	go test ./... -count=1
 test-one:
 	go test ./tests/system -run '$(TEST)' -count=1 -v

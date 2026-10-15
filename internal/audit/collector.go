@@ -52,6 +52,16 @@ type Record struct {
 	ExtractionIncomplete bool   `json:"extraction_incomplete,omitempty"`
 }
 
+// Recovery 描述启动发现的不确定损失；发现时刻不是损失时段，未知数量与边界始终以 null 输出。
+type Recovery struct {
+	Uncertain  bool    `json:"uncertain"`
+	DetectedAt string  `json:"detected_at"`
+	Reason     string  `json:"reason"`
+	LostCount  *uint64 `json:"lost_count"`
+	LostFrom   *string `json:"lost_from"`
+	LostUntil  *string `json:"lost_until"`
+}
+
 // Status 是有界运行状态快照；Gaps 仅有固定原因码，不携带输入或底层错误上下文。
 type Status struct {
 	CapturePaused        bool              `json:"capture_paused"`
@@ -70,6 +80,8 @@ type Status struct {
 	OverBudgetBytes      int64             `json:"over_budget_bytes"`
 	CapacityGap          bool              `json:"capacity_gap"`
 	DiagnosticsPersisted bool              `json:"diagnostics_persisted"`
+	GapHistory           map[string]string `json:"gap_history"`
+	Recovery             Recovery          `json:"recovery"`
 }
 
 // Collector 是审计深模块；所有存储、队列、解析和缺口诊断均由它管理。
@@ -82,13 +94,17 @@ type Collector struct {
 	directory   *os.File
 	active      *os.File
 	diagnostics *os.File
-	// diagnosticWake 只通知单写入者合并保存容量告警，不在模型请求中等待磁盘。
-	diagnosticWake chan struct{}
-	capacityLastAt string
-	config         configuration
-	configValid    bool
-	generation     string
-	segments       []segment
+	// diagnosticWake 只通知单写入者合并保存固定诊断，不在模型请求中等待磁盘。
+	diagnosticWake     chan struct{}
+	capacityLastAt     string
+	sessionDirty       bool
+	sessionStarted     bool
+	diagnosticRevision uint64
+	bridgeFailures     uint64
+	config             configuration
+	configValid        bool
+	generation         string
+	segments           []segment
 	// 只保留最近查询页（最多100条）的文件位置，不缓存正文或建立全量身份索引；由 ioMu 保护。
 	pageHints   map[string]recordLocation
 	queue       chan queuedRecord
@@ -128,7 +144,7 @@ func Open(dir string, budget int64) (*Collector, error) {
 	if err != nil {
 		return nil, errors.New("storage_unavailable")
 	}
-	c := &Collector{root: root, diagnosticWake: make(chan struct{}, 1), generation: hex.EncodeToString(generation[:]), config: configuration{Version: 4, BudgetBytes: budget, MaxTextBytes: maxText, RetentionDays: defaultRetentionDays, RetentionCaps: []retentionCap{}, Objects: make(map[string]Object)}, queue: make(chan queuedRecord, 64), done: make(chan struct{}), status: Status{Available: true, State: "active", BudgetBytes: budget, Gaps: map[string]uint64{}}}
+	c := &Collector{root: root, diagnosticWake: make(chan struct{}, 1), generation: hex.EncodeToString(generation[:]), config: configuration{Version: 4, BudgetBytes: budget, MaxTextBytes: maxText, RetentionDays: defaultRetentionDays, RetentionCaps: []retentionCap{}, Objects: make(map[string]Object)}, queue: make(chan queuedRecord, 64), done: make(chan struct{}), status: Status{Available: true, State: "active", BudgetBytes: budget, Gaps: map[string]uint64{}, GapHistory: map[string]string{}, Recovery: Recovery{Uncertain: true, DetectedAt: auditNow().UTC().Format(time.RFC3339Nano), Reason: "recovery_unavailable"}}}
 	for _, key := range []string{"read_error", "invalid_event", "invalid_json", "unsupported_protocol", "unsupported_content", "metadata_too_large", "queue_full", "storage_error", "budget_exhausted", "observer_unavailable"} {
 		c.status.Gaps[key] = 0
 	}
@@ -294,6 +310,15 @@ func (c *Collector) Status() Status {
 	if result.CapacityGap && result.Reason != "budget_exhausted" {
 		result.CapacityGap = !c.expired(Record{ReceivedAt: c.capacityLastAt}, auditNow())
 	}
+	result.GapHistory = make(map[string]string, len(c.status.GapHistory))
+	for key, last := range c.status.GapHistory {
+		if !c.expired(Record{ReceivedAt: last}, auditNow()) || result.Reason == key {
+			result.GapHistory[key] = last
+		}
+	}
+	if c.sessionStarted && result.Recovery.Uncertain && c.expired(Record{ReceivedAt: result.Recovery.DetectedAt}, auditNow()) {
+		result.Recovery = Recovery{}
+	}
 	result.Gaps = make(map[string]uint64, len(c.status.Gaps))
 	for key, value := range c.status.Gaps {
 		result.Gaps[key] = value
@@ -312,6 +337,12 @@ func (c *Collector) Close() {
 		<-c.done
 		c.ioMu.Lock()
 		if c.diagnostics != nil {
+			c.mu.Lock()
+			// 存储同步曾失败时不宣称运行完整结束；正常容量拒收已有摘要，不属于I/O失败。
+			if c.sessionStarted && (c.status.Reason == "" || c.status.Reason == "budget_exhausted") {
+				c.sessionDirty = false
+			}
+			c.mu.Unlock()
 			if err := c.saveDiagnostics(); err != nil {
 				c.pauseStorage(err)
 			}
@@ -333,21 +364,58 @@ func (c *Collector) incrementGap(key string) {
 	if c.status.Gaps[key] != ^uint64(0) {
 		c.status.Gaps[key]++
 	}
+	c.markGapHistory(key)
+}
+
+// markGapHistory 只保存固定原因及最后时刻；可处理故障不在请求内等待落盘。
+func (c *Collector) markGapHistory(key string) {
+	last := auditNow().UTC().Format(time.RFC3339Nano)
+	c.status.GapHistory[key] = last
 	if key == "budget_exhausted" {
 		c.status.CapacityGap = true
-		c.capacityLastAt = auditNow().UTC().Format(time.RFC3339Nano)
-		c.status.DiagnosticsPersisted = false
-		select {
-		case c.diagnosticWake <- struct{}{}:
-		default:
-		}
+		c.capacityLastAt = last
+	}
+	c.diagnosticRevision++
+	c.status.DiagnosticsPersisted = false
+	select {
+	case c.diagnosticWake <- struct{}{}:
+	default:
 	}
 }
+
+// ReportBridgeFailures 合并宿主本次运行的累计桥接缺口；total不含身份或输入，重复查询不重复计数。
+// 无返回值或异常；新增缺口仅异步保存，宿主重置累计时保留既有历史。
+func (c *Collector) ReportBridgeFailures(total uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if total <= c.bridgeFailures {
+		return
+	}
+	delta := total - c.bridgeFailures
+	c.bridgeFailures = total
+	old := c.status.Gaps["observer_unavailable"]
+	if delta > ^uint64(0)-old {
+		c.status.Gaps["observer_unavailable"] = ^uint64(0)
+	} else {
+		c.status.Gaps["observer_unavailable"] = old + delta
+	}
+	c.markGapHistory("observer_unavailable")
+}
+
+// ReportBridgeUncertainty 在关闭前无法读取宿主最终累计时记录未知损失；不把未知伪造成一次确定丢失。
+// 无参数、返回值或异常，不执行I/O；Close将尽力保存摘要，数量和损失时段保持未知。
+func (c *Collector) ReportBridgeUncertainty() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.status.Recovery = Recovery{Uncertain: true, DetectedAt: auditNow().UTC().Format(time.RFC3339Nano), Reason: "observer_unavailable"}
+	c.markGapHistory("observer_unavailable")
+}
+
 func (c *Collector) pause(reason string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, exists := c.status.Gaps[reason]; exists {
-		c.incrementGap(reason)
+	if reason == "budget_exhausted" {
+		c.markGapHistory(reason)
 	}
 	// 容量配置失败不能覆盖尚未核实的I/O或完整性故障，否则调高预算会错误地恢复采集。
 	if reason == "budget_exhausted" && c.status.State == "paused" && c.status.Reason != "budget_exhausted" {

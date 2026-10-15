@@ -20,14 +20,16 @@ import (
 
 func main() {
 	jsonOutput := flag.Bool("json", false, "健康检查通过后输出机器可读 ready 事件")
+	restartHost := flag.Bool("restart-host", false, "仅供故障验收：宿主异常退出后使用同目录重启")
 	flag.Parse()
-	if err := run(*jsonOutput); err != nil {
+	if err := run(*jsonOutput, *restartHost); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 }
 
-func run(jsonOutput bool) (result error) {
+// run 启动隔离实例并等待停止；restartHost 只授权本测试命令在宿主异常退出后重用目录，返回启动或回收错误。
+func run(jsonOutput, restartHost bool) (result error) {
 	root, err := os.Getwd()
 	if err != nil {
 		return err
@@ -124,88 +126,97 @@ openai-compatibility:
 		return err
 	}
 	defer log.Close()
-	cmd := exec.Command(filepath.Join(root, ".build/bin/cliproxyapi"), "--config", configPath, "--local-model")
-	cmd.Dir = dir
-	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "TMPDIR=" + dir, "MANAGEMENT_STATIC_PATH=" + static}
-	cmd.Stdout = log
-	cmd.Stderr = log
-	// 在启动前注册信号，ready 之前收到 runner 中断也必须回收自己的宿主。
+	// 信号只注册一次；重启只属于合成测试编排，不进入插件或生产管理 API。
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(stop)
-	if err = cmd.Start(); err != nil {
-		return err
-	}
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
-	ended := false
-	defer func() {
-		if ended {
-			return
+	for {
+		cmd := exec.Command(filepath.Join(root, ".build/bin/cliproxyapi"), "--config", configPath, "--local-model")
+		cmd.Dir = dir
+		cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "HOME=" + dir, "TMPDIR=" + dir, "MANAGEMENT_STATIC_PATH=" + static}
+		cmd.Stdout = log
+		cmd.Stderr = log
+		if err = cmd.Start(); err != nil {
+			return err
 		}
-		_ = cmd.Process.Signal(os.Interrupt)
-		// 五秒是本地验收停止期限，避免失效宿主让 runner 无限等候；仅终止本轮子进程。
-		timer := time.NewTimer(5 * time.Second)
-		defer timer.Stop()
-		select {
-		case exitErr := <-done:
-			if exitErr != nil && result == nil {
-				result = fmt.Errorf("宿主停止失败")
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		ended := false
+		defer func() {
+			if ended {
+				return
 			}
-		case <-timer.C:
-			_ = cmd.Process.Kill()
-			<-done
-			if result == nil {
-				result = fmt.Errorf("宿主未在停止期限内退出")
+			_ = cmd.Process.Signal(os.Interrupt)
+			// 五秒是本地验收停止期限，避免失效宿主让 runner 无限等候；仅终止本轮子进程。
+			timer := time.NewTimer(5 * time.Second)
+			defer timer.Stop()
+			select {
+			case exitErr := <-done:
+				if exitErr != nil && result == nil {
+					result = fmt.Errorf("宿主停止失败")
+				}
+			case <-timer.C:
+				_ = cmd.Process.Kill()
+				<-done
+				if result == nil {
+					result = fmt.Errorf("宿主未在停止期限内退出")
+				}
+			}
+		}()
+		base := fmt.Sprintf("http://127.0.0.1:%d", port)
+		client := &http.Client{Timeout: time.Second}
+		defer client.CloseIdleConnections()
+		deadline := time.NewTimer(20 * time.Second) // 本地启动验收上限，不是上游模型超时。
+		defer deadline.Stop()
+		poll := time.NewTicker(50 * time.Millisecond)
+		defer poll.Stop()
+		ready := false
+		for !ready {
+			select {
+			case <-stop:
+				return nil
+			case <-done:
+				ended = true
+				return fmt.Errorf("宿主在就绪前退出")
+			case <-deadline.C:
+				return fmt.Errorf("宿主就绪超时")
+			case <-poll.C:
+				req, errRequest := http.NewRequest(http.MethodGet, base+"/v0/management/plugins/request-input-audit/status", nil)
+				if errRequest != nil {
+					return fmt.Errorf("无法构造就绪检查")
+				}
+				req.Header.Set("Authorization", "Bearer synthetic-admin-audit-test-only")
+				resp, errGet := client.Do(req)
+				if errGet == nil {
+					var state struct {
+						Available bool `json:"available"`
+					}
+					errDecode := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&state)
+					errClose := resp.Body.Close()
+					ready = resp.StatusCode == http.StatusOK && errDecode == nil && errClose == nil && (state.Available || restartHost)
+				}
 			}
 		}
-	}()
-	base := fmt.Sprintf("http://127.0.0.1:%d", port)
-	client := &http.Client{Timeout: time.Second}
-	defer client.CloseIdleConnections()
-	deadline := time.NewTimer(20 * time.Second) // 本地启动验收上限，不是上游模型超时。
-	defer deadline.Stop()
-	poll := time.NewTicker(50 * time.Millisecond)
-	defer poll.Stop()
-	ready := false
-	for !ready {
+		// 故障实例可能多次重启；每次 ready 后停止本轮探测，不在等待浏览器操作时继续计时。
+		deadline.Stop()
+		poll.Stop()
+		client.CloseIdleConnections()
+		if jsonOutput {
+			if errEncode := json.NewEncoder(os.Stdout).Encode(map[string]any{"event": "ready", "url": base + "/management.html", "pid": cmd.Process.Pid, "directory": dir}); errEncode != nil {
+				return fmt.Errorf("无法输出就绪事件")
+			}
+		} else {
+			fmt.Printf("管理页面 %s/management.html\n合成凭据见本命令代码；不要使用真实 Key。\n验收目录 %s\n", base, dir)
+		}
 		select {
-		case <-stop:
-			return nil
 		case <-done:
 			ended = true
-			return fmt.Errorf("宿主在就绪前退出")
-		case <-deadline.C:
-			return fmt.Errorf("宿主就绪超时")
-		case <-poll.C:
-			req, errRequest := http.NewRequest(http.MethodGet, base+"/v0/management/plugins/request-input-audit/status", nil)
-			if errRequest != nil {
-				return fmt.Errorf("无法构造就绪检查")
+			if restartHost {
+				continue
 			}
-			req.Header.Set("Authorization", "Bearer synthetic-admin-audit-test-only")
-			resp, errGet := client.Do(req)
-			if errGet == nil {
-				var state struct {
-					Available bool `json:"available"`
-				}
-				errDecode := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&state)
-				errClose := resp.Body.Close()
-				ready = resp.StatusCode == http.StatusOK && errDecode == nil && errClose == nil && state.Available
-			}
+			return fmt.Errorf("宿主在验收期间意外退出")
+		case <-stop:
+			return nil
 		}
-	}
-	if jsonOutput {
-		if errEncode := json.NewEncoder(os.Stdout).Encode(map[string]any{"event": "ready", "url": base + "/management.html", "pid": cmd.Process.Pid, "directory": dir}); errEncode != nil {
-			return fmt.Errorf("无法输出就绪事件")
-		}
-	} else {
-		fmt.Printf("管理页面 %s/management.html\n合成凭据见本命令代码；不要使用真实 Key。\n验收目录 %s\n", base, dir)
-	}
-	select {
-	case <-done:
-		ended = true
-		return fmt.Errorf("宿主在验收期间意外退出")
-	case <-stop:
-		return nil
 	}
 }

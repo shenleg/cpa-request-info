@@ -139,8 +139,19 @@ func callHost(method string, payload any) (json.RawMessage, error) {
 	var env struct {
 		OK     bool            `json:"ok"`
 		Result json.RawMessage `json:"result"`
+		Error  struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
 	}
-	if err := json.Unmarshal(C.GoBytes(result.ptr, C.int(result.len)), &env); err != nil || !env.OK {
+	if err := json.Unmarshal(C.GoBytes(result.ptr, C.int(result.len)), &env); err != nil {
+		return nil, errors.New("host_unavailable")
+	}
+	if !env.OK {
+		// 旧宿主只给 host_call_failed；只匹配固定 unknown-method 消息，不把传输故障冒充缺扩展。
+		if env.Error.Code == "unknown_method" || env.Error.Code == "method_not_found" || env.Error.Code == "unsupported_method" || (env.Error.Code == "host_call_failed" && env.Error.Message == "unsupported host callback "+method) {
+			return nil, errors.New("host_method_unsupported")
+		}
 		return nil, errors.New("host_unavailable")
 	}
 	return env.Result, nil

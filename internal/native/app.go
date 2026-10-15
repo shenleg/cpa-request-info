@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -30,23 +31,54 @@ type HostCall func(method string, payload any) (json.RawMessage, error)
 
 // App 管理插件生命周期与管理路由，不持有原始模型请求或认证头。
 type App struct {
-	mu        sync.Mutex
-	host      HostCall
+	mu           sync.Mutex
+	host         HostCall
+	collector    *audit.Collector
+	dir          string
+	available    bool
+	reason       string
+	configured   bool
+	budget       int64
+	loggedReason string
+	// 模型回调只读已发布的小状态，不等待管理查询、能力探测或恢复扫描持有的锁。
+	admission atomic.Pointer[admissionState]
+}
+
+type admissionState struct {
 	collector *audit.Collector
-	dir       string
 	available bool
-	reason    string
 }
 
 // New 创建默认未监控任何对象的插件；host 提供可信对象目录，返回实例，不执行 I/O。
-func New(host HostCall) *App { return &App{host: host, reason: "not_initialized"} }
+func New(host HostCall) *App {
+	a := &App{host: host, reason: "not_initialized"}
+	a.publishLocked()
+	return a
+}
+
+// publishLocked 发布不可变的准入状态；调用者持有管理锁，新旧快照都不保留输入。
+func (a *App) publishLocked() {
+	a.admission.Store(&admissionState{collector: a.collector, available: a.available})
+}
 
 // Close 停止新采集并关闭当前写入者；宿主须先停止新回调，无返回值，失败只影响审计。
 func (a *App) Close() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.available = false
+	a.configured = false
+	a.admission.Store(&admissionState{})
 	if a.collector != nil {
+		// 最后一次桥接失败可能没有后续管理查询；在写入 clean 标记前合并宿主最终累计。
+		caps, err := a.host("host.input_audit.capabilities", struct{}{})
+		var final struct {
+			BridgeFailures *uint64 `json:"bridge_failures"`
+		}
+		if err != nil || json.Unmarshal(caps, &final) != nil || final.BridgeFailures == nil {
+			a.collector.ReportBridgeUncertainty()
+		} else {
+			a.collector.ReportBridgeFailures(*final.BridgeFailures)
+		}
 		a.collector.Close()
 		a.collector = nil
 	}
@@ -76,22 +108,19 @@ func (a *App) Handle(method string, raw []byte) (any, error) {
 		if err := json.Unmarshal(raw, &event); err != nil {
 			return nil, errors.New("invalid_preparation")
 		}
-		a.mu.Lock()
-		c, available := a.collector, a.available
-		a.mu.Unlock()
-		if c == nil || !available {
+		state := a.admission.Load()
+		if state.collector == nil || !state.available {
 			return audit.Snapshot{Version: 3, Decision: "unavailable"}, nil
 		}
-		return c.Prepare(event), nil
+		return state.collector.Prepare(event), nil
 	case "input_audit.observe":
 		var event audit.Event
 		if err := json.Unmarshal(raw, &event); err != nil {
 			return nil, errors.New("invalid_observation")
 		}
-		a.mu.Lock()
-		c, available := a.collector, a.available
-		a.mu.Unlock()
-		if c != nil && available {
+		c := a.admission.Load().collector
+		// 可用性只影响下一次准备；已绑定的快照由采集器核验代际，不因当前握手失效被追溯取消。
+		if c != nil {
 			c.Observe(event)
 		}
 		return struct{}{}, nil
@@ -108,11 +137,44 @@ func supportsInputAudit(protocols []string) bool {
 	return slices.Contains(protocols, "chat-completions") && slices.Contains(protocols, "responses") && slices.Contains(protocols, "anthropic-messages") && slices.Contains(protocols, "responses-websocket")
 }
 
+type inputAuditCapabilities struct {
+	ContractVersion int      `json:"contract_version"`
+	Protocols       []string `json:"protocols"`
+	Available       bool     `json:"available"`
+	StateDir        string   `json:"state_dir"`
+	BridgeFailures  uint64   `json:"bridge_failures"`
+}
+
+// capabilities 区分宿主缺少独立扩展与其他不可用状态；只返回固定原因，不传播宿主错误文本。
+func (a *App) capabilities() (inputAuditCapabilities, string) {
+	var live inputAuditCapabilities
+	caps, err := a.host("host.input_audit.capabilities", struct{}{})
+	if err != nil {
+		if err.Error() == "host_method_unsupported" {
+			return live, "observer_extension_missing"
+		}
+		return live, "observer_unavailable"
+	}
+	if json.Unmarshal(caps, &live) != nil {
+		return live, "observer_bridge_unavailable"
+	}
+	if live.ContractVersion != 3 || !supportsInputAudit(live.Protocols) {
+		return live, "observer_version_incompatible"
+	}
+	if !live.Available {
+		return live, "observer_bridge_unavailable"
+	}
+	return live, ""
+}
+
 func (a *App) configure(raw []byte) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.available = false
-	a.reason = "observer_unavailable"
+	a.configured = false
+	a.reason = "configuration_invalid"
+	defer a.diagnoseLocked()
+	defer a.publishLocked()
 	var life struct {
 		ConfigYAML    []byte `json:"config_yaml"`
 		SchemaVersion uint32 `json:"schema_version"`
@@ -122,50 +184,76 @@ func (a *App) configure(raw []byte) {
 		Budget int64  `yaml:"budget-bytes"`
 	}
 	if json.Unmarshal(raw, &life) != nil || life.SchemaVersion != 6 || yaml.Unmarshal(life.ConfigYAML, &cfg) != nil {
-		a.reason = "configuration_invalid"
 		return
 	}
 	if cfg.Budget == 0 {
 		cfg.Budget = 1 << 30
 	}
 	if cfg.Budget < 4<<20 || cfg.Budget > 1<<30 {
-		a.reason = "configuration_invalid"
-		return
-	}
-	caps, err := a.host("host.input_audit.capabilities", struct{}{})
-	var capability struct {
-		ContractVersion int      `json:"contract_version"`
-		Protocols       []string `json:"protocols"`
-		Available       bool     `json:"available"`
-		StateDir        string   `json:"state_dir"`
-	}
-	if err != nil || json.Unmarshal(caps, &capability) != nil || capability.ContractVersion != 3 || !capability.Available || !supportsInputAudit(capability.Protocols) {
 		return
 	}
 	dir, err := filepath.Abs(cfg.Dir)
-	if err != nil || cfg.Dir == "" || dir != capability.StateDir {
-		a.reason = "configuration_invalid"
+	if err != nil || cfg.Dir == "" {
 		return
 	}
-	// YAML 预算只初始化旧配置；同目录重载不能覆盖管理端已保存的预算或重开写入者。
-	if a.collector != nil && a.dir == dir {
-		a.available = true
-		a.reason = ""
-		return
-	}
-	if a.collector != nil {
+	// 换目录会结束原采集代际；同目录重载和暂时失去观察能力不关闭旧快照的写入者。
+	if a.collector != nil && a.dir != dir {
 		a.collector.Close()
 		a.collector = nil
 	}
-	c, err := audit.Open(dir, cfg.Budget)
-	if err != nil {
-		a.reason = "storage_unavailable"
+	a.dir, a.budget, a.configured = dir, cfg.Budget, true
+	a.refreshLocked()
+}
+
+// refreshLocked 在管理状态查询或重配置时重新核验宿主；可能执行磁盘 I/O，不能用于模型回调。
+func (a *App) refreshLocked() {
+	defer a.diagnoseLocked()
+	defer a.publishLocked()
+	if !a.configured {
 		return
 	}
-	a.collector = c
-	a.dir = dir
+	live, reason := a.capabilities()
+	a.available = false
+	a.reason = reason
+	if a.collector != nil {
+		a.collector.ReportBridgeFailures(live.BridgeFailures)
+	}
+	if reason != "" {
+		return
+	}
+	if live.StateDir != a.dir {
+		a.reason = "configuration_invalid"
+		return
+	}
+	if a.collector == nil {
+		c, err := audit.Open(a.dir, a.budget)
+		if err != nil {
+			a.reason = "storage_unavailable"
+			return
+		}
+		a.collector = c
+		c.ReportBridgeFailures(live.BridgeFailures)
+	}
 	a.available = true
 	a.reason = ""
+}
+
+// diagnoseLocked 在故障状态变化时尽力通知宿主固定原因；不附带底层错误、身份、路径或正文。
+func (a *App) diagnoseLocked() {
+	reason := a.reason
+	if reason == "" && a.collector != nil {
+		reason = a.collector.Status().Reason
+		if reason == "budget_exhausted" {
+			reason = ""
+		}
+	}
+	if reason == a.loggedReason {
+		return
+	}
+	a.loggedReason = reason
+	if reason != "" {
+		_, _ = a.host("host.log", map[string]any{"level": "warn", "message": "input audit unavailable", "fields": map[string]string{"reason": reason}})
+	}
 }
 
 type managementRequest struct {
@@ -183,38 +271,19 @@ func (a *App) management(req managementRequest) any {
 		return response(200, "text/html; charset=utf-8", html)
 	}
 	a.mu.Lock()
-	c, available, reason, dir := a.collector, a.available, a.reason, a.dir
+	if strings.HasSuffix(req.Path, "/status") {
+		a.refreshLocked()
+	}
+	c, available, reason := a.collector, a.available, a.reason
 	a.mu.Unlock()
 	if strings.HasSuffix(req.Path, "/status") {
-		// 身份文件/目录可能在启动后损坏，不能只展示曾经成功的握手。
-		caps, err := a.host("host.input_audit.capabilities", struct{}{})
-		var live struct {
-			Available       bool     `json:"available"`
-			ContractVersion int      `json:"contract_version"`
-			Protocols       []string `json:"protocols"`
-			StateDir        string   `json:"state_dir"`
-			BridgeFailures  uint64   `json:"bridge_failures"`
-		}
-		if err != nil || json.Unmarshal(caps, &live) != nil || !live.Available || live.ContractVersion != 3 || !supportsInputAudit(live.Protocols) || (dir != "" && live.StateDir != dir) {
-			available = false
-			reason = "observer_unavailable"
-		}
 		var state any = map[string]any{"available": false, "reason": reason}
-		collectorReason := ""
 		if c != nil {
 			snapshot := c.Status()
-			collectorReason = snapshot.Reason
-			// 桥接发生在Collector之前；只合并响应副本，避免每次刷新重复增加同一缺口。
-			old := snapshot.Gaps["observer_unavailable"]
-			if live.BridgeFailures > ^uint64(0)-old {
-				snapshot.Gaps["observer_unavailable"] = ^uint64(0)
-			} else {
-				snapshot.Gaps["observer_unavailable"] = old + live.BridgeFailures
-			}
 			state = snapshot
-		}
-		if live.BridgeFailures > 0 && reason == "" && collectorReason == "" {
-			reason = "observer_bridge_error"
+			if snapshot.Gaps["observer_unavailable"] > 0 && reason == "" && snapshot.Reason == "" {
+				reason = "observer_bridge_error"
+			}
 		}
 		return responseJSON(200, map[string]any{"available": available, "reason": reason, "supported": "chat-completions-responses-anthropic-http-responses-websocket-last-user-content", "supported_protocols": []string{"chat-completions", "responses", "anthropic-messages", "responses-websocket"}, "responses_websocket": true, "retention": "receive_time_expiry_periodic_cleanup", "state": state})
 	}

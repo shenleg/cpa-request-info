@@ -63,6 +63,18 @@ func openDirectory(path string) (*os.Root, error) {
 }
 
 func (c *Collector) initialize() error {
+	locked := false
+	// 历史扫描失败不意味着运行标记不可读；仍尽力恢复既有诊断，避免损坏尾部遮住异常退出。
+	// 未有标记时不在未知目录上新建文件，原故障状态保持可见。
+	defer func() {
+		if c.diagnostics == nil && locked {
+			if _, err := c.root.Lstat(diagnosticName); err == nil {
+				if err := c.openDiagnostics(); err != nil {
+					c.pauseStorage(err)
+				}
+			}
+		}
+	}()
 	var err error
 	c.directory, err = c.root.Open(".")
 	if err != nil {
@@ -79,6 +91,7 @@ func (c *Collector) initialize() error {
 	if err = syscall.Flock(int(c.lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return err
 	}
+	locked = true
 	names, used, err := c.scanDirectory()
 	c.status.UsedBytes = used
 	if err != nil {
@@ -384,6 +397,7 @@ func (c *Collector) writeLoop() {
 				if err.Error() == "budget_exhausted" {
 					reason = "budget_exhausted"
 				}
+				c.gap(reason)
 				c.pause(reason)
 			}
 		} else {
@@ -474,7 +488,8 @@ func (c *Collector) appendRecord(record Record) error {
 	c.status.UsedBytes = used
 	c.mu.Unlock()
 	if err != nil {
-		return err
+		// 正文已经同步并公开；后续目录核验失败只改变健康状态，不能把同一条计为丢失。
+		c.pauseStorage(err)
 	}
 	return nil
 }

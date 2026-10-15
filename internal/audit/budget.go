@@ -1,4 +1,4 @@
-// 本文件管理容量滞回与固定大小基础告警；告警不保存输入、身份或逐提交日志。
+// 本文件管理容量滞回及固定大小基础诊断；摘要不保存输入、身份或逐提交日志。
 package audit
 
 import (
@@ -16,7 +16,16 @@ const diagnosticName = "capacity.json"
 // 最大编码行和新分段目录开销之外多留256KiB，恢复后不会因相同大小的下一条输入立即停采。
 const resumeRequiredBytes = auxiliaryReserve + maintenanceReserve + maxLine + 4096 + (256 << 10)
 
-// openDiagnostics 在ioMu内打开或初始化固定分配文件；旧目录无空间时不创建越预算的告警。
+type diagnosticSummary struct {
+	Version      int               `json:"version"`
+	CapacityGap  bool              `json:"capacity_gap"`
+	LastAt       string            `json:"last_at"`
+	SessionDirty bool              `json:"session_dirty"`
+	GapHistory   map[string]string `json:"gap_history"`
+	Recovery     Recovery          `json:"recovery"`
+}
+
+// openDiagnostics 在ioMu内打开固定分配文件；会话开始先同步dirty，重复打开不重新解释本会话。
 func (c *Collector) openDiagnostics() error {
 	info, err := c.root.Lstat(diagnosticName)
 	create := errors.Is(err, os.ErrNotExist)
@@ -46,10 +55,24 @@ func (c *Collector) openDiagnostics() error {
 	if err != nil {
 		return err
 	}
+	var summary diagnosticSummary
 	if create {
 		if err := file.Truncate(diagnosticSize); err != nil {
 			file.Close()
 			return err
+		}
+		// 新目录没有先前采集证据；已有配置/分段却没有标记时不能倒推出正常退出。
+		_, configErr := c.root.Lstat("monitors.json")
+		if configErr != nil && !errors.Is(configErr, os.ErrNotExist) {
+			file.Close()
+			return configErr
+		}
+		if errors.Is(configErr, os.ErrNotExist) && len(c.segments) == 0 {
+			c.mu.Lock()
+			if !c.sessionStarted {
+				c.status.Recovery = Recovery{}
+			}
+			c.mu.Unlock()
 		}
 	} else {
 		data := make([]byte, diagnosticSize)
@@ -57,27 +80,27 @@ func (c *Collector) openDiagnostics() error {
 			file.Close()
 			return err
 		}
-		fields, err := protocolObject(data)
-		var version int
-		var gap *bool
-		var last string
-		if err != nil || len(fields) != 3 || json.Unmarshal(fields["version"], &version) != nil || version != 1 || json.Unmarshal(fields["capacity_gap"], &gap) != nil || gap == nil || json.Unmarshal(fields["last_at"], &last) != nil || (*gap != (last != "")) {
+		if summary, err = c.decodeDiagnostics(data); err != nil {
 			file.Close()
-			return errors.New("storage_error")
+			return err
 		}
-		if last != "" {
-			if _, err := time.Parse(time.RFC3339Nano, last); err != nil {
-				file.Close()
-				return errors.New("storage_error")
+	}
+	c.mu.Lock()
+	if !c.sessionStarted && !create {
+		c.status.CapacityGap, c.capacityLastAt = summary.CapacityGap, summary.LastAt
+		if summary.Version == 1 {
+			c.status.Recovery = Recovery{Uncertain: true, DetectedAt: auditNow().UTC().Format(time.RFC3339Nano), Reason: "legacy_unknown"}
+		} else {
+			c.status.GapHistory, c.status.Recovery = summary.GapHistory, summary.Recovery
+			if summary.SessionDirty {
+				c.status.Recovery = Recovery{Uncertain: true, DetectedAt: auditNow().UTC().Format(time.RFC3339Nano), Reason: "unclean_shutdown"}
 			}
 		}
-		c.mu.Lock()
-		c.status.CapacityGap = *gap
-		c.capacityLastAt = last
-		c.mu.Unlock()
 	}
+	c.sessionDirty = true
+	c.mu.Unlock()
 	c.diagnostics = file
-	// 启动也实际写入和同步，不能仅因目录可读就宣布可采集。
+	// 同步dirty之后才允许取得capture快照；创建时还必须同步目录条目。
 	if err := c.saveDiagnostics(); err != nil {
 		return err
 	}
@@ -87,13 +110,93 @@ func (c *Collector) openDiagnostics() error {
 		c.mu.Unlock()
 		return err
 	}
+	c.mu.Lock()
+	c.sessionStarted = true
+	c.mu.Unlock()
 	return nil
 }
 
-// saveDiagnostics 由单写入者原位覆盖既有4KiB，不创建临时文件；调用期间新增缺口仍保留待保存标记。
+// decodeDiagnostics 校验磁盘边界的固定模式；损坏或未知版本不得被重建成无损失状态。
+func (c *Collector) decodeDiagnostics(data []byte) (diagnosticSummary, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var summary diagnosticSummary
+	fields, err := protocolObject(data)
+	if err != nil || json.Unmarshal(data, &summary) != nil || (summary.Version != 1 && summary.Version != 2) {
+		return summary, errors.New("storage_error")
+	}
+	for _, key := range []string{"version", "capacity_gap", "last_at"} {
+		if _, ok := fields[key]; !ok {
+			return summary, errors.New("storage_error")
+		}
+	}
+	var gap *bool
+	if json.Unmarshal(fields["capacity_gap"], &gap) != nil || gap == nil || summary.CapacityGap != (summary.LastAt != "") {
+		return summary, errors.New("storage_error")
+	}
+	if summary.LastAt != "" {
+		if _, err := time.Parse(time.RFC3339Nano, summary.LastAt); err != nil {
+			return summary, errors.New("storage_error")
+		}
+	}
+	if summary.Version == 1 {
+		if len(fields) != 3 {
+			return summary, errors.New("storage_error")
+		}
+		return summary, nil
+	}
+	for _, key := range []string{"session_dirty", "gap_history", "recovery"} {
+		if _, ok := fields[key]; !ok {
+			return summary, errors.New("storage_error")
+		}
+	}
+	var dirty *bool
+	if len(fields) != 6 || json.Unmarshal(fields["session_dirty"], &dirty) != nil || dirty == nil || summary.GapHistory == nil || len(summary.GapHistory) > len(c.status.Gaps) {
+		return summary, errors.New("storage_error")
+	}
+	for reason, last := range summary.GapHistory {
+		if _, known := c.status.Gaps[reason]; !known {
+			return summary, errors.New("storage_error")
+		}
+		if _, err := time.Parse(time.RFC3339Nano, last); err != nil {
+			return summary, errors.New("storage_error")
+		}
+	}
+	recoveryFields, err := protocolObject(fields["recovery"])
+	r := summary.Recovery
+	if err != nil || len(recoveryFields) != 6 || r.LostCount != nil || r.LostFrom != nil || r.LostUntil != nil {
+		return summary, errors.New("storage_error")
+	}
+	for _, key := range []string{"uncertain", "detected_at", "reason", "lost_count", "lost_from", "lost_until"} {
+		if _, ok := recoveryFields[key]; !ok {
+			return summary, errors.New("storage_error")
+		}
+	}
+	var uncertain *bool
+	if json.Unmarshal(recoveryFields["uncertain"], &uncertain) != nil || uncertain == nil {
+		return summary, errors.New("storage_error")
+	}
+	if r.Uncertain {
+		if r.Reason != "unclean_shutdown" && r.Reason != "legacy_unknown" && r.Reason != "recovery_unavailable" && r.Reason != "observer_unavailable" {
+			return summary, errors.New("storage_error")
+		}
+		if _, err := time.Parse(time.RFC3339Nano, r.DetectedAt); err != nil {
+			return summary, errors.New("storage_error")
+		}
+	} else if r.DetectedAt != "" || r.Reason != "" {
+		return summary, errors.New("storage_error")
+	}
+	return summary, nil
+}
+
+// saveDiagnostics 由单写入者原位覆盖既有4KiB；原位写不原子，失败时绝不保证告警已落盘。
 func (c *Collector) saveDiagnostics() error {
 	c.mu.Lock()
-	gap, last := c.status.CapacityGap, c.capacityLastAt
+	summary := diagnosticSummary{Version: 2, CapacityGap: c.status.CapacityGap, LastAt: c.capacityLastAt, SessionDirty: c.sessionDirty, GapHistory: make(map[string]string, len(c.status.GapHistory)), Recovery: c.status.Recovery}
+	for reason, last := range c.status.GapHistory {
+		summary.GapHistory[reason] = last
+	}
+	revision := c.diagnosticRevision
 	c.status.DiagnosticsPersisted = false
 	c.mu.Unlock()
 	current, err := c.root.Lstat(diagnosticName)
@@ -105,26 +208,19 @@ func (c *Collector) saveDiagnostics() error {
 		return errors.New("storage_error")
 	}
 	data := bytes.Repeat([]byte{' '}, int(diagnosticSize))
-	encoded, _ := json.Marshal(struct {
-		Version int    `json:"version"`
-		Gap     bool   `json:"capacity_gap"`
-		LastAt  string `json:"last_at"`
-	}{Version: 1, Gap: gap, LastAt: last})
+	encoded, err := json.Marshal(summary)
+	if err != nil || len(encoded) > len(data) {
+		return errors.New("storage_error")
+	}
 	copy(data, encoded)
 	if n, err := c.diagnostics.WriteAt(data, 0); err != nil || n != len(data) {
-		c.mu.Lock()
-		c.status.DiagnosticsPersisted = false
-		c.mu.Unlock()
 		return errors.New("storage_error")
 	}
 	if err := c.diagnostics.Sync(); err != nil {
-		c.mu.Lock()
-		c.status.DiagnosticsPersisted = false
-		c.mu.Unlock()
 		return err
 	}
 	c.mu.Lock()
-	c.status.DiagnosticsPersisted = c.capacityLastAt == last
+	c.status.DiagnosticsPersisted = c.diagnosticRevision == revision
 	c.mu.Unlock()
 	return nil
 }
@@ -152,17 +248,25 @@ func (c *Collector) refreshCapacity() error {
 		if c.status.Reason != "budget_exhausted" {
 			c.status.State = "paused"
 			c.status.Reason = "budget_exhausted"
-			c.incrementGap("budget_exhausted")
+			c.markGapHistory("budget_exhausted")
 		}
 	} else if c.status.Reason == "budget_exhausted" && c.status.BudgetBytes-used >= resumeRequiredBytes {
 		c.status.State = "active"
 		c.status.Reason = ""
 	}
-	// 有界摘要以最后一次容量事件起算；活动故障持续显示，调长仍受既有期限边界约束。
+	// 摘要以最后一次事件起算；活动故障持续显示，调长不延长旧摘要。
 	if c.status.CapacityGap && c.status.Reason != "budget_exhausted" && c.expired(Record{ReceivedAt: c.capacityLastAt}, auditNow()) {
 		c.status.CapacityGap = false
 		c.capacityLastAt = ""
 		c.status.DiagnosticsPersisted = false
+	}
+	for reason, last := range c.status.GapHistory {
+		if c.status.Reason != reason && c.expired(Record{ReceivedAt: last}, auditNow()) {
+			delete(c.status.GapHistory, reason)
+		}
+	}
+	if c.status.Recovery.Uncertain && c.expired(Record{ReceivedAt: c.status.Recovery.DetectedAt}, auditNow()) {
+		c.status.Recovery = Recovery{}
 	}
 	c.mu.Unlock()
 	return c.saveDiagnostics()

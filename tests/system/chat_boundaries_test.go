@@ -49,7 +49,7 @@ func assertChatPrivacy(t *testing.T, h *instance, markers ...string) {
 			}
 		}
 	}
-	if err := filepath.WalkDir(filepath.Join(h.dir, "audit"), func(path string, entry os.DirEntry, err error) error {
+	if err := filepath.WalkDir(h.stateDir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil || entry.IsDir() {
 			return err
 		}
