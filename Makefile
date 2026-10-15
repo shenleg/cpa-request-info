@@ -1,5 +1,5 @@
 # 本文件统一快速检查、暂存门禁、真实系统/浏览器验收；不提交、部署或删除数据。
-.PHONY: build build-retention-test build-compatibility-test check check-staged hooks-install deps browser-install demo test test-one tools-test browser browser-run verify verify-linux-disk verify-linux-disk-tools-test
+.PHONY: build build-retention-test build-compatibility-test check check-staged deps browser-install demo test test-one tools-test browser browser-run verify verify-linux-disk verify-linux-disk-tools-test
 build:
 	bash scripts/build.sh
 build-retention-test:
@@ -10,8 +10,6 @@ check:
 	bash scripts/check-fast.sh
 check-staged:
 	bash scripts/check-staged.sh
-hooks-install:
-	bash scripts/install-hooks.sh
 deps:
 	go mod download
 	npm ci --ignore-scripts

@@ -1,6 +1,7 @@
 // 本文件通过真实宿主管理菜单验证截断、不完整及双状态提示；只用合成凭据，不读私有存储。
 // 场景由独立 runner 导入；page 位于合成实例，options 指定本轮截图路径。
 // 返回本轮截断/不完整显示与字节边界的有限验收证据；鉴权、落盘或页面校验失败抛错。
+/** 验证 page 的协议正文与内容标记；options 指定有限截图，返回本轮证据，保存或展示不符时抛错。 */
 module.exports = async (page, options = {}) => {
   /** 验证 condition 的用户可见结果；失败以 message 抛错，成功无返回，不输出凭据或超长正文。 */
   const assert = (condition, message) => { if (!condition) throw new Error(message); };
@@ -20,6 +21,7 @@ module.exports = async (page, options = {}) => {
   await frame.getByRole('button', {name:'连接',exact:true}).click();
   await frame.getByRole('status').filter({hasText:'管理鉴权通过'}).waitFor();
   const ids = await frame.locator('#objects option').evaluateAll(options => options.map(option => option.value));
+  await frame.locator('#open-objects').click();
   for (const [i,id] of ids.entries()) {
     await frame.locator('#objects').selectOption(id);
     await frame.getByRole('textbox', {name:'名称',exact:true}).fill('超长验收对象' + i);
@@ -28,6 +30,7 @@ module.exports = async (page, options = {}) => {
     assert((await saved).status()===200, '监控选择未保存');
     await frame.locator('#objects option').filter({hasText:'超长验收对象'+i}).waitFor({state:'attached'});
   }
+  await frame.locator('#close-management').click();
   /** 等待 fixture.marker 的本轮落盘并打开精确详情；fixture 指定两个标记及可见标签。
    * 返回已核对详情；HTTP、状态或等待失败抛错，不通过旧记录证明本轮成功。 */
   async function openSavedDetail(fixture) {
@@ -71,6 +74,7 @@ module.exports = async (page, options = {}) => {
   assert(visible.bytes===65535 && visible.prefix && visible.onlyExpectedASCII && !visible.tail && !visible.broken && !visible.instructions, '浏览器展示不是已保存的字符安全前缀');
   const screenshot = options.screenshot ?? '.test-data/browser-truncation-label-' + Date.now() + '.png';
   await frame.locator('#detail-meta').screenshot({path:screenshot});
+  await frame.locator('#close-detail').click();
   const extraScreenshots = [];
   const hostile = '<img src="https://invalid.example/forbidden-incomplete.png">';
   const partialMarker = 'BROWSER-INCOMPLETE-' + Date.now() + '-';
@@ -101,6 +105,7 @@ module.exports = async (page, options = {}) => {
       const labelScreenshot = screenshot.replace(/\.png$/, i===0?'-incomplete.png':'-combined.png');
       await frame.locator('#detail-meta').screenshot({path:labelScreenshot});
       extraScreenshots.push(require('node:path').basename(labelScreenshot));
+      await frame.locator('#close-detail').click();
     }
     assert(externalLoads===0, '不完整正文触发了外部资源加载');
   } finally {
@@ -117,12 +122,13 @@ module.exports = async (page, options = {}) => {
     const detail = await openSavedDetail({marker,truncated:false,incomplete:true,label:'提取不完整'});
     assert(detail.protocol==='responses' && detail.model===(model??'') && detail.text===marker+'[图片]', 'Responses 元数据或原协议正文不正确');
     const row = frame.locator('#records tbody tr').filter({hasText:marker});
-    await row.getByRole('cell', {name:'Responses HTTP',exact:true}).waitFor();
-    await row.getByRole('cell', {name:model??'未知',exact:true}).waitFor();
+    await row.getByRole('cell', {name:'Responses HTTP',exact:true,includeHidden:true}).waitFor();
+    await row.getByRole('cell', {name:model??'未知',exact:true,includeHidden:true}).waitFor();
     await frame.locator('#detail-meta').filter({hasText:'Responses HTTP · '+(model??'未知')}).waitFor();
     const labelScreenshot = screenshot.replace(/\.png$/, i===0?'-responses.png':'-responses-unknown-model.png');
     await frame.locator('#detail-meta').screenshot({path:labelScreenshot});
     extraScreenshots.push(require('node:path').basename(labelScreenshot));
+    await frame.locator('#close-detail').click();
   }
   // Anthropic 的工具结果即使带嵌套文本/附件也不是新用户输入；页面只显示允许正文与固定占位符。
   const anthropicMarker = 'BROWSER-ANTHROPIC-' + Date.now() + '-';
@@ -144,14 +150,15 @@ module.exports = async (page, options = {}) => {
       const detail = await openSavedDetail({...tc,incomplete:true});
       assert(detail.protocol==='anthropic-messages' && detail.model==='audit-test-model' && detail.text===tc.want, 'Anthropic 原始内容、请求模型或协议错误');
       const row = frame.locator('#records tbody tr').filter({hasText:tc.marker});
-      await row.getByRole('cell', {name:'Anthropic Messages',exact:true}).waitFor();
-      await row.getByRole('cell', {name:'audit-test-model',exact:true}).waitFor();
+      await row.getByRole('cell', {name:'Anthropic Messages',exact:true,includeHidden:true}).waitFor();
+      await row.getByRole('cell', {name:'audit-test-model',exact:true,includeHidden:true}).waitFor();
       await frame.locator('#detail-meta').filter({hasText:'Anthropic Messages · audit-test-model'}).waitFor();
       assert((await frame.locator('#detail').textContent())===tc.want, 'Anthropic 详情未展示已保存纯文本');
       assert((await frame.locator('#detail img, #detail a, #detail script').count())===0, 'Anthropic 输入生成了外部资源节点');
       const labelScreenshot = screenshot.replace(/\.png$/, i===0?'-anthropic.png':'-anthropic-combined.png');
       await frame.locator('#detail-meta').screenshot({path:labelScreenshot});
       extraScreenshots.push(require('node:path').basename(labelScreenshot));
+      await frame.locator('#close-detail').click();
     }
     assert(externalLoads===0, 'Anthropic 正文触发了外部资源加载');
   } finally {

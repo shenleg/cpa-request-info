@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# 仓库自带提交入口只验证真实暂存区，不格式化、追加暂存或启动宿主。
-set -euo pipefail
-ROOT="$(git rev-parse --show-toplevel)"
-exec bash "$ROOT/scripts/check-staged.sh" "$ROOT"

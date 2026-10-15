@@ -1,5 +1,6 @@
 // 本场景通过真实 WebSocket 模型提交和管理页面验证逐条记录、状态标签与上限设置；只使用既有合成凭据。
 // page 指向本地合成实例，options 指定标签截图路径；返回有限证据，连接、保存或页面行为不符时抛出固定错误。
+/** 验证 page 的真实 WebSocket 审计与正文上限；options 指定有限截图，返回证据，协议或页面不符时抛错。 */
 module.exports = async (page, options = {}) => {
   /** 核对 condition；失败以 message 抛错，成功无返回值，不输出凭据或正文。 */
   const assert = (condition, message) => { if (!condition) throw new Error(message); };
@@ -23,6 +24,7 @@ module.exports = async (page, options = {}) => {
   await frame.getByRole('status').filter({hasText:'管理鉴权通过'}).waitFor();
   const ids = await frame.locator('#objects option').evaluateAll(options => options.map(option => option.value));
   assert(ids.length===2, 'WebSocket 合成实例应仅有两个客户端对象');
+  await frame.locator('#open-objects').click();
   for (const [i,id] of ids.entries()) {
     await frame.locator('#objects').selectOption(id);
     await frame.getByRole('textbox', {name:'名称',exact:true}).fill('WebSocket验收对象' + i);
@@ -31,6 +33,7 @@ module.exports = async (page, options = {}) => {
     assert((await saved).status()===200, 'WebSocket 监控配置未保存');
     await frame.locator('#objects option').filter({hasText:'WebSocket验收对象'+i}).waitFor({state:'attached'});
   }
+  await frame.locator('#close-management').click();
   /** 读取 path 对应的公开受保护接口，返回 JSON；鉴权或 HTTP 错误抛出固定说明。 */
   async function read(path) {
     const response = await page.request.get(api+path, {headers:{Authorization:'Bearer '+admin}});
@@ -46,13 +49,15 @@ module.exports = async (page, options = {}) => {
   }
   /** 通过页面保存 limit 并核对公开配置，成功无返回值；拒绝或显示不一致抛错。 */
   async function saveLimit(limit) {
+    await frame.locator('#open-settings').click();
     await frame.locator('#max-text-bytes').fill(String(limit));
     const saved = page.waitForResponse(r => r.url().endsWith('/request-input-audit/settings') && r.request().method()==='POST');
     await frame.locator('#save-settings').click();
     assert((await saved).status()===200, 'WebSocket 正文上限未保存');
-    await frame.getByRole('status').filter({hasText:'正文上限已保存'}).waitFor();
+    await frame.locator('#message').filter({hasText:'正文上限已保存'}).waitFor();
     await displayedLimit(limit);
     assert((await read('/settings')).max_text_bytes===limit, '页面上限与公开配置不一致');
+    await frame.locator('#close-management').click();
   }
   /** 从页面刷新并检查持久设置 limit，成功无返回值；查询或显示超时抛错。 */
   async function refreshLimit(limit) {
@@ -150,6 +155,7 @@ module.exports = async (page, options = {}) => {
       await frame.locator('#detail-meta').screenshot({path:screenshot});
       if (suffix) extraScreenshots.push(require('node:path').basename(screenshot));
     }
+    await frame.locator('#close-detail').click();
     return detail;
   }
   await displayedLimit(65536);
@@ -167,12 +173,14 @@ module.exports = async (page, options = {}) => {
     await saveLimit(7);
     await refreshLimit(7);
     for (const invalid of ['0','1.5']) {
+      await frame.locator('#open-settings').click();
       await frame.locator('#max-text-bytes').fill(invalid);
       await frame.locator('#save-settings').click();
-      await frame.getByRole('status').filter({hasText:'正文上限必须是 1–65536 之间的整数'}).waitFor();
+      await frame.locator('#message').filter({hasText:'正文上限必须是 1–65536 之间的整数'}).waitFor();
       assert((await read('/settings')).max_text_bytes===7, '页面非法上限改变了旧值');
       const rejected = await page.request.post(api+'/settings', {headers:{Authorization:'Bearer '+admin},data:{max_text_bytes:Number(invalid)}});
       assert(rejected.status()===400 && (await read('/settings')).max_text_bytes===7, '公开接口没有拒绝非法上限并保留旧值');
+      await frame.locator('#close-management').click();
       await refreshLimit(7);
     }
     for (const [i,incomplete] of [false,true].entries()) {

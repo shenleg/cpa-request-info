@@ -23,7 +23,7 @@ while IFS= read -r -d '' path; do
   }
 done < "$MANIFEST"
 (
-  # Git hook 可传入 index/repository 环境；快照子进程不能借用原仓库或上层仓库。
+  # 调用者可指定 index/repository 环境；快照子进程不能借用原仓库或上层仓库。
   for name in ${!GIT_@}; do unset "$name"; done
   bash "$FAST" "$SNAPSHOT" "$MANIFEST"
 )

@@ -1,5 +1,6 @@
 // 本文件通过真实宿主管理页、插件菜单及同源受保护接口验收；仅使用合成 Key，不保存认证材料。
 // 场景由独立 runner 导入，page 已导航到本轮合成实例；成功返回有限证据，验收失败抛错。
+/** 验证 page 所在合成宿主的菜单、对象配置与正文安全；返回有限证据，鉴权或行为不符时抛错。 */
 module.exports = async (page) => {
   /** 验证 condition；失败时以 message 抛出错误，成功无返回值，不输出凭据或正文。 */
   const assert = (condition, message) => { if (!condition) throw new Error(message); };
@@ -25,6 +26,7 @@ module.exports = async (page) => {
   await frame.getByRole('status').filter({hasText:'管理鉴权通过'}).waitFor();
   const ids = await frame.locator('#objects option').evaluateAll(options => options.map(option => option.value));
   assert(ids.length === 2, '应有两个无秘密合成对象');
+  await frame.locator('#open-objects').click();
   for (const [i,id] of ids.entries()) {
     await frame.locator('#objects').selectOption(id);
     await frame.getByRole('textbox',{name:'名称',exact:true}).fill('浏览器合成对象' + i);
@@ -33,6 +35,7 @@ module.exports = async (page) => {
     assert((await response).status() === 200, '监控配置未保存');
     await frame.locator('#objects option').filter({hasText:'浏览器合成对象'+i}).waitFor({state:'attached'});
   }
+  await frame.locator('#close-management').click();
   for (const [i,key] of clientKeys.entries()) {
     const input=i===clientKeys.length-1?text:marker+'OTHER-<script>window.__auditInjected=true</script>';
     const result = await page.request.post(base+'/v1/chat/completions',{headers:{Authorization:'Bearer '+key},data:{model:'audit-test-model',messages:[{role:'system',content:'FORBIDDEN_BROWSER_SYSTEM'},{role:'user',content:'FORBIDDEN_BROWSER_HISTORY'},{role:'user',content:input}]}});
@@ -63,5 +66,6 @@ module.exports = async (page) => {
   assert(result.text === text && !result.injected && result.images === 0,'正文必须按字面纯文本显示');
   assert(result.keyFieldEmpty && result.pluginStorage.length === 0,'不得新增持久化管理 Key');
   assert(external.length === 0,'不能自动加载输入中的外部资源');
+  await frame.locator('#close-detail').click();
   return {menu:true,selection:true,details:true,plainText:true,externalRequests:0,keyStoredByPlugin:false};
 }

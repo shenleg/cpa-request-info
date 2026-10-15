@@ -23,6 +23,9 @@ artifacts/
 node_modules/
 .playwright-mcp/
 audit-loop-browser.png
+
+# 一次性布局原型保留在本机及 archive/cpamp-ui-prototype 分支，不进入主分支。
+.scratch/cpamp-style-audit-ui/request-monitor.prototype.html
 *.dylib
 *.so
 *.dll

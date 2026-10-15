@@ -49,12 +49,12 @@
 make deps              # 明确准备 Go/Node 依赖；不执行 npm 生命周期脚本
 make browser-install   # 明确下载固定 Playwright 所需 Chromium
 make check             # 快速格式、vet 与编译检查，不启动宿主
-make hooks-install     # 只给本仓库安装暂存快照检查；遇已有 hook 冲突即停止
+make check-staged      # 手动检查真实暂存区的隔离快照
 make test-one TEST=TestSavedLatestInput
 make verify            # 全部系统/工具/浏览器验收；正常停止进程，保留证据
 ```
 
-快速检查离线执行，缺少依赖会失败，需先 `make deps`。pre-commit 通过 `git write-tree` 导出真实 index 的独立快照，避免部分暂存时工作树的未暂存修复掩盖坏代码；它不自动格式化、不修改 index、不下载依赖、不跑压力或磁盘故障测试。导出快照保留在 `.test-data/`。可显式运行 `make check-staged`。
+快速检查离线执行，缺少依赖会失败，需先 `make deps`。本仓库不提供 pre-commit hook；需要检查暂存内容时，手动运行 `make check-staged`。该命令通过 `git write-tree` 导出真实 index 的独立快照，避免部分暂存时工作树的未暂存修复掩盖坏代码；不自动格式化、不修改 index、不下载依赖、不跑压力或磁盘故障测试。导出快照保留在 `.test-data/`。
 
 本项目执行本机macOS及 `ssh linux-service` 隔离Linux验收，不配置或触发远端CI。统一入口为 `make verify`；每张ticket以同一份最新运行源码在两端完成本票要求的构建、系统、工具和浏览器验收后才标记完成，具体规则见[验证与交付约定](docs/agents/verification.md)。单端通过不代表另一平台已验证。
 

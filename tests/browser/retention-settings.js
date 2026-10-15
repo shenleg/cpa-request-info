@@ -46,6 +46,7 @@ module.exports = async (page, options = {}) => {
   }
   /** 填写 days 和 limit 并保存；confirm 决定接受或取消缩短对话框，返回对话框文本，失败抛错。 */
   async function save(days, limit, confirm) {
+    if (await frame.locator('#management-dialog').isHidden()) await frame.locator('#open-settings').click();
     await frame.locator('#retention-days').fill(String(days));
     await frame.locator('#max-text-bytes').fill(String(limit));
     const dialog = confirm===undefined ? null : page.waitForEvent('dialog').then(async dialog => {
@@ -78,8 +79,10 @@ module.exports = async (page, options = {}) => {
     assert(posts.length===beforeCancel, '取消缩短仍发送了设置 POST');
     const unchanged = await read();
     assert(unchanged.retention_days===14 && unchanged.max_text_bytes===1024, '取消缩短改变了任一配置字段');
+    await frame.locator('#close-management').click();
     await frame.locator('#refresh').click();
     await settings(14,1024);
+    await frame.locator('#open-settings').click();
     // 任一非法字段都不能提交另一个合法字段，也不能在校验前弹出缩短确认。
     for (const [field,invalid] of [['retention-days',''],['retention-days','0'],['retention-days','31'],['retention-days','1.5'],['max-text-bytes','0'],['max-text-bytes','65537'],['max-text-bytes','1.5']]) {
       await frame.locator('#retention-days').fill('3');
@@ -91,7 +94,7 @@ module.exports = async (page, options = {}) => {
       page.on('dialog',dismiss);
       try {
         await frame.locator('#save-settings').click();
-        await frame.getByRole('status').filter({hasText:field==='retention-days'?'保留期必须是 1–30 之间的整数':'正文上限必须是 1–65536 之间的整数'}).waitFor();
+        await frame.locator('#message').filter({hasText:field==='retention-days'?'保留期必须是 1–30 之间的整数':'正文上限必须是 1–65536 之间的整数'}).waitFor();
         await idle();
       } finally { page.off('dialog',dismiss); }
       assert(posts.length===before && dialogs===0, '非法设置发送了 POST 或提前要求确认');
@@ -109,6 +112,7 @@ module.exports = async (page, options = {}) => {
     await settings(3,2048);
     await save(7,65536);
     await settings(7,65536);
+    await frame.locator('#close-management').click();
     if (options.screenshot) await frame.locator('#message').screenshot({path:options.screenshot});
     return {runId,defaultRetentionDays:7,cancelSentNoPost:true,shorteningConfirmed:true,atomicSettings:true,invalidValuesRejected:true,reloadPreservedSettings:true,restoredRetentionDays:7,restoredMaxTextBytes:65536};
   } finally {

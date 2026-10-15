@@ -1,5 +1,6 @@
 // 本场景通过真实宿主管理页面验证生命周期操作；只使用合成凭据，证据不包含对象 ID 或输入正文。
 // page 指向已就绪的本地合成实例，options 提供有限状态标签截图路径；失败抛出固定说明，成功返回行为证据。
+/** 验证 page 的对象改名、移除、恢复和主动暂停；options 指定有限截图，返回证据，行为不符时抛错。 */
 module.exports = async (page, options = {}) => {
   /** 验证用户可见条件；condition 为结果，message 为固定说明，失败抛错，成功无返回值。 */
   const assert = (condition, message) => { if (!condition) throw new Error(message); };
@@ -17,8 +18,10 @@ module.exports = async (page, options = {}) => {
   await frame.getByRole('textbox', {name:'临时管理 Key'}).fill(admin);
   await frame.getByRole('button', {name:'连接',exact:true}).click();
   await frame.getByRole('status').filter({hasText:'管理鉴权通过'}).waitFor();
+  await frame.locator('#open-objects').click();
   assert(await frame.getByRole('button', {name:'仅改名',exact:true}).count()===1, '管理页面缺少仅改名操作');
   assert(await frame.getByRole('button', {name:'移除监控',exact:true}).count()===1, '管理页面缺少移除监控操作');
+  await frame.locator('#close-management').click();
   assert(await frame.getByRole('button', {name:'暂停采集',exact:true}).count()===1, '管理页面缺少主动暂停操作');
   assert(await frame.getByRole('button', {name:'恢复采集',exact:true}).count()===1, '管理页面缺少恢复采集操作');
   assert(await frame.getByRole('combobox', {name:'历史对象筛选',exact:true}).count()===1, '管理页面缺少历史对象筛选');
@@ -38,7 +41,7 @@ module.exports = async (page, options = {}) => {
     const saved = page.waitForResponse(response=>response.url().endsWith('/request-input-audit'+path)&&response.request().method()==='POST');
     await frame.getByRole('button',{name:button,exact:true}).click();
     assert((await saved).status()===200,'生命周期页面配置未保存');
-    await frame.getByRole('status').filter({hasText:message}).waitFor();
+    await frame.locator('#message').filter({hasText:message}).waitFor();
   }
   /** 提交本轮唯一合成文本；key 选择实际客户端身份，suffix 区分提交，成功无返回，模型异常抛错。 */
   async function submit(key,suffix) {
@@ -77,6 +80,7 @@ module.exports = async (page, options = {}) => {
   }
   const ids=await frame.locator('#objects option').evaluateAll(options=>options.map(option=>option.value));
   assert(ids.length===2,'生命周期合成实例应仅有两个客户端对象');
+  await frame.locator('#open-objects').click();
   for(const [index,id]of ids.entries()) {
     await frame.locator('#objects').selectOption(id);
     await frame.getByRole('textbox',{name:'名称',exact:true}).fill('生命周期旧名'+index);
@@ -96,28 +100,36 @@ module.exports = async (page, options = {}) => {
   const renamedRecord=await saved('after-rename');
   const oldDetail=await read('/detail?id='+encodeURIComponent(before.id));
   assert(oldDetail.name===renamed&&renamedRecord.name===renamed,'改名后新旧详情未统一显示当前名称');
+  await frame.locator('#close-management').click();
   await frame.getByRole('combobox',{name:'历史对象筛选',exact:true}).selectOption(before.object_id);
   await frame.locator('#records tbody tr').filter({hasText:marker+'before'}).waitFor();
   await frame.getByRole('button',{name:'刷新已保存记录',exact:true}).click();
   const oldRow=frame.locator('#records tbody tr').filter({hasText:marker+'before'});
-  await oldRow.getByRole('cell',{name:renamed,exact:true}).waitFor();
+  await oldRow.locator('.object-name').waitFor();
+  assert(await oldRow.locator('.object-name').textContent()===renamed,'列表未精确显示当前对象名称');
   await frame.locator('#records tbody tr').filter({hasText:marker+'other'}).waitFor({state:'detached'});
   await oldRow.getByRole('button',{name:'查看',exact:true}).click();
   await frame.locator('#detail').filter({hasText:marker+'before'}).waitFor();
   const rendered=await frame.locator('#detail-meta').evaluate(element=>({text:element.textContent,markup:element.querySelectorAll('b').length}));
   assert(rendered.text.includes(renamed)&&rendered.markup===0,'对象名称必须按当前名称纯文本显示');
+  await frame.locator('#close-detail').click();
+  await frame.locator('#open-objects').click();
   await action('移除监控','/remove','已移除监控');
   await frame.locator('#objects option').filter({hasText:'已移除但有历史'}).waitFor({state:'attached'});
-  await oldRow.getByRole('cell',{name:renamed,exact:true}).waitFor();
+  await frame.locator('#close-management').click();
+  await oldRow.locator('.object-name').waitFor();
+  assert(await oldRow.locator('.object-name').textContent()===renamed,'列表未精确显示当前对象名称');
   const removedState=await drained();
   await submit(clientKeys[0],'removed-skip');
   await skipped('removed-skip',removedState);
   const removedHistory=await read('/records?limit=100&object_id='+encodeURIComponent(before.object_id));
   assert(removedHistory.records.some(record=>record.id===before.id)&&removedHistory.records.every(record=>record.object_id===before.object_id),'移除对象的历史入口或筛选失效');
+  await frame.locator('#open-objects').click();
   await action('选择并命名','/monitor','监控配置已保存');
   await submit(clientKeys[0],'rejoined');
   const rejoined=await saved('rejoined');
   assert(rejoined.object_id===before.object_id&&rejoined.name===renamed,'同 Key 重新加入没有沿用历史身份');
+  await frame.locator('#close-management').click();
   await action('暂停采集','/pause','已主动暂停');
   await frame.locator('#capture-state').filter({hasText:'主动暂停：'}).waitFor();
   const pausedState=await drained();

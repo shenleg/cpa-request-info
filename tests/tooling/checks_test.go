@@ -1,4 +1,4 @@
-// tooling 包验证公开检查、暂存门禁、无覆盖 hook 安装和隔离构建的 overlay 路径。
+// tooling 包验证手动快速检查、真实暂存快照和隔离构建的 overlay 路径。
 package tooling
 
 import (
@@ -170,7 +170,7 @@ func TestStagedRequiresOwnModule(t *testing.T) {
 	}
 }
 
-// TestStagedUsesSelectedRealIndex 验证 hook 传入的真实 index 生效而快照不继承仓库定位环境。
+// TestStagedUsesSelectedRealIndex 验证调用者指定的真实 index 生效而快照不继承仓库定位环境。
 func TestStagedUsesSelectedRealIndex(t *testing.T) {
 	root := newFixture(t)
 	writeFixture(t, root, "sample.go", "package fixture\nfunc Value()int{return missing}\n")
@@ -181,102 +181,6 @@ func TestStagedUsesSelectedRealIndex(t *testing.T) {
 	output, err := commandFixture(root, "env", "GIT_INDEX_FILE="+index, "GIT_DIR="+filepath.Join(root, ".git"), "GIT_WORK_TREE="+root, "bash", filepath.Join(projectRoot(t), "scripts/check-staged.sh"), root)
 	if err != nil {
 		t.Fatalf("必须检查传入的有效 index，而非默认坏 index：%v\n%s", err, output)
-	}
-}
-
-// TestInstallRefusesConflictingHooksPath 验证既有 hooksPath 被拒绝且原配置不被覆盖。
-func TestInstallRefusesConflictingHooksPath(t *testing.T) {
-	root := newFixture(t)
-	runFixture(t, root, "git", "config", "--local", "core.hooksPath", "existing-hooks")
-	output, err := runScript(t, root, "install-hooks.sh")
-	if err == nil || !strings.Contains(output, "hooksPath") {
-		t.Fatalf("既有配置应导致明确拒绝，err=%v\n%s", err, output)
-	}
-	if got := strings.TrimSpace(runFixture(t, root, "git", "config", "--local", "--get", "core.hooksPath")); got != "existing-hooks" {
-		t.Fatalf("原有配置被覆盖：%q", got)
-	}
-}
-
-// TestInstallTargetsRootDespiteForeignGitEnvironment 验证安装只修改参数指定仓库的本地配置。
-func TestInstallTargetsRootDespiteForeignGitEnvironment(t *testing.T) {
-	root := newFixture(t)
-	foreign := newFixture(t)
-	copyPublicTools(t, root)
-	output, err := commandFixture(root, "env", "GIT_DIR="+filepath.Join(foreign, ".git"), "GIT_WORK_TREE="+foreign, "bash", filepath.Join(projectRoot(t), "scripts/install-hooks.sh"), root)
-	if err != nil {
-		t.Fatalf("目标仓库安装应成功：%v\n%s", err, output)
-	}
-	if output, err := commandFixture(root, "git", "config", "--local", "--get", "core.hooksPath"); err != nil || strings.TrimSpace(output) != ".githooks" {
-		t.Fatalf("应启用目标而非外部仓库，err=%v，%q", err, output)
-	}
-	if output, err := commandFixture(foreign, "git", "config", "--local", "--get", "core.hooksPath"); err == nil {
-		t.Fatalf("不应修改外部仓库配置：%q", output)
-	}
-}
-
-// TestInstallRefusesEmptyHooksPath 验证已有空 hooksPath 仍是用户配置，不被静默覆盖。
-func TestInstallRefusesEmptyHooksPath(t *testing.T) {
-	root := newFixture(t)
-	copyPublicTools(t, root)
-	runFixture(t, root, "git", "config", "--local", "core.hooksPath", "")
-	output, err := runScript(t, root, "install-hooks.sh")
-	if err == nil || !strings.Contains(output, "hooksPath") {
-		t.Fatalf("已有空配置仍应拒绝覆盖，err=%v\n%s", err, output)
-	}
-}
-
-// TestInstallPreservesExistingHook 验证默认 hooks 目录的真实 pre-commit 导致拒绝而非覆盖。
-func TestInstallPreservesExistingHook(t *testing.T) {
-	root := newFixture(t)
-	original := "#!/bin/sh\n# existing user hook\nexit 0\n"
-	writeFixture(t, root, ".git/hooks/pre-commit", original)
-	output, err := runScript(t, root, "install-hooks.sh")
-	if err == nil || !strings.Contains(output, "pre-commit") {
-		t.Fatalf("既有 hook 应被拒绝，err=%v\n%s", err, output)
-	}
-	data, err := os.ReadFile(filepath.Join(root, ".git/hooks/pre-commit"))
-	if err != nil || string(data) != original {
-		t.Fatalf("既有 hook 未被保留：%v，%q", err, data)
-	}
-	if got, err := commandFixture(root, "git", "config", "--local", "--get", "core.hooksPath"); err == nil {
-		t.Fatalf("拒绝后不应新增 hooksPath：%q", got)
-	}
-}
-
-// TestInstallRequiresExecutableOwnHook 验证自带入口缺失或不可执行时不启用无效门禁。
-func TestInstallRequiresExecutableOwnHook(t *testing.T) {
-	for _, present := range []bool{false, true} {
-		t.Run(map[bool]string{false: "missing", true: "not-executable"}[present], func(t *testing.T) {
-			root := newFixture(t)
-			if present {
-				writeFixture(t, root, ".githooks/pre-commit", "#!/bin/sh\nexit 0\n")
-			}
-			output, err := runScript(t, root, "install-hooks.sh")
-			if err == nil || !strings.Contains(output, "可执行") {
-				t.Fatalf("无有效入口应拒绝安装，err=%v\n%s", err, output)
-			}
-		})
-	}
-}
-
-// TestInstallIsIdempotentAndHookChecksIndex 验证自带安装可重复执行且入口实际拒绝坏 index。
-func TestInstallIsIdempotentAndHookChecksIndex(t *testing.T) {
-	root := newFixture(t)
-	copyPublicTools(t, root)
-	for range 2 { // 两次调用验证重复启用不会覆盖其他设置或破坏入口。
-		output, err := runScript(t, root, "install-hooks.sh")
-		if err != nil {
-			t.Fatalf("自带安装应成功：%v\n%s", err, output)
-		}
-	}
-	if got := strings.TrimSpace(runFixture(t, root, "git", "config", "--local", "--get", "core.hooksPath")); got != ".githooks" {
-		t.Fatalf("应仅启用当前仓库自带 hook：%q", got)
-	}
-	writeFixture(t, root, "sample.go", "package fixture\nfunc Value()int{return 1}\n")
-	runFixture(t, root, "git", "add", "sample.go")
-	output, err := commandFixture(root, "bash", filepath.Join(root, ".githooks/pre-commit"))
-	if err == nil || !strings.Contains(output, "gofmt") {
-		t.Fatalf("自带入口必须调用暂存检查，err=%v\n%s", err, output)
 	}
 }
 
@@ -334,21 +238,6 @@ func TestBuildOverlayWithSymlinkBuild(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-// copyPublicTools 把公开脚本及入口复制至夹具并保留执行权限；读取、写入或设权失败时终止测试。
-func copyPublicTools(t *testing.T, root string) {
-	t.Helper()
-	for _, path := range []string{"scripts/check-fast.sh", "scripts/check-staged.sh", "scripts/install-hooks.sh", ".githooks/pre-commit"} {
-		data, err := os.ReadFile(filepath.Join(projectRoot(t), path))
-		if err != nil {
-			t.Fatal(err)
-		}
-		writeFixture(t, root, path, string(data))
-		if err := os.Chmod(filepath.Join(root, path), 0o755); err != nil {
-			t.Fatal(err)
-		}
 	}
 }
 

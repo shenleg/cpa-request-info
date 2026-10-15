@@ -1,25 +1,67 @@
 <!doctype html>
-<!-- 本页面只托管无数据 shell；动态数据受宿主管理鉴权保护，管理 Key 仅在页面内存驻留。 -->
-<html lang="zh-CN">
+<!-- 请求输入审计工作台：所有数据来自同源受保护 API，管理 Key 仅在当前页面内存驻留。 -->
+<html lang="zh-CN" data-theme="light">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-wstnsK+mzprvg6KgG7UKdntxyNJ4iJ05gMbv397vcyE='; style-src 'sha256-mcEoXKWBfiRvpvTh90RoJs1oIgkKU4gVvUXfuAv9NcU='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-4qk5EWZMhHnCL7KLNL/3Yblkn3oYgBP4ltr3PXEEMN0='; style-src 'sha256-qPu8pc6zAj/fIKmdRID3dcdEAalrGBwyOD9qpbvhiuM='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <title>输入审计</title>
 <style>
-:root{color-scheme:light dark;font-family:system-ui,sans-serif}body{max-width:1100px;margin:24px auto;padding:0 20px;line-height:1.6}input,select,button{font:inherit;margin:5px;padding:7px;max-width:95%}button{cursor:pointer}label{display:block}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #888;padding:9px;text-align:left;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:14px;border:1px solid #888}#notice{border-left:4px solid #888;padding-left:12px}code{overflow-wrap:anywhere}.object-id{font-size:.8em}section{margin-top:24px}
+:root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color-scheme:light;--bg:#eef3fa;--surface:#fff;--soft:#f7f9fc;--hover:#f2f6fc;--text:#202c42;--secondary:#596a82;--muted:#5d6d85;--line:#e6ebf2;--blue:#275cda;--blue-soft:#edf3ff;--green:#187449;--green-soft:#eaf7f0;--amber:#926014;--amber-soft:#fff6e5;--red:#bf3c48;--red-soft:#fff0f1;--purple:#7454bb;--purple-soft:#f3effc;--overlay:#14243c52;font-size:13px}
+:root[data-theme=dark]{color-scheme:dark;--bg:#111824;--surface:#192230;--soft:#1e2939;--hover:#233148;--text:#e6edf7;--secondary:#a2b0c5;--muted:#93a4bd;--line:#2c394d;--blue:#8baeff;--blue-soft:#26385c;--green:#7bd6a6;--green-soft:#203d33;--amber:#f1cb83;--amber-soft:#433725;--red:#ff9ca5;--red-soft:#452b37;--purple:#c4a9ff;--purple-soft:#342c4a;--overlay:#020815a6}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);line-height:1.6}button,input,select{font:inherit}button{cursor:pointer}button,input,select,summary{outline-offset:3px}button:focus-visible,input:focus-visible,select:focus-visible,summary:focus-visible,pre:focus-visible{outline:2px solid var(--blue)}button:disabled{opacity:.45;cursor:not-allowed}[hidden]{display:none!important}.icon-sprite{display:none}.icon{width:16px;height:16px;display:inline-block;vertical-align:middle;flex-shrink:0;stroke:currentColor;stroke-width:1.7;fill:none;stroke-linecap:round;stroke-linejoin:round}.muted{color:var(--secondary)}.tiny{font-size:11px;color:var(--muted)}.mono{font-family:"SFMono-Regular",Consolas,monospace;font-size:11px}.btn{display:inline-flex;align-items:center;justify-content:center;gap:7px;background:var(--surface);border:1px solid var(--line);color:var(--text);padding:8px 12px;border-radius:7px;min-height:35px;font-weight:500;white-space:nowrap}.btn:hover:not(:disabled){background:var(--hover);border-color:var(--muted)}.btn.primary{background:#326cf9;border-color:#326cf9;color:#fff}.btn.primary:hover:not(:disabled){background:#245ce5}.btn.ghost{background:transparent;border-color:transparent;color:var(--secondary)}.btn.small{padding:5px 9px;min-height:29px;font-size:12px}.btn.icon-only{width:35px;padding:7px}.btn.danger{color:var(--red)}input,select{min-width:0;color:var(--text);background:var(--surface);border:1px solid var(--line);border-radius:7px;padding:9px 11px;height:37px}input:hover,select:hover{border-color:var(--muted)}input::placeholder{color:var(--muted)}.field{display:flex;flex-direction:column;gap:6px;min-width:0;font-size:11px;color:var(--secondary)}.field>input,.field>select{width:100%;font-size:12px}.dot{width:6px;height:6px;border-radius:50%;background:currentColor;flex-shrink:0}.badge{display:inline-flex;align-items:center;gap:5px;border-radius:5px;font-size:11px;line-height:1.6;padding:3px 7px;white-space:nowrap;font-weight:500}.badge.green{color:var(--green);background:var(--green-soft)}.badge.amber{color:var(--amber);background:var(--amber-soft)}.badge.red{color:var(--red);background:var(--red-soft)}.badge.blue{color:var(--blue);background:var(--blue-soft)}.badge.purple{color:var(--purple);background:var(--purple-soft)}.badge.neutral{color:var(--secondary);background:var(--soft)}
+.shell{max-width:1680px;margin:0 auto;padding:24px 26px 28px}.page-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:17px}.page-title{display:flex;align-items:center;gap:11px}.page-title h1{font-size:25px;font-weight:680;letter-spacing:-.8px;margin:0}.page-title .badge{margin-top:2px}.subtitle{font-size:12px;color:var(--secondary);margin:5px 0 0}.head-actions{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.theme-control{margin-left:auto}.session-message{font-size:11px;color:var(--secondary);margin:0 0 12px;overflow-wrap:anywhere}.panel{background:var(--surface);border:1px solid var(--line);border-radius:11px;min-width:0;box-shadow:0 3px 14px #243a5808}.login-card{max-width:570px;margin:45px auto;padding:28px}.login-card h2{font-size:19px;margin:0 0 10px}.login-card p{color:var(--secondary);font-size:12px}.login-card .btn{margin-top:15px}.login-card .field{margin-top:20px}.protected-head{margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:10px}.secondary-actions{display:flex;gap:7px}.status-ribbon{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 15px;margin-bottom:16px;display:flex;align-items:flex-start;justify-content:space-between;gap:15px}.status-main{min-width:0}.status-line{display:flex;align-items:center;gap:12px;margin-bottom:4px}.status-ribbon.warning{border-color:var(--amber)}.status-ribbon.failure{border-color:var(--red)}#capture-state{font-size:11px;color:var(--secondary);margin:3px 0 0}#capture-summary{font-size:11px;color:var(--secondary)}.ribbon-actions{display:flex;align-items:center;gap:10px;flex-shrink:0;flex-wrap:wrap;justify-content:flex-end}.gap-summary{font-size:11px;color:var(--amber)}
+.filters{padding:15px 16px 11px;margin-bottom:14px}.filter-top{display:flex;align-items:center;gap:10px;padding-bottom:12px;border-bottom:1px solid var(--line);margin-bottom:12px}.range-buttons{display:flex;gap:3px;background:var(--soft);padding:3px;border-radius:7px;flex-shrink:0}.range-buttons button{border:0;background:none;color:var(--secondary);padding:6px 12px;font-size:12px;border-radius:5px}.range-buttons button.active{color:var(--blue);background:var(--surface);box-shadow:0 1px 4px #20385a10;font-weight:600}.search-box{position:relative;flex:1;min-width:90px}.search-box>.icon{position:absolute;left:11px;top:11px;color:var(--muted);width:15px;height:15px}.search-box input{width:100%;padding-left:33px}.filter-apply{display:flex;gap:7px;flex-shrink:0}.filter-grid{display:grid;grid-template-columns:minmax(150px,1fr) minmax(140px,1fr) minmax(180px,1fr) minmax(180px,1fr);gap:10px}.filter-help{font-size:10px;color:var(--muted);margin-top:9px}.filter-help summary{cursor:pointer;display:list-item}.filter-help p{margin:6px 0 2px;line-height:1.8}.metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:15px}.metric{padding:15px 17px;min-height:107px}.metric-title{display:flex;align-items:center;gap:8px;color:var(--secondary);font-size:12px}.metric-icon{display:grid;place-items:center;width:25px;height:25px;border-radius:7px;background:var(--blue-soft);color:var(--blue)}.metric-icon.green{color:var(--green);background:var(--green-soft)}.metric-icon.purple{color:var(--purple);background:var(--purple-soft)}.metric-icon.amber{color:var(--amber);background:var(--amber-soft)}.metric-icon .icon{width:14px;height:14px}.metric-value{font-size:27px;letter-spacing:-.8px;font-weight:650;margin:8px 0 1px;line-height:1.2}.metric-value .unit{font-size:11px;color:var(--secondary);font-weight:450;letter-spacing:0;margin-left:4px}.metric-note{font-size:10px;color:var(--muted);margin-top:4px}.storage-value{font-size:24px}#storage-meter{display:block;width:100%;height:5px;margin-top:8px;border:0;background:var(--blue-soft);accent-color:var(--blue)}#storage-meter::-webkit-progress-bar{background:var(--blue-soft);border-radius:4px}#storage-meter::-webkit-progress-value{background:var(--blue);border-radius:4px}#storage-meter::-moz-progress-bar{background:var(--blue)}
+.results{overflow:hidden}.results-head{padding:14px 17px;display:flex;align-items:center;justify-content:space-between;gap:12px}.section-heading{display:flex;align-items:center;gap:9px}.section-heading h2{font-size:14px;font-weight:650;margin:0}.count-pill{background:var(--blue-soft);color:var(--blue);font-size:10px;font-weight:600;border-radius:5px;padding:2px 6px}.result-tools{font-size:10px;color:var(--secondary);display:flex;align-items:center;gap:6px}#records-state{font-size:10px;color:var(--secondary);margin:0 17px 10px}.table-scroll{overflow-x:auto;padding:0 12px}.request-table{border-collapse:separate;border-spacing:0;width:100%;table-layout:fixed;font-size:12px;min-width:860px}.request-table col:nth-child(1){width:100px}.request-table col:nth-child(2){width:145px}.request-table col:nth-child(3){width:133px}.request-table col:nth-child(4){width:142px}.request-table col:nth-child(6){width:127px}.request-table col:nth-child(7){width:54px}th{text-align:left;font-size:10px;font-weight:550;color:var(--muted);background:var(--soft);padding:9px 10px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);white-space:nowrap}th:first-child{border-radius:7px 0 0 7px;border-left:1px solid var(--line)}th:last-child{border-radius:0 7px 7px 0;border-right:1px solid var(--line)}td{padding:12px 10px;border-bottom:1px solid var(--line);vertical-align:middle;overflow-wrap:anywhere}tr:last-child td{border-bottom:none}tbody tr:hover{background:var(--hover)}tbody tr.selected{background:var(--blue-soft)}.time-primary{font-variant-numeric:tabular-nums;font-size:12px;font-weight:500}.time-secondary{font-size:10px;color:var(--muted);margin-top:2px;font-variant-numeric:tabular-nums}.object-name{display:block;font-size:12px;font-weight:550;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.object-id{display:block;font-size:9px;color:var(--muted);font-family:"SFMono-Regular",Consolas,monospace;margin-top:3px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.protocol{font-size:9px;padding:3px 5px;border:1px solid var(--line);border-radius:5px;display:inline-flex;color:var(--secondary);background:var(--soft);white-space:nowrap}.model{font-family:"SFMono-Regular",Consolas,monospace;font-size:10px;line-height:1.6;overflow-wrap:anywhere;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}.preview{font-size:11px;color:var(--secondary);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;line-height:1.7}.flags{display:flex;align-items:flex-start;flex-wrap:wrap;gap:4px}.flags .badge{font-size:9px;padding:2px 5px}.flag-separator{font-size:9px;color:var(--muted)}.view-button{font-size:11px;padding:5px 4px;min-height:28px;color:var(--blue)}.results-foot{border-top:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:11px 17px;gap:12px;font-size:11px;color:var(--secondary)}.pagination{display:flex;gap:6px}#empty{color:var(--secondary);text-align:center;padding:48px 18px;font-size:12px}.bottom-note{display:flex;justify-content:space-between;align-items:center;gap:15px;font-size:10px;color:var(--muted);padding:13px 2px}.bottom-note .icon{width:12px;height:12px;margin-right:5px}
+/* 原生 dialog 进入顶层后不受父级 hidden 影响；撤销鉴权必须显式关闭。 */
+dialog{color:var(--text);background:var(--surface);border:1px solid var(--line);padding:0;box-shadow:0 18px 80px #07162b35}dialog::backdrop{background:var(--overlay);backdrop-filter:blur(2px)}.drawer{margin:0 0 0 auto;max-height:none;height:100dvh;max-width:100%;width:550px;border-radius:15px 0 0 15px;border-right:0;border-top:0;border-bottom:0}.drawer-inner{height:100%;display:flex;flex-direction:column}.drawer-header{padding:21px 23px 17px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:12px}.drawer-header h2{font-size:17px;letter-spacing:-.4px;margin:0}.drawer-header p{font-size:11px;color:var(--secondary);margin:4px 0 0}.drawer-scroll{overflow-y:auto;flex:1}.side-content{padding:22px 23px}.side-content p{font-size:11px;color:var(--secondary);line-height:1.9}.side-content h3{font-size:13px;margin:23px 0 10px}.side-content .field{margin:16px 0 6px}.side-content select{max-width:100%}.side-content .btn{margin:5px 3px 5px 0}.side-content pre{font:11px/1.9 "SFMono-Regular",Consolas,monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:14px}.drawer-footer{border-top:1px solid var(--line);padding:13px 23px;color:var(--muted);font-size:10px}.detail-meta{color:var(--secondary);font-size:12px;overflow-wrap:anywhere;line-height:1.9;padding-bottom:17px;border-bottom:1px solid var(--line);margin:0 0 17px}#detail{font:12px/1.95 "SFMono-Regular",Consolas,"PingFang SC",monospace;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--soft);border:1px solid var(--line);border-radius:8px;padding:17px;margin:0}.detail-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.detail-heading h3{margin:0;font-size:12px}.help-details{font-size:11px;color:var(--secondary);line-height:1.9}.help-details summary{cursor:pointer;font-weight:550;color:var(--text)}.help-details #notice{font-size:11px;line-height:1.9}code{overflow-wrap:anywhere}
+@media(max-width:1150px){.shell{padding:20px}.page-head{align-items:flex-start}.page-head .head-actions{max-width:330px;justify-content:flex-end}.head-actions .btn{font-size:11px;padding:7px 9px}.filter-grid{grid-template-columns:1fr 1fr}.filter-top{flex-wrap:wrap}.metric{padding:13px}.metric-title{font-size:11px}.ribbon-actions{max-width:190px}.request-table{min-width:860px}}
+@media(max-width:760px){.shell{padding:17px 14px}.page-head{display:block;margin-bottom:15px}.page-title h1{font-size:23px}.page-head .head-actions{max-width:none;justify-content:flex-start;margin-top:15px;gap:6px}.subtitle{font-size:11px}.btn{font-size:11px;padding:7px 9px}.protected-head{align-items:flex-start}.secondary-actions{gap:4px;flex-wrap:wrap}.status-ribbon{padding:11px 12px;display:block}.status-line{flex-wrap:wrap;gap:7px}.ribbon-actions{max-width:none;justify-content:flex-start;margin-top:9px;gap:8px}.ribbon-actions>.tiny{font-size:9px}#capture-state{font-size:10px}.metrics{grid-template-columns:1fr 1fr;gap:10px}.metric{padding:12px;min-height:102px}.metric-title{font-size:10px;gap:6px}.metric-icon{height:23px;width:23px}.metric-value{font-size:25px}.metric-note{font-size:9px}.storage-value{font-size:22px}.metric-value .unit{font-size:9px}.filters{padding:12px}.filter-top{gap:9px}.range-buttons{width:100%;justify-content:space-between}.range-buttons button{flex:1;padding:6px 7px}.search-box{flex-basis:100%}.filter-apply{width:100%}.filter-apply .btn:first-child{flex:1}.filter-grid{gap:10px 8px}.field{font-size:10px}.field>input,.field>select{font-size:11px;padding:8px;height:36px}.filter-help{font-size:9px}.results-head{padding:13px 12px}.section-heading h2{font-size:13px}.result-tools{font-size:9px}.result-tools .refresh-note{display:none}#records-state{margin:0 12px 9px}.table-scroll{padding:0 8px}.results-foot{font-size:10px;padding:11px;flex-wrap:wrap}.pagination{margin-left:auto}.bottom-note{align-items:flex-start;line-height:1.9;font-size:9px}.drawer{border-radius:0;width:100%}.drawer-header{padding:18px}.side-content{padding:18px}.drawer-footer{padding:13px 18px}.login-card{margin:22px auto;padding:21px}}
+/* 宿主的浮动工具条覆盖 iframe 右上角；把抽屉操作移到其下，避免关闭误触宿主退出。 */
+.embedded .drawer-header{padding-top:88px}
+@media(max-width:760px){.embedded .page-head{padding-top:64px}.protected-head{flex-wrap:wrap}}
 </style></head>
-<body>
-<h1>输入审计</h1>
-<p id="notice">当前支持 Chat Completions、Responses HTTP、Responses WebSocket 与 Anthropic Messages：仅审查本次末尾新用户消息；WebSocket 按每次客户端模型提交独立记录，不记录握手或控制消息；Responses 字符串 input 直接作为本次用户文本；Anthropic 仅含 tool_result 的末尾 user 正常跳过，混合消息只保留新内容，不提取工具结果内部数据。图片/音频/视频/文件只保存固定占位符，不保存附件载荷或工具内容，不回查 previous_response_id 或会话历史。未知块会产生提取不完整标记与缺口诊断；普通文本中的链接、Base64 和秘密不自动脱敏。正文按配置保存 1–65536 字节内的 UTF-8 前缀；单条上限变更只影响后续提交，无须重连。常规可处理审计故障采用 fail-open，不拒绝或修改模型调用，但同步输入观察仍有处理耗时。native 与宿主同进程，进程级崩溃不隔离；异常重启只报告真实不确定性，重启诊断不等于完整故障恢复，不保证零丢失或 exactly-once。应用层不加密；仅供隔离合成数据验收，不适用于生产审计。</p>
-<section id="login"><h2>宿主管理鉴权</h2><p>优先复用同源宿主已有登录状态。无法取得时，请临时输入同一个管理 Key；只存本页内存，不写入 localStorage/cookie，刷新即消失。</p><label>临时管理 Key <input id="management-key" type="password" autocomplete="off"></label><button id="connect">连接</button></section>
-<p id="message" role="status">等待管理鉴权。</p>
+<body><svg xmlns="http://www.w3.org/2000/svg" class="icon-sprite" aria-hidden="true"><defs>
+<symbol id="i-activity" viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></symbol>
+<symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"/><path d="M6.1 7a7 7 0 0 1 11.7-1L20 9M4 15l2.2 3A7 7 0 0 0 18 17"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 4.5 4.5"/></symbol>
+<symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 7h16M7 12h10M10 17h4"/><circle cx="8" cy="7" r="2" fill="var(--surface)"/><circle cx="15" cy="12" r="2" fill="var(--surface)"/></symbol>
+<symbol id="i-pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14" stroke-width="3"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><path d="m8 5 11 7-11 7Z"/></symbol>
+<symbol id="i-users" viewBox="0 0 24 24"><circle cx="9" cy="7" r="3"/><path d="M3 20v-3a6 6 0 0 1 12 0v3M16 4a3 3 0 0 1 0 6M18 13a5 5 0 0 1 3 4v3"/></symbol>
+<symbol id="i-settings" viewBox="0 0 24 24"><path d="m9 3-1 3-3 .5-1.5 3L5 12l-1.5 2.5 1.5 3 3 .5 1 3h6l1-3 3-.5 1.5-3L19 12l1.5-2.5-1.5-3-3-.5-1-3Z"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="m12 3 8 3v6c0 5-8 9-8 9s-8-4-8-9V6Z"/><path d="m8 12 3 3 5-6"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4 4L19 6"/></symbol>
+<symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></symbol>
+<symbol id="i-stack" viewBox="0 0 24 24"><path d="m12 3 10 5-10 5L2 8ZM3 12l9 5 9-5M3 16l9 5 9-5"/></symbol>
+<symbol id="i-database" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/></symbol>
+<symbol id="i-file" viewBox="0 0 24 24"><path d="M14 3H5v18h14V8Zm0 0v6h5M8 13h8M8 17h6"/></symbol>
+<symbol id="i-eye" viewBox="0 0 24 24"><path d="M2 12s4-7 10-7 10 7 10 7-4 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></symbol>
+<symbol id="i-left" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"/></symbol>
+<symbol id="i-right" viewBox="0 0 24 24"><path d="m10 6 6 6-6 6"/></symbol>
+<symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+<symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v.1"/></symbol>
+<symbol id="i-alert" viewBox="0 0 24 24"><path d="M10.3 4.8a2 2 0 0 1 3.4 0L22 19H2Z"/><path d="M12 9v4M12 16v.1"/></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5m11 11L19 19M5 19l1.5-1.5m11-11L19 5"/></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14a8 8 0 0 1-10-10A9 9 0 1 0 20 14Z"/></symbol>
+<symbol id="i-bell" viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 8-3 8h18s-3-1-3-8M10 20h4"/></symbol>
+<symbol id="i-arrow" viewBox="0 0 24 24"><path d="M5 12h14m-5-5 5 5-5 5"/></symbol>
+<symbol id="i-link" viewBox="0 0 24 24"><path d="m10 13 4-4m-6 7-2 2a4 4 0 0 1-6-6l6-6a4 4 0 0 1 6 0m4 2 2-2a4 4 0 0 1 6 6l-6 6a4 4 0 0 1-6 0" transform="translate(2 0) scale(.85 1)"/></symbol>
+</defs></svg>
+<div class="shell">
+<header class="page-head"><div><div class="page-title"><h1>请求监控</h1><span class="badge blue">输入审计</span><button id="theme-toggle" class="btn ghost icon-only" aria-label="切换为深色主题" title="切换主题"><svg class="icon" aria-hidden="true"><use href="#i-moon"/></svg></button></div><p class="subtitle">浏览已保存的请求输入，按对象、时间、模型和正文定位记录。</p></div></header>
+<section id="login" class="panel login-card"><h2>宿主管理鉴权</h2><p>优先复用同源宿主已有登录状态。无法取得时，请临时输入同一个管理 Key；只存本页内存，不写入 localStorage/cookie，刷新即消失。</p><label class="field">临时管理 Key <input id="management-key" type="password" autocomplete="off"></label><button id="connect" class="btn primary">连接</button></section>
+<p id="message" class="session-message" role="status">等待管理鉴权。</p>
 <div id="content" hidden>
-<section><h2>监控对象与名称</h2><p>这里只显示宿主无秘密对象 ID，不展示原 Key、片段或上游账号。选择和命名不修改宿主 Key 配置。移除只停止后续采集，保留名称和已保存历史。</p><p id="catalog-state"></p><label>审计对象 <select id="objects"></select></label><label>名称 <input id="name" maxlength="256" placeholder="例如：合成业务对象"></label><p>名称最多 256 UTF-8 字节，不等于 256 个中文字符。</p><button id="monitor">选择并命名</button><button id="rename">仅改名</button><button id="remove">移除监控</button></section>
-<section><h2>总预算、保留期限与单条正文上限</h2><p id="settings-state"></p><label>总存储预算（MiB） <input id="budget-mib" type="number" min="4" max="1024" step="any" required></label><p>合法范围为 4–1024 MiB，默认 1024 MiB；允许能精确换算为整数字节的小数。预算包含正文、配置、诊断、未知辅助文件和维护临时空间，预留不是额外额度。保存后的预算优先于 YAML 初始默认值；降低预算不删除未过期历史，已有占用超过新预算时停止新采集。正常满额可使用配置预留；主动降额超预算后，部分管理写入可能被拒绝，需调高到足够预算。预算不保证任意流量都能保存七天。</p><label>保留天数 <input id="retention-days" type="number" min="1" max="30" step="1" required></label><p>合法范围为 1–30 天，默认 7 天，从服务端接收提交起算；暂停、移除监控和停机不冻结期限。到期立即退出查询，后台每分钟清理。调长保留期不延长已有历史；缩短会使现有历史提前到期，保存前必须确认。</p><label>UTF-8 字节上限 <input id="max-text-bytes" type="number" min="1" max="65536" step="1" required></label><p>合法范围为 1–65536 字节；仅改变后续提交，已接收副本保留原上限，旧正文不重新截断，不改变模型收到的完整输入。</p><button id="save-settings">保存设置</button><p>三项设置一起保存；取消缩短确认时三项都不提交。逻辑到期和空间回收不等于磁盘、数据库空闲页、快照或备份的安全擦除；应用层不加密。</p></section>
-<section><h2>采集状态</h2><p id="capture-state">等待采集状态。</p><button id="pause">暂停采集</button><button id="resume">恢复采集</button><pre id="health" aria-label="采集状态"></pre><h3>缺口提醒与已阅</h3><p id="gap-unread">缺口提醒状态未知。</p><button id="acknowledge-gaps" disabled>确认当前提醒已阅</button><p id="gap-message">确认只减少当前快照的提醒，不删除历史、不解除故障，也不改变完整性结论；新缺口会重新提醒。</p><p id="gap-acknowledged"></p><h3>当前活动故障</h3><pre id="gap-active"></pre><h3>保留期内缺口历史</h3><pre id="gap-history"></pre><p id="recovery-state"></p><button id="refresh">刷新已保存记录</button></section>
-<section><h2>已保存输入记录</h2><label>历史对象筛选 <select id="object-filter"><option value="">全部对象</option></select></label><label>接收时间起点 <input id="from-filter" type="datetime-local" step="0.001"></label><label>接收时间终点 <input id="to-filter" type="datetime-local" step="0.001"></label><p>按服务端接收时刻筛选，包含起点和终点；输入使用浏览器本地时间。</p><label>客户端请求模型筛选 <input id="model-filter" maxlength="1024" placeholder="客户端提交的精确模型名"></label><label>正文关键词 <input id="keyword-filter" maxlength="65536" placeholder="已保存正文中的字面子串"></label><p>条件取交集；模型名精确匹配，关键词仅忽略英文字母大小写，不解释正则或搜索语法，不搜索未保存部分。模型最多1024 UTF-8字节，关键词最多65536字节。</p><button id="apply-filters">应用筛选</button><button id="clear-filters">清空筛选</button><p id="records-state"></p><p id="empty">没有匹配的已保存记录。入队不等于落盘。</p><table id="records"><thead><tr><th>接收时间</th><th>对象</th><th>协议</th><th>请求模型</th><th>纯文本预览</th><th>状态</th><th>详情</th></tr></thead><tbody></tbody></table><button id="previous">上一页</button><button id="next">下一页</button><span id="page"></span></section>
-<section><h2>单条详情</h2><p id="detail-meta"></p><pre id="detail" aria-label="已保存纯文本正文">请选择一条记录。</pre></section>
+<div class="protected-head"><div class="head-actions"><button id="pause" class="btn"><svg class="icon" aria-hidden="true"><use href="#i-pause"/></svg>暂停采集</button><button id="resume" class="btn"><svg class="icon" aria-hidden="true"><use href="#i-play"/></svg>恢复采集</button><button id="refresh" class="btn primary"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>刷新已保存记录</button></div><div class="secondary-actions"><button id="open-objects" class="btn"><svg class="icon" aria-hidden="true"><use href="#i-users"/></svg>监控对象</button><button id="open-settings" class="btn"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg>存储设置</button></div></div>
+<section id="status-ribbon" class="status-ribbon" aria-label="采集状态摘要"><div class="status-main"><div class="status-line"><span id="capture-badge" class="badge neutral">状态未知</span><span id="capture-summary">正在读取采集状态。</span></div><p id="capture-state">等待采集状态。</p></div><div class="ribbon-actions"><span id="status-updated" class="tiny">状态尚未更新</span><span id="gap-summary" class="gap-summary">提醒状态未知</span><button id="open-diagnostics" class="btn small">查看诊断<svg class="icon" aria-hidden="true"><use href="#i-right"/></svg></button></div></section>
+<section class="panel filters" aria-label="筛选请求"><div class="filter-top"><div class="range-buttons" aria-label="接收时间范围"><button data-range="today">今天</button><button data-range="week">近 7 天</button><button data-range="all" class="active" aria-pressed="true">全部</button><button data-range="custom">自定义</button></div><label class="search-box"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input id="keyword-filter" aria-label="正文关键词" maxlength="65536" placeholder="搜索已保存的输入正文…"></label><div class="filter-apply"><button id="apply-filters" class="btn primary">应用筛选</button><button id="clear-filters" class="btn">清空筛选</button></div></div><div class="filter-grid"><label class="field">历史对象筛选 <select id="object-filter"><option value="">全部对象</option></select></label><label class="field">客户端请求模型筛选 <input id="model-filter" maxlength="1024" placeholder="客户端提交的精确模型名"></label><label class="field">接收时间起点 <input id="from-filter" type="datetime-local" step="0.001"></label><label class="field">接收时间终点 <input id="to-filter" type="datetime-local" step="0.001"></label></div><details class="filter-help"><summary>条件取交集 · 模型精确匹配 · 关键词搜索已保存正文 · 时间包含端点</summary><p>按服务端接收时刻筛选，输入使用浏览器本地时间。关键词仅忽略英文字母大小写，不解释正则或搜索语法，不搜索未保存部分。模型最多1024 UTF-8字节，关键词最多65536字节。时间预设不代表完整历史，超过保留期的数据不可查询。</p></details></section>
+<section class="metrics" aria-label="审计摘要"><article class="metric panel"><div class="metric-title"><span class="metric-icon"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg></span>匹配记录</div><div id="metric-matched" class="metric-value">未知</div><div id="matched-note" class="metric-note">当前已应用筛选</div></article><article class="metric panel"><div class="metric-title"><span class="metric-icon green"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg></span>本次运行已保存</div><div id="metric-saved" class="metric-value">未知</div><div class="metric-note">重启后重新计数，不等于历史总量</div></article><article class="metric panel"><div class="metric-title"><span class="metric-icon purple"><svg class="icon" aria-hidden="true"><use href="#i-stack"/></svg></span>当前排队</div><div id="metric-queued" class="metric-value">未知</div><div class="metric-note">入队不等于保存成功</div></article><article class="metric panel"><div class="metric-title"><span class="metric-icon amber"><svg class="icon" aria-hidden="true"><use href="#i-database"/></svg></span>存储占用</div><div class="metric-value storage-value"><span id="metric-used">未知</span><span id="storage-unit" class="unit"></span></div><progress id="storage-meter" aria-label="保守存储占用" max="1" value="0" hidden></progress><div class="metric-note">包含配置、诊断和维护预留</div></article></section>
+<section class="panel results" aria-label="已保存输入记录"><div class="results-head"><div class="section-heading"><svg class="icon muted" aria-hidden="true"><use href="#i-activity"/></svg><h2>输入记录</h2><span id="result-count" class="count-pill">未知</span></div><div class="result-tools"><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>仅已落盘<span class="refresh-note"> · 记录手动刷新</span></div></div><p id="records-state"></p><p id="empty" hidden>没有匹配的已保存记录。入队不等于落盘。</p><div class="table-scroll"><table id="records" class="request-table"><colgroup><col><col><col><col><col><col><col></colgroup><thead><tr><th>接收时间</th><th>对象</th><th>协议</th><th>请求模型</th><th>纯文本预览</th><th>状态</th><th>详情</th></tr></thead><tbody></tbody></table></div><div class="results-foot"><span id="page"></span><div class="pagination"><button id="previous" class="btn small">上一页</button><button id="next" class="btn small">下一页</button></div></div></section>
+<dialog id="detail-dialog" class="drawer" aria-labelledby="detail-title"><div class="drawer-inner"><header class="drawer-header"><div><h2 id="detail-title">单条详情</h2><p>本次客户端提交中已保存的允许内容</p></div><button id="close-detail" class="btn ghost icon-only" aria-label="关闭输入详情"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></header><div class="drawer-scroll"><div class="side-content"><p id="detail-meta" class="detail-meta"></p><div class="detail-heading"><h3>已保存纯文本</h3><span id="detail-bytes" class="tiny"></span></div><pre id="detail" tabindex="0" aria-label="已保存纯文本正文">请选择一条记录。</pre><p>这里只展示已保存的允许内容，不代表完整请求、完整会话或模型回复。视觉省略不会改变这里的已保存正文。</p></div></div><footer class="drawer-footer">纯文本展示，不执行代码或渲染 HTML · 按 Esc 关闭</footer></div></dialog>
+<dialog id="management-dialog" class="drawer" aria-labelledby="management-title"><div class="drawer-inner"><header class="drawer-header"><div><h2 id="management-title">监控对象</h2><p>修改仅作用于输入审计，不改变宿主模型调用配置</p></div><button id="close-management" class="btn ghost icon-only" aria-label="关闭管理面板"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></header><div class="drawer-scroll"><div class="side-content"><section id="objects-panel"><p>这里只显示宿主无秘密对象 ID，不展示原 Key、片段或上游账号。选择和命名不修改宿主 Key 配置。移除只停止后续采集，保留名称和已保存历史。</p><p id="catalog-state"></p><label class="field">审计对象 <select id="objects"></select></label><label class="field">名称 <input id="name" maxlength="256" placeholder="例如：合成业务对象"></label><p>名称最多 256 UTF-8 字节，不等于 256 个中文字符。</p><button class="btn" id="monitor">选择并命名</button><button class="btn" id="rename">仅改名</button><button class="btn" id="remove">移除监控</button></section><section id="settings-panel" hidden><p id="settings-state"></p><label class="field">总存储预算（MiB） <input id="budget-mib" type="number" min="4" max="1024" step="any" required></label><p>合法范围为 4–1024 MiB，默认 1024 MiB；允许能精确换算为整数字节的小数。预算包含正文、配置、诊断、未知辅助文件和维护临时空间，预留不是额外额度。保存后的预算优先于 YAML 初始默认值；降低预算不删除未过期历史，已有占用超过新预算时停止新采集。正常满额可使用配置预留；主动降额超预算后，部分管理写入可能被拒绝，需调高到足够预算。预算不保证任意流量都能保存七天。</p><label class="field">保留天数 <input id="retention-days" type="number" min="1" max="30" step="1" required></label><p>合法范围为 1–30 天，默认 7 天，从服务端接收提交起算；暂停、移除监控和停机不冻结期限。到期立即退出查询，后台每分钟清理。调长保留期不延长已有历史；缩短会使现有历史提前到期，保存前必须确认。</p><label class="field">UTF-8 字节上限 <input id="max-text-bytes" type="number" min="1" max="65536" step="1" required></label><p>合法范围为 1–65536 字节；仅改变后续提交，已接收副本保留原上限，旧正文不重新截断，不改变模型收到的完整输入。</p><button class="btn primary" id="save-settings">保存设置</button><p>三项设置一起保存；取消缩短确认时三项都不提交。逻辑到期和空间回收不等于磁盘、数据库空闲页、快照或备份的安全擦除；应用层不加密。</p></section><section id="diagnostics-panel" hidden><pre id="health" aria-label="采集状态"></pre><h3>缺口提醒与已阅</h3><p id="gap-unread">缺口提醒状态未知。</p><button class="btn" id="acknowledge-gaps" disabled>确认当前提醒已阅</button><p id="gap-message">确认只减少当前快照的提醒，不删除历史、不解除故障，也不改变完整性结论；新缺口会重新提醒。</p><p id="gap-acknowledged"></p><h3>当前活动故障</h3><pre id="gap-active"></pre><h3>保留期内缺口历史</h3><pre id="gap-history"></pre><p id="recovery-state"></p></section></div></div><footer class="drawer-footer"><p id="panel-message" role="status"></p>只展示受管理鉴权保护的信息，不展示客户端 Key 或上游凭据。</footer></div></dialog>
 </div>
-<script>
+<footer class="bottom-note"><span><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>仅供隔离合成数据验收 · 正文不自动脱敏 · 应用层不加密</span><span>状态每 10 秒更新</span></footer><details class="help-details"><summary>支持范围与使用说明</summary><p id="notice">当前支持 Chat Completions、Responses HTTP、Responses WebSocket 与 Anthropic Messages：仅审查本次末尾新用户消息；WebSocket 按每次客户端模型提交独立记录，不记录握手或控制消息；Responses 字符串 input 直接作为本次用户文本；Anthropic 仅含 tool_result 的末尾 user 正常跳过，混合消息只保留新内容，不提取工具结果内部数据。图片/音频/视频/文件只保存固定占位符，不保存附件载荷或工具内容，不回查 previous_response_id 或会话历史。未知块会产生提取不完整标记与缺口诊断；普通文本中的链接、Base64 和秘密不自动脱敏。正文按配置保存 1–65536 字节内的 UTF-8 前缀；单条上限变更只影响后续提交，无须重连。常规可处理审计故障采用 fail-open，不拒绝或修改模型调用，但同步输入观察仍有处理耗时。native 与宿主同进程，进程级崩溃不隔离；异常重启只报告真实不确定性，重启诊断不等于完整故障恢复，不保证零丢失或 exactly-once。应用层不加密；仅供隔离合成数据验收，不适用于生产审计。</p></details>
+</div><script>
 'use strict';
 // 认证材料只驻留闭包；所有数据通过同源受保护 API 获取，禁止把正文/名称作为 HTML。
 (() => {
@@ -27,8 +69,43 @@
   let knownObjects = [], selectedFilter = '', busy = false, capturePaused = false, observerAvailable = false;
   let appliedFilters = {}, currentRetentionDays, settingsAvailable = false, recordsAvailable = false, gapAlerts, statusController;
   const base = '/v0/management/plugins/request-input-audit';
+  document.documentElement.classList.toggle('embedded',window.self !== window.top);
   const $ = id => document.getElementById(id);
-  const message = text => { $('message').textContent = text; };
+  const message = text => { $('message').textContent = text;$('panel-message').textContent = text; };
+  let detailTrigger, detailFocusPending = false;
+  // 详情加载期间原按钮被禁用；提前关闭抽屉时，等 guard 解锁后再归还焦点。
+  function restoreDetailFocus() {
+    if (!detailFocusPending || busy) return;
+    detailFocusPending = false;
+    const active = document.activeElement;
+    if (detailTrigger?.isConnected && !$('detail-dialog').open && !$('management-dialog').open && (active === document.body || $('detail-dialog').contains(active))) detailTrigger.focus();
+  }
+  const panelNames = {objects:'监控对象与名称',settings:'总预算、保留期限与单条正文上限',diagnostics:'采集诊断'};
+  function closeDialogs() {
+    for (const id of ['detail-dialog','management-dialog']) if ($(id).open) $(id).close();
+  }
+  function openPanel(name) {
+    for (const panel of Object.keys(panelNames)) $(panel+'-panel').hidden = panel !== name;
+    $('management-title').textContent = panelNames[name];
+    if (!$('management-dialog').open) $('management-dialog').showModal();
+  }
+  function resetStatusSummary() {
+    for (const id of ['metric-saved','metric-queued','metric-used']) $(id).textContent = '未知';
+    $('storage-unit').textContent = '';$('storage-meter').hidden = true;
+    $('capture-badge').className = 'badge neutral';$('capture-badge').textContent = '状态未知';
+    $('capture-summary').textContent = '无法确认当前是否可采集。';
+    $('gap-summary').textContent = '提醒状态未知';$('status-updated').textContent = '状态更新失败';
+    $('status-ribbon').className = 'status-ribbon warning';
+  }
+  function setRange(range) {
+    for (const button of document.querySelectorAll('[data-range]')) {
+      const selected = button.dataset.range === range;
+      button.classList.toggle('active',selected);button.setAttribute('aria-pressed',String(selected));
+    }
+  }
+  function textCell(className, text) {
+    const node = document.createElement('span');node.className = className;node.textContent = text;return node;
+  }
   function inheritedKey() {
     try {
       let raw = localStorage.getItem('cli-proxy-auth');
@@ -52,7 +129,7 @@
     };
     checkCurrent();
     if (response.status === 401 || response.status === 403) {
-      key = '';session++; $('login').hidden = false; $('content').hidden = true;
+      key = '';session++; closeDialogs();clearRecords();resetStatusSummary();$('login').hidden = false; $('content').hidden = true;
       throw new Error('管理鉴权失败，请重新输入临时管理 Key。');
     }
     if (response.status === 409 && path === '/settings') throw new Error('保留期已变化，缩短需要确认；请刷新设置后重试，现有历史将提前到期。');
@@ -78,6 +155,8 @@
     $('previous').disabled = busy || !recordsAvailable || offset===0;$('next').disabled = busy || !recordsAvailable || offset+20>=total;
     for (const id of ['connect','refresh','objects','name','object-filter','from-filter','to-filter','model-filter','keyword-filter','apply-filters','clear-filters']) $(id).disabled = busy;
     for (const button of $('records').querySelectorAll('tbody button')) button.disabled = busy;
+    for (const button of document.querySelectorAll('[data-range]')) button.disabled = busy;
+    restoreDetailFocus();
   }
   function selectObject() {
     const object = knownObjects.find(item => item.id === $('objects').value);
@@ -136,6 +215,25 @@
     $('capture-state').textContent = capture.join(' ');
     $('health').textContent = '观察契约：'+(observerAvailable?'可用':'不可用')+'\n存储运行状态：'+(state.state??'不可用')+'\n主动暂停：'+(capturePaused?'是':'否')+'\n原因：'+(status.reason||state.reason||'无')+'\n已保存：'+(state.saved??'未知')+'；排队：'+(state.queued??'未知')+'\n保守占用：'+(state.used_bytes??'未知')+' / '+(state.budget_bytes??'未知')+' 字节\n超额：'+(state.over_budget_bytes??'未知')+' 字节\n配置与维护预留：'+(state.reserved_bytes??'未知')+' 字节（包含在预算内，不是额外额度）\n恢复所需空闲：'+(state.resume_required_bytes??'未知')+' 字节（预留 + 最坏一条编码记录 + 4096 字节轮转开销 + 256 KiB 滞回量）\n容量告警：'+(state.capacity_gap?'已记录；保留期内恢复或重启不清除，未恢复故障持续显示':'未记录；不代表完整历史无缺口')+'\n诊断持久化：'+(state.diagnostics_persisted===true?'已保存':'未保存或未知；不能据此报告无缺口')+'\n本次运行已知缺口计数（重启归零，不代表历史无缺口）：'+JSON.stringify(gaps)+'\n恢复主动采集不会解除存储故障；过期数据后台每分钟清理。常规故障 fail-open 不等于 native 进程级崩溃隔离。';
     const alerts = state.gap_alerts;gapAlerts = alerts;
+    $('metric-saved').textContent = state.saved ?? '未知';$('metric-queued').textContent = state.queued ?? '未知';
+    $('metric-used').textContent = state.used_bytes == null ? '未知' : (state.used_bytes / 1048576).toLocaleString('zh-CN',{maximumFractionDigits:1});
+    $('storage-unit').textContent = state.budget_bytes == null ? '' : '/ '+(state.budget_bytes / 1048576).toLocaleString('zh-CN',{maximumFractionDigits:1})+' MiB';
+    const storageKnown = state.used_bytes != null && state.budget_bytes > 0;
+    $('storage-meter').hidden = !storageKnown;
+    if (storageKnown) {$('storage-meter').max = state.budget_bytes;$('storage-meter').value = Math.min(state.used_bytes,state.budget_bytes);}
+    const collecting = observerAvailable && state.state === 'active' && !capturePaused && state.diagnostics_persisted === true;
+    const storageFault = state.state !== 'active' && state.reason !== 'budget_exhausted';
+    const severity = collecting ? 'green' : storageFault || !observerAvailable || state.diagnostics_persisted !== true ? 'red' : 'amber';
+    $('capture-badge').className = 'badge '+severity;
+    $('capture-badge').textContent = collecting ? '正在采集' : !observerAvailable ? '观察不可用' : capturePaused ? '主动暂停' : state.over_budget_bytes > 0 || state.reason === 'budget_exhausted' ? '容量暂停' : '采集不可用';
+    $('capture-summary').textContent = '观察契约'+(observerAvailable?'可用':'不可用')+' · 存储 '+(state.state ?? '未知')+' · 诊断'+(state.diagnostics_persisted === true?'已保存':'未保存或未知');
+    $('status-ribbon').className = 'status-ribbon'+(collecting?'':severity === 'red'?' failure':' warning');
+    $('gap-summary').textContent = !alerts ? '提醒状态未知' : alerts.unread ? '有未阅缺口提醒' : '当前提醒均已阅';
+    // 历史缺口、活动故障及重启不确定性即使已阅也必须在主页面可见。
+    const activeReasons = alerts ? alerts.items.filter(item=>item.active).map(item=>item.reason) : [];
+    if (activeReasons.length) $('capture-summary').textContent += ' · 活动故障：'+activeReasons.join('、');
+    if (state.recovery?.uncertain) $('capture-summary').textContent += ' · 重启不确定性：可能存在未落盘输入，数量和时段以诊断为准';
+    $('status-updated').textContent = '状态更新于 '+new Date().toLocaleTimeString('zh-CN',{hour12:false});
     $('gap-acknowledged').textContent = alerts ? '已阅原因：'+(alerts.items.filter(item=>!item.unread).map(item=>item.reason).join('、') || '暂无')+'。已阅不代表故障恢复或历史完整。' : '已阅状态未知。';
     $('gap-unread').textContent = !alerts ? '缺口提醒状态未知。' : alerts.unread ? '有未阅缺口提醒；请查看历史与当前活动故障。' : '当前缺口提醒均已阅；不代表历史完整或故障恢复。';
     $('gap-active').textContent = !alerts ? '当前活动故障：状态未知。' : alerts.items.filter(item=>item.active).map(gapDescription).join('\n\n') || '未报告活动故障；不代表历史无缺口。';
@@ -145,7 +243,9 @@
     $('recovery-state').textContent = !recovery ? '重启不确定性：状态未知。' : recovery.uncertain ? '重启不确定性：可能存在未落盘输入；发现时刻：'+(recovery.detected_at || '未知')+'；原因：'+recovery.reason+'；丢失数量：'+(recovery.lost_count ?? '未知')+'；丢失时段：起点 '+(recovery.lost_from ?? '未知')+'，终点 '+(recovery.lost_until ?? '未知')+'。发现时刻不代表损失开始或结束。' : '重启不确定性：未检测到；不代表历史无缺口。';
   }
   function clearRecords() {
+    if ($('detail-dialog').open) $('detail-dialog').close();detailTrigger = undefined;detailFocusPending = false;
     recordsAvailable = false;total = 0;
+    $('metric-matched').textContent = '未知';$('result-count').textContent = '未知';$('matched-note').textContent = '当前查询结果未知';$('detail-bytes').textContent = '';
     $('records').querySelector('tbody').replaceChildren();$('empty').hidden = true;$('page').textContent = '';
     // 查询失败或配置刷新后不能继续把旧详情当作当前结果。
     $('detail-meta').textContent = '';$('detail').textContent = '请选择一条记录。';
@@ -159,19 +259,35 @@
     const tbody=$('records').querySelector('tbody');tbody.replaceChildren();
     for (const record of data.records) {
       const row=document.createElement('tr');
-      for (const text of [record.received_at,record.name||record.object_id,protocolLabel(record.protocol),record.model||'未知',record.preview,contentStatus(record)]) {
-        const cell=document.createElement('td');cell.textContent=text;row.append(cell);
+      const time=document.createElement('td'), received=new Date(record.received_at);
+      time.title=record.received_at;time.append(textCell('time-primary',received.toLocaleTimeString('zh-CN',{hour12:false})),document.createElement('br'),textCell('time-secondary',received.toLocaleDateString('zh-CN',{month:'2-digit',day:'2-digit'})));
+      const object=document.createElement('td'), name=textCell('object-name',record.name||record.object_id);name.title=record.name||record.object_id;
+      const objectId=textCell('object-id',record.object_id);objectId.title=record.object_id;object.append(name,objectId);
+      const protocol=document.createElement('td');protocol.append(textCell('protocol',protocolLabel(record.protocol)));
+      const model=document.createElement('td'), modelText=textCell('model',record.model||'未知');modelText.title=record.model||'未知';model.append(modelText);
+      const preview=document.createElement('td');preview.append(textCell('preview',record.preview));
+      const status=document.createElement('td'), flags=document.createElement('span');flags.className='flags';
+      for (const label of contentStatus(record).split(' · ')) {
+        if (flags.childNodes.length) flags.append(textCell('flag-separator',' · '));
+        flags.append(textCell('badge '+(label==='已截断'?'amber':label==='提取不完整'?'purple':'green'),label));
       }
-      const cell=document.createElement('td'), button=document.createElement('button');button.textContent='查看';
+      status.append(flags);row.append(time,object,protocol,model,preview,status);
+      const cell=document.createElement('td'), button=document.createElement('button');button.className='btn ghost view-button';button.textContent='查看';
       button.addEventListener('click',()=>guard(async()=>{
-        $('detail-meta').textContent = '';$('detail').textContent = '正在加载详情。';
+        detailTrigger=button;
+        for (const item of $('records').querySelectorAll('tbody tr')) item.classList.toggle('selected',item===row);
+        $('detail-meta').textContent = '';$('detail-bytes').textContent = '';$('detail').textContent = '正在加载详情。';
+        if (!$('detail-dialog').open) $('detail-dialog').showModal();
         try {
           const r=await api('/detail?id='+encodeURIComponent(record.id));
           $('detail-meta').textContent=(r.name||r.object_id)+' · '+r.received_at+' · '+protocolLabel(r.protocol)+' · '+(r.model||'未知')+' · '+contentStatus(r);$('detail').textContent=r.text;
+          $('detail-bytes').textContent = new TextEncoder().encode(r.text).length.toLocaleString('zh-CN')+' 字节';
         } catch(error) {$('detail').textContent = '详情加载失败：'+error.message;throw error;}
       }));
       cell.append(button);row.append(cell);tbody.append(row);
     }
+    $('metric-matched').textContent=String(total);$('result-count').textContent=String(total);
+    $('matched-note').textContent='当前已应用筛选 · '+(selectedFilter?'指定对象':'全部对象')+(appliedFilters.from||appliedFilters.to?' · 指定时间':' · 全部接收时间');
     $('page').textContent='第 '+(Math.floor(offset/20)+1)+' 页；匹配 '+total+' 条';
     updateControls();
   }
@@ -193,7 +309,7 @@
     try {renderStatus(await api('/status','GET',undefined,controller.signal));}
     catch(error) {
       if (!key || error.name === 'AbortError') throw error;
-      observerAvailable = false;capturePaused = false;gapAlerts = undefined;
+      observerAvailable = false;capturePaused = false;gapAlerts = undefined;resetStatusSummary();
       $('capture-state').textContent = '采集状态加载失败：'+error.message;
       $('health').textContent = '';$('gap-history').textContent = '缺口历史：状态未知。';$('recovery-state').textContent = '重启不确定性：状态未知。';
       $('gap-unread').textContent = '缺口提醒状态未知。';$('gap-active').textContent = '当前活动故障：状态未知。';$('gap-acknowledged').textContent = '已阅状态未知。';
@@ -278,15 +394,38 @@
   }));
   $('clear-filters').addEventListener('click',()=>guard(async()=>{
     for (const id of ['from-filter','to-filter','model-filter','keyword-filter']) $(id).value = '';
-    selectedFilter = '';$('object-filter').value = '';appliedFilters = {};offset = 0;await refresh();
+    selectedFilter = '';$('object-filter').value = '';appliedFilters = {};setRange('all');offset = 0;await refresh();
   }));
   $('object-filter').addEventListener('change',()=>guard(async()=>{selectedFilter=$('object-filter').value;offset=0;await refresh();}));
   $('refresh').addEventListener('click',()=>guard(async()=>{await refresh();}));
   $('previous').addEventListener('click',()=>guard(async()=>{offset=Math.max(0,offset-20);await refresh();}));
   $('next').addEventListener('click',()=>guard(async()=>{if(offset+20<total){offset+=20;await refresh();}}));
+  for (const name of Object.keys(panelNames)) $('open-'+name).addEventListener('click',()=>openPanel(name));
+  $('close-management').addEventListener('click',()=>$('management-dialog').close());
+  $('close-detail').addEventListener('click',()=>$('detail-dialog').close());
+  $('detail-dialog').addEventListener('close',()=>{detailFocusPending = true;restoreDetailFocus();});
+  $('theme-toggle').addEventListener('click',()=>{
+    const dark = document.documentElement.dataset.theme !== 'dark';
+    document.documentElement.dataset.theme = dark?'dark':'light';
+    $('theme-toggle').setAttribute('aria-label',dark?'切换为浅色主题':'切换为深色主题');
+    $('theme-toggle').querySelector('use').setAttribute('href',dark?'#i-sun':'#i-moon');
+  });
+  // 预设使用浏览器本地自然日；每次点击重新取当前时刻，不固定为页面打开时间。
+  for (const button of document.querySelectorAll('[data-range]')) button.addEventListener('click',()=>{
+    const range = button.dataset.range;setRange(range);
+    if (range === 'custom') {$('from-filter').focus();return;}
+    let start = '';
+    if (range !== 'all') {
+      const date = new Date();date.setHours(0,0,0,0);if (range === 'week') date.setDate(date.getDate()-6);
+      start = new Date(date-date.getTimezoneOffset()*60000).toISOString().slice(0,19);
+    }
+    $('from-filter').value = start;$('to-filter').value = '';$('apply-filters').click();
+  });
+  for (const id of ['from-filter','to-filter']) $(id).addEventListener('input',()=>setRange('custom'));
+  for (const id of ['keyword-filter','model-filter']) $(id).addEventListener('keydown',event=>{if(event.key==='Enter') $('apply-filters').click();});
   // 十秒只更新状态，不读取设置、目录或列表，保留用户尚未提交的表单内容。
   setInterval(autoRefreshStatus,10000);
-  window.addEventListener('pagehide',()=>{key='';session++;statusController?.abort();$('content').hidden = true;$('login').hidden = false;});
+  window.addEventListener('pagehide',()=>{key='';session++;statusController?.abort();closeDialogs();clearRecords();resetStatusSummary();$('content').hidden = true;$('login').hidden = false;});
   key=inheritedKey();if(key)guard(connect);
 })();
 </script></body></html>

@@ -38,6 +38,7 @@ module.exports = async (page, options = {}) => {
   }
   /** 填写预算 MiB、保留天数和正文上限；成功无返回值，页面缺失时抛错。 */
   async function fill(mib, days = 7, limit = 65536) {
+    if (await frame.locator('#management-dialog').isHidden()) await frame.locator('#open-settings').click();
     await frame.locator('#budget-mib').fill(String(mib));
     await frame.locator('#retention-days').fill(String(days));
     await frame.locator('#max-text-bytes').fill(String(limit));
@@ -52,6 +53,7 @@ module.exports = async (page, options = {}) => {
   }
   /** 刷新当前公开状态并等待页面结束；成功无返回值，页面或网络失败时抛错。 */
   async function refresh() {
+    if (await frame.locator('#management-dialog').isVisible()) await frame.locator('#close-management').click();
     await frame.locator('#refresh').click();
     await idle();
   }
@@ -91,7 +93,7 @@ module.exports = async (page, options = {}) => {
       page.on('dialog',dismiss);
       try {
         await frame.locator('#save-settings').click();
-        await frame.getByRole('status').filter({hasText:'总预算必须'}).waitFor();
+        await frame.locator('#message').filter({hasText:'总预算必须'}).waitFor();
         await idle();
       } finally { page.off('dialog',dismiss); }
       assert(posts.length===before && dialogs===0, '非法预算发送了 POST 或缩短确认');
@@ -152,14 +154,15 @@ module.exports = async (page, options = {}) => {
     const retained = await read('/records?q='+encodeURIComponent(runId));
     assert(retained.total===70, '降低预算删除了本轮历史或容量缺口被误存为正文');
     await refresh();
-    await frame.locator('#health').filter({hasText:'容量告警：已记录'}).waitFor();
-    await frame.locator('#health').filter({hasText:'诊断持久化：已保存'}).waitFor();
+    await frame.locator('#health').filter({hasText:'容量告警：已记录'}).waitFor({state:'attached'});
+    await frame.locator('#health').filter({hasText:'诊断持久化：已保存'}).waitFor({state:'attached'});
     const health = await frame.locator('#health').textContent();
     assert(health.includes('超额：'+gap.state.over_budget_bytes) && health.includes('配置与维护预留：') && health.includes('恢复所需空闲：'), '状态未展示实际超额、预留和恢复空间');
     await save(16);
     const resumed = await read('/status');
     assert(resumed.state.state==='active' && !resumed.state.capture_paused && resumed.state.capacity_gap, '调高预算没有恢复或清除了先前告警');
     await frame.locator('#capture-state').filter({hasText:'实际可采集'}).waitFor();
+    await frame.locator('#close-management').click();
     await frame.locator('#pause').click();
     await idle();
     await frame.locator('#capture-state').filter({hasText:'主动暂停'}).waitFor();
@@ -167,6 +170,7 @@ module.exports = async (page, options = {}) => {
     const paused = await read('/status');
     assert(paused.state.capture_paused && paused.state.state==='active', '调整预算意外解除了主动暂停');
     await frame.locator('#capture-state').filter({hasText:'主动暂停'}).waitFor();
+    await frame.locator('#close-management').click();
     await frame.locator('#resume').click();
     await idle();
     await frame.locator('#capture-state').filter({hasText:'实际可采集'}).waitFor();

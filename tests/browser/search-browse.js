@@ -1,5 +1,8 @@
 // 本场景在真实管理菜单中验证组合搜索、分页与不可信纯文本；同实例两轮仅使用本轮标记和记录 ID。
 // page 是已启动的合成实例，options 指定有限状态截图；成功返回布尔证据，失败抛固定错误，不保存正文或凭据。
+const verifyLayout = require('./ui-layout.js');
+
+/** 验证 page 的组合查询、安全浏览与布局；options 指定有限截图，返回证据，查询或页面行为不符时抛错。 */
 module.exports = async (page, options) => {
   /** 校验公开结果；condition 为验证条件，message 为固定错误，失败抛错，成功无返回值。 */
   const assert = (condition, message) => { if (!condition) throw new Error(message); };
@@ -67,8 +70,12 @@ module.exports = async (page, options) => {
     const response=await pending;
     assert(response.status()===200,'页面筛选查询失败');
     await frame.getByRole('button',{name:'应用筛选',exact:true}).waitFor({state:'visible'});
-    await page.waitForFunction(()=>!document.querySelector('iframe[title="输入审计"]').contentDocument.querySelector('#apply-filters').disabled);
-    return response.json();
+    const result=await response.json();
+    await page.waitForFunction(total=>{
+      const doc=document.querySelector('iframe[title="输入审计"]').contentDocument;
+      return !doc.querySelector('#apply-filters').disabled && doc.querySelector('#metric-matched').textContent===String(total);
+    },result.total);
+    return result;
   }
   try {
     await frame.getByRole('combobox',{name:'历史对象筛选',exact:true}).selectOption(target.object_id);
@@ -83,12 +90,14 @@ module.exports = async (page, options) => {
     await frame.locator('#page').filter({hasText:'第 1 页；匹配 23 条'}).waitFor();
     const row=frame.locator('#records tbody tr').filter({hasText:marker+'ENTRY-22'});
     await row.getByRole('cell',{name:'已截断 · 提取不完整',exact:true}).waitFor();
-    await row.getByRole('cell',{name,exact:true}).waitFor();
+    await row.locator('.object-name').waitFor();
+    assert(await row.locator('.object-name').textContent()===name,'搜索结果未精确显示纯文本对象名称');
     await row.getByRole('button',{name:'查看',exact:true}).click();
     await frame.locator('#detail-meta').filter({hasText:'已截断 · 提取不完整'}).waitFor();
     const visible=await frame.locator('#detail').evaluate(element=>({text:element.textContent,bytes:new TextEncoder().encode(element.textContent).length,nodes:element.querySelectorAll('img,a,script,style').length,injected:element.ownerDocument.defaultView.__searchInjected===true}));
     assert(visible.text===text && visible.bytes===65535 && visible.nodes===0 && !visible.injected,'搜索详情没有保持已保存纯文本');
     assert(await frame.locator('#records b,#records img,#records script,#detail-meta b').count()===0,'名称或预览被解析为HTML');
+    await frame.locator('#close-detail').click();
     await row.getByRole('cell',{name:'已截断 · 提取不完整',exact:true}).screenshot({path:options.screenshot});
     const next=page.waitForResponse(r=>r.url().startsWith(api+'/records?')&&new URL(r.url()).searchParams.get('offset')==='20');
     await frame.getByRole('button',{name:'下一页',exact:true}).click();
@@ -115,5 +124,6 @@ module.exports = async (page, options) => {
     assert(await frame.locator('#records img,#records script,#records style').count()===0,'客户端模型被解释为HTML');
     assert(external.length===0,'搜索内容触发外部请求');
   } finally {page.off('request',onRequest);}
-  return {intersection:true,pagination:true,filterReset:true,singleDetail:true,contentFlags:true,plainText:true,externalRequests:0};
+  const layout=await verifyLayout(page,{keyword:marker,recordId:target.id,text});
+  return {intersection:true,pagination:true,filterReset:true,singleDetail:true,contentFlags:true,plainText:true,externalRequests:0,layout};
 };
