@@ -1,6 +1,6 @@
 // 本场景从真实管理页面与公开 API 验证存储故障可见性；文件权限和进程控制只由 runner 的隔离测试控制器执行。
 'use strict';
-/** 在合成 page 验证首次对象查询失败仍展示状态；options 提供真实故障控制与有限截图，返回证据，失败抛错。 */
+/** 在合成 page 验证故障可见性、缺口已阅和自动提醒；options 提供真实故障控制与有限截图，返回证据，失败抛错。 */
 module.exports = async (page, options = {}) => {
   /** 核对公开行为 condition；不符合时抛出固定 message，成功无返回值。 */
   const assert = (condition, message) => {
@@ -72,6 +72,32 @@ module.exports = async (page, options = {}) => {
     const history=await frame.locator('#gap-history').textContent(), recovery=await frame.locator('#recovery-state').textContent();
     assert(history.includes('unsupported_content') && history.includes(restarted.state.gap_history.unsupported_content),'页面没有展示历史固定原因和最后时刻');
     assert(recovery.includes('发现时刻：'+restarted.state.recovery.detected_at) && recovery.includes('丢失数量：未知') && recovery.includes('起点 未知，终点 未知') && recovery.includes('不代表损失开始或结束'),'页面把重启未知数量或时段填零/伪造时间');
+    // 未知块的允许正文已保存；历史必须明确是部分提取，不能冒充整条写入失败。
+    assert(history.includes('提取不完整的提交') && history.includes('不等于整条写入失败'),'历史未区分部分提取与整条写入失败');
+    assert((await frame.locator('#gap-unread').textContent()).includes('有未阅缺口提醒'),'真实新缺口没有未阅提醒');
+    // 确认只修改提醒，不删除正文、缺口历史或重启不确定性。
+    await frame.getByRole('button',{name:'确认当前提醒已阅',exact:true}).click();await idle();
+    await frame.locator('#gap-unread').filter({hasText:'当前缺口提醒均已阅'}).waitFor();
+    assert((await frame.locator('#gap-history').textContent()).includes('unsupported_content') && (await read('/records?q='+runId)).total===1,'已阅确认删除历史或输入');
+    assert((await frame.locator('#recovery-state').textContent()).includes('丢失数量：未知'),'已阅确认改变重启完整性结论');
+    await options.restart();
+    await frame.locator('#refresh').click();await idle();
+    assert((await read('/status')).state.gap_alerts.items.find(item=>item.reason==='unsupported_content').unread===false,'已阅确认没有跨重启保存');
+    assert(/unsupported_content[^\n]*已阅/.test(await frame.locator('#gap-history').textContent()),'页面重启后未保留已阅历史');
+    // 新的真实未知块应由定时状态查询重新提醒；草稿与记录查询不能被后台刷新改动。
+    await frame.locator('#max-text-bytes').fill('321');
+    await frame.locator('#keyword-filter').fill('未提交的合成筛选');
+    const backgroundPaths=[];
+    /** 记录本轮 page 请求的保护路径，供自动刷新范围断言；无返回值，不修改请求。 */
+    const observe=request=>{const url=new URL(request.url());if(url.pathname.startsWith('/v0/management/plugins/request-input-audit/'))backgroundPaths.push(url.pathname.slice(new URL(api).pathname.length));};
+    page.on('request',observe);
+    try {
+      await submit([{type:'text',text:runId+'-new-gap'},{type:'future-browser-audit',payload:'synthetic unknown only'}]);
+      await frame.locator('#gap-history').filter({hasText:/unsupported_content[^\n]*未阅/}).waitFor({timeout:20000});
+      assert(backgroundPaths.length>0 && backgroundPaths.every(path=>path==='/status'),'自动刷新读取了状态以外的保护接口');
+      assert(await frame.locator('#max-text-bytes').inputValue()==='321' && await frame.locator('#keyword-filter').inputValue()==='未提交的合成筛选','自动刷新覆盖设置或筛选草稿');
+      assert((await frame.locator('#gap-unread').textContent()).includes('有未阅缺口提醒'),'新缺口没有恢复未阅提醒');
+    } finally {page.off('request',observe);}
     await options.storageFault(true);
     await row.getByRole('button',{name:'查看',exact:true}).click();
     await frame.getByRole('status').filter({hasText:'HTTP'}).waitFor();
@@ -85,6 +111,12 @@ module.exports = async (page, options = {}) => {
     assert((await frame.locator('#capture-state').textContent()).includes('storage_error'),'列表刷新失败遮住了健康状态');
     const failedModel=await page.request.post(origin+'/v1/chat/completions',{headers:{Authorization:'Bearer synthetic-client-audit-a-only'},data:{model:'audit-test-model',messages:[{role:'user',content:runId+'-failed-save'}]}});
     assert(failedModel.status()===200,'真实存储故障拒绝模型调用');
+    await frame.locator('#refresh').click();await idle();
+    await frame.locator('#gap-active').filter({hasText:'storage_error'}).waitFor();
+    await frame.getByRole('button',{name:'确认当前提醒已阅',exact:true}).click();await idle();
+    assert((await frame.locator('#gap-unread').textContent()).includes('当前缺口提醒均已阅'),'活动故障的已阅确认未生效');
+    assert(/storage_error[^\n]*故障仍活动[^\n]*已阅/.test(await frame.locator('#gap-active').textContent()),'已阅确认隐藏或解除了活动故障');
+    assert(!(await frame.locator('#capture-state').textContent()).includes('实际可采集：'),'已阅确认把活动存储故障报告为正常');
     await options.storageFault(false);
     await options.restart();
     // 初始化失败使 collector 不存在，/settings 真正返回503；不通过浏览器拦截伪造错误或 status。
@@ -115,7 +147,7 @@ module.exports = async (page, options = {}) => {
     await frame.getByRole('status').filter({hasText:'管理鉴权通过'}).waitFor();
     assert((await frame.locator('#notice').textContent()).includes('fail-open') && (await frame.locator('#notice').textContent()).includes('进程级崩溃不隔离'),'页面缺少常规fail-open与native不隔离说明');
     if(options.screenshot)await frame.locator('#recovery-state').screenshot({path:options.screenshot});
-    return {runId,realStorageFailure:true,firstLoginStatusVisible:true,failedListsCleared:true,failedDetailCleared:true,historySurvivedRestart:true,restartLossUnknown:true,settingsFailureVisible:true,authenticationHidden:true,modelFailOpen:true};
+    return {runId,realStorageFailure:true,firstLoginStatusVisible:true,failedListsCleared:true,failedDetailCleared:true,historySurvivedRestart:true,restartLossUnknown:true,partialExtractionDistinct:true,acknowledgementSurvivedRestart:true,newGapUnread:true,activeFaultVisibleAfterAcknowledgement:true,statusOnlyAutoRefresh:true,draftsPreserved:true,settingsFailureVisible:true,authenticationHidden:true,modelFailOpen:true};
   } finally {
     await options.storageFault(false);
     // 修复权限不自动解除真实存储故障；同目录重启后继续第二轮，不能借用上轮旧结果。

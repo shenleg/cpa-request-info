@@ -31,15 +31,18 @@ type HostCall func(method string, payload any) (json.RawMessage, error)
 
 // App 管理插件生命周期与管理路由，不持有原始模型请求或认证头。
 type App struct {
-	mu           sync.Mutex
-	host         HostCall
-	collector    *audit.Collector
-	dir          string
-	available    bool
-	reason       string
-	configured   bool
-	budget       int64
-	loggedReason string
+	mu                    sync.Mutex
+	host                  HostCall
+	collector             *audit.Collector
+	dir                   string
+	available             bool
+	reason                string
+	configured            bool
+	budget                int64
+	loggedReason          string
+	pendingAlerts         audit.GapAlerts
+	pendingReason         string
+	pendingBridgeFailures uint64
 	// 模型回调只读已发布的小状态，不等待管理查询、能力探测或恢复扫描持有的锁。
 	admission atomic.Pointer[admissionState]
 }
@@ -96,7 +99,7 @@ func (a *App) Handle(method string, raw []byte) (any, error) {
 		return struct {
 			Routes    []route    `json:"routes"`
 			Resources []resource `json:"resources"`
-		}{[]route{{"GET", "/plugins/request-input-audit/objects"}, {"POST", "/plugins/request-input-audit/monitor"}, {"POST", "/plugins/request-input-audit/remove"}, {"POST", "/plugins/request-input-audit/rename"}, {"POST", "/plugins/request-input-audit/pause"}, {"GET", "/plugins/request-input-audit/settings"}, {"POST", "/plugins/request-input-audit/settings"}, {"GET", "/plugins/request-input-audit/records"}, {"GET", "/plugins/request-input-audit/detail"}, {"GET", "/plugins/request-input-audit/status"}}, []resource{{"/index.html", "输入审计", "Chat Completions、Responses HTTP/WebSocket 与 Anthropic Messages 输入审计"}}}, nil
+		}{[]route{{"GET", "/plugins/request-input-audit/objects"}, {"POST", "/plugins/request-input-audit/monitor"}, {"POST", "/plugins/request-input-audit/remove"}, {"POST", "/plugins/request-input-audit/rename"}, {"POST", "/plugins/request-input-audit/pause"}, {"GET", "/plugins/request-input-audit/settings"}, {"POST", "/plugins/request-input-audit/settings"}, {"GET", "/plugins/request-input-audit/records"}, {"GET", "/plugins/request-input-audit/detail"}, {"GET", "/plugins/request-input-audit/status"}, {"POST", "/plugins/request-input-audit/gaps/acknowledge"}}, []resource{{"/index.html", "输入审计", "Chat Completions、Responses HTTP/WebSocket 与 Anthropic Messages 输入审计"}}}, nil
 	case "management.handle":
 		var req managementRequest
 		if err := json.Unmarshal(raw, &req); err != nil {
@@ -218,24 +221,34 @@ func (a *App) refreshLocked() {
 	if a.collector != nil {
 		a.collector.ReportBridgeFailures(live.BridgeFailures)
 	}
-	if reason != "" {
-		return
+	if reason == "" && live.StateDir != a.dir {
+		reason = "configuration_invalid"
 	}
-	if live.StateDir != a.dir {
-		a.reason = "configuration_invalid"
+	if reason != "" {
+		a.reason = reason
+		if a.collector != nil {
+			a.collector.ReportObserverState(reason)
+		} else {
+			a.pendingFaultLocked(reason)
+			a.pendingBridgeLocked(live.BridgeFailures)
+		}
 		return
 	}
 	if a.collector == nil {
 		c, err := audit.Open(a.dir, a.budget)
 		if err != nil {
 			a.reason = "storage_unavailable"
+			a.pendingFaultLocked(a.reason)
+			a.pendingBridgeLocked(live.BridgeFailures)
 			return
 		}
 		a.collector = c
-		c.ReportBridgeFailures(live.BridgeFailures)
+		a.importPendingLocked()
 	}
-	a.available = true
-	a.reason = ""
+	a.collector.ReportBridgeFailures(live.BridgeFailures)
+	a.reason = reason
+	a.collector.ReportObserverState(reason)
+	a.available = reason == ""
 }
 
 // diagnoseLocked 在故障状态变化时尽力通知宿主固定原因；不附带底层错误、身份、路径或正文。
@@ -275,15 +288,35 @@ func (a *App) management(req managementRequest) any {
 		a.refreshLocked()
 	}
 	c, available, reason := a.collector, a.available, a.reason
+	pending := a.pendingAlerts
+	pending.Items = append([]audit.GapSummary{}, pending.Items...)
+	if c == nil && strings.HasSuffix(req.Path, "/gaps/acknowledge") {
+		var snapshot struct {
+			Generation string  `json:"generation"`
+			Revision   *uint64 `json:"revision"`
+		}
+		if len(req.Body) > 256 || json.Unmarshal(req.Body, &snapshot) != nil || snapshot.Revision == nil {
+			a.mu.Unlock()
+			return responseJSON(400, map[string]string{"error": "invalid_gap_snapshot"})
+		}
+		if snapshot.Generation != pending.Generation || *snapshot.Revision != pending.Revision {
+			a.mu.Unlock()
+			return responseJSON(409, map[string]string{"error": "gap_snapshot_changed"})
+		}
+		a.pendingAlerts.AcknowledgedRevision = pending.Revision
+		a.pendingAlerts.Unread = false
+		for i := range a.pendingAlerts.Items {
+			a.pendingAlerts.Items[i].Unread = false
+		}
+		a.mu.Unlock()
+		return responseJSON(200, map[string]bool{"acknowledged": true, "diagnostics_persisted": false})
+	}
 	a.mu.Unlock()
 	if strings.HasSuffix(req.Path, "/status") {
-		var state any = map[string]any{"available": false, "reason": reason}
+		var state any = map[string]any{"available": false, "reason": reason, "diagnostics_persisted": false, "gap_alerts": pending}
 		if c != nil {
 			snapshot := c.Status()
 			state = snapshot
-			if snapshot.Gaps["observer_unavailable"] > 0 && reason == "" && snapshot.Reason == "" {
-				reason = "observer_bridge_error"
-			}
 		}
 		return responseJSON(200, map[string]any{"available": available, "reason": reason, "supported": "chat-completions-responses-anthropic-http-responses-websocket-last-user-content", "supported_protocols": []string{"chat-completions", "responses", "anthropic-messages", "responses-websocket"}, "responses_websocket": true, "retention": "receive_time_expiry_periodic_cleanup", "state": state})
 	}
@@ -325,6 +358,24 @@ func (a *App) management(req managementRequest) any {
 	}
 	if c == nil {
 		return responseJSON(503, map[string]string{"error": reason})
+	}
+	if strings.HasSuffix(req.Path, "/gaps/acknowledge") {
+		var snapshot struct {
+			Generation string  `json:"generation"`
+			Revision   *uint64 `json:"revision"`
+		}
+		if len(req.Body) > 256 || json.Unmarshal(req.Body, &snapshot) != nil || snapshot.Revision == nil || snapshot.Generation == "" {
+			return responseJSON(400, map[string]string{"error": "invalid_gap_snapshot"})
+		}
+		persisted, err := c.AcknowledgeGaps(snapshot.Generation, *snapshot.Revision)
+		if err != nil {
+			code := 503
+			if err.Error() == "gap_snapshot_changed" {
+				code = 409
+			}
+			return responseJSON(code, map[string]string{"error": err.Error()})
+		}
+		return responseJSON(200, map[string]bool{"acknowledged": true, "diagnostics_persisted": persisted})
 	}
 	if strings.HasSuffix(req.Path, "/settings") {
 		if req.Method == "GET" {

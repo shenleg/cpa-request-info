@@ -1,6 +1,6 @@
 # CPA 请求输入审计：最小安全闭环
 
-本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)、[ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md)、[ticket 03](.scratch/request-input-audit/issues/03-chat-input-boundaries.md)、[ticket 04](.scratch/request-input-audit/issues/04-responses-http.md)、[ticket 05](.scratch/request-input-audit/issues/05-anthropic-messages.md) 、[ticket 06](.scratch/request-input-audit/issues/06-http-request-once.md) 、[ticket 07](.scratch/request-input-audit/issues/07-responses-websocket.md) 、[ticket 08](.scratch/request-input-audit/issues/08-search-and-browse.md) 、[ticket 09](.scratch/request-input-audit/issues/09-retention-and-settings.md) 、[ticket 10](.scratch/request-input-audit/issues/10-storage-budget.md) 与 [ticket 11](.scratch/request-input-audit/issues/11-fail-open-and-restart.md) 的双端验收范围，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
+本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)、[ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md)、[ticket 03](.scratch/request-input-audit/issues/03-chat-input-boundaries.md)、[ticket 04](.scratch/request-input-audit/issues/04-responses-http.md)、[ticket 05](.scratch/request-input-audit/issues/05-anthropic-messages.md) 、[ticket 06](.scratch/request-input-audit/issues/06-http-request-once.md) 、[ticket 07](.scratch/request-input-audit/issues/07-responses-websocket.md) 、[ticket 08](.scratch/request-input-audit/issues/08-search-and-browse.md) 、[ticket 09](.scratch/request-input-audit/issues/09-retention-and-settings.md) 、[ticket 10](.scratch/request-input-audit/issues/10-storage-budget.md) 、[ticket 11](.scratch/request-input-audit/issues/11-fail-open-and-restart.md) 与 [ticket 12](.scratch/request-input-audit/issues/12-gap-history-and-alerts.md) 的双端验收范围，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
 
 ## 已实现范围
 
@@ -18,7 +18,8 @@
 - `previous_response_id` 不参与历史回查或持久化，显式重发独立记录；客户端请求模型先于路由及上游别名映射提取，不从回复补猜。宿主 capabilities 必须显式声明三种 HTTP 协议及 `responses-websocket`，契约版本不是3或缺少任一接入点均拒绝采集，不静默显示全覆盖。
 - Anthropic Messages 在 `/v1/messages` 认证后、模型 DD 名称改写/协议转换/路由之前观察原始消息。末尾连续 `user` 只取最后一条；纯 `tool_result` 正常跳过，混合消息只提取新 `text` 和固定附件占位符，不提取工具结果内嵌文本、图片、文件或引用。`image` 只留 `[图片]`，`document`（包括 text/content 来源）只留 `[文件]`；未知类型/来源报告提取不完整或解析缺口，不猜测其他协议的内容类型。
 - 64 条 / 8 MiB 有界副本队列，只保存提取、截断后的白名单副本；约 1 MiB 分段 JSONL，写入并同步成功后才允许管理查询；入队不等于保存。队列满放弃当次副本并记录 `queue_full`，同步提取仍有处理开销，不承诺零延迟。
-- 固定 4 KiB 基础诊断保存缺口原因及最后发生时刻、运行未正常结束标记和重启不确定性，不保存完整请求、身份或逐提交待办。采集前同步标记，正常排空和同步后才标记正常结束；异常重启显示可能未落盘，数量和损失起止明确未知，发现时刻不冒充损失时段。恢复或正常重启不清掉未到期基础信号；本次运行计数归零不代表历史完整。旧 v1 诊断迁移为 v2 时，过去退出状态为未知；缺失/损坏的恢复信息不重建成零损失，损坏诊断停采且保留原文件。v2 不支持旧二进制静默降级覆盖，应保留原目录和备份再处理回滚。
+- ticket 12扩展同一4KiB诊断为v3：固定原因的有界缺口历史保存可确定次数、下界或未知，以及首末观察时刻；观察时间不冒充损失边界，不把各原因次数相加为独立丢失提交数。未知块导致的部分提取不完整不等于整条写入失败。当前活动故障独立显示，已阅和历史到期不隐藏故障；已恢复历史保留到期。确认只作用于页面已看到的会话和版本，新事件并发返回409；新缺口或故障复发重新提醒，已阅状态跨正常重启保存。摘要跨部分到期时丢弃旧精确计数与起点，调长不延长旧证据；不可写时明确未持久化，目录可写后尽力合并运行证据。登录且可见每十秒只更新状态，不覆盖未提交的设置/筛选。没有邮件、Webhook或内容违规判定。
+- 固定 4 KiB 基础诊断保存缺口原因及最后发生时刻、运行未正常结束标记和重启不确定性，不保存完整请求、身份或逐提交待办。采集前同步标记，正常排空和同步后才标记正常结束；异常重启显示可能未落盘，数量和损失起止明确未知，发现时刻不冒充损失时段。恢复或正常重启不清掉未到期基础信号；本次运行计数归零不代表历史完整。旧 v1 诊断迁移时，过去退出状态为未知；缺失/损坏的恢复信息不重建成零损失，损坏诊断停采且保留原文件。v3 不支持旧二进制静默降级覆盖，应保留原目录和备份再处理回滚。
 - 观察接口缺失、版本/协议不兼容及桥接不可用有固定原因；只停止审计，不回退执行钩子、不改变模型调用。状态页独立于对象、记录与设置查询，数据查询失败仍显示基础故障；管理注册或整插件熔断同时阻止管理能力时，依靠宿主固定诊断如实说明，不宣称页面持续可用。诊断持久化只能尽力，磁盘彻底不可写时仍保留运行期状态，不保证告警落盘。
 - 默认总预算 1 GiB，合法范围 4 MiB–1 GiB，可通过管理页面/接口调整并持久化；保守核算整个专用目录及辅助文件，预算内预留 1 MiB 配置更新空间及 1 MiB + 4 KiB 维护空间。满额停采，不覆盖或提前删除未到期历史；正常清理或调高预算释放足够余量后自动恢复，主动暂停不受影响。容量基础告警保留到自身到期，不因恢复/重启清除，未恢复容量故障持续显示。
 - 输入默认从宿主接收提交起保留7个24小时，管理页面/API可调整为1–30整天；限制最短一天避免零期限，最长30天限制敏感数据寿命并使历史期限规则有界。到期即退出列表、组合搜索、详情和对象历史标记，不等待文件回收；启动及每分钟清理，暂停、移除和停机不冻结期限。
@@ -30,9 +31,9 @@
 
 ## 未完成与风险
 
-尚无上述白名单以外的内容类型、三协议完整 SSE/重试/断开回归矩阵、异常退出未落盘副本重放或完整缺口历史。当前异常重启只检测并报告不确定性，不恢复内存队列，也不是 exactly-once。Linux amd64 已在 Debian 13 原生构建并完成现有系统、工具及八个浏览器场景各两轮回归，本票另以隔离64MiB tmpfs验证真实ENOSPC和只读重启故障；Linux arm64、其他块设备/文件系统及运行中热切只读仍未验证，详见[本票双平台验收记录](docs/verification/fail-open-restart-2026-10-15.md)、[容量票记录](docs/verification/storage-budget-2026-10-15.md)和[前序Linux记录](docs/verification/linux-amd64-2026-10-15.md)。当前已增加统一到期隐藏、周期回收与保留设置；暂停、移除不会改变接收时间或提前删除未到期历史。容量自动恢复不代表真实 I/O/完整性故障可自动恢复；本票基本重启诊断不等于完整故障恢复。
+尚无上述白名单以外的内容类型、三协议完整 SSE/重试/断开回归矩阵或异常退出未落盘副本重放。当前异常重启只检测并报告不确定性，不恢复内存队列，也不是 exactly-once。Linux amd64 已在 Debian 13 原生构建并完成现有系统、工具及八个浏览器场景各两轮回归，本票另以隔离64MiB tmpfs验证真实ENOSPC和只读重启故障；Linux arm64、其他块设备/文件系统及运行中热切只读仍未验证，详见[本票双平台验收记录](docs/verification/fail-open-restart-2026-10-15.md)、[容量票记录](docs/verification/storage-budget-2026-10-15.md)和[前序Linux记录](docs/verification/linux-amd64-2026-10-15.md)。当前已增加统一到期隐藏、周期回收与保留设置；暂停、移除不会改变接收时间或提前删除未到期历史。容量自动恢复不代表真实 I/O/完整性故障可自动恢复；本票基本重启诊断不等于完整故障恢复。
 
-应用层不加密。专用目录为 `0700`、文件为 `0600`，仍需保护主机、磁盘、快照和备份。逻辑到期和文件空间回收不等于磁盘、数据库空闲页、文件系统、快照或备份安全擦除；应用不控制外部副本的保留。没有安全擦除或 native 进程崩溃隔离保证；常规解析/队列/存储错误 fail-open，不代表零丢失、零延迟或吞吐承诺。诊断包含有界运行期原因码/已知计数，以及固定大小的持久基础缺口和重启摘要；运行期计数重启后归零，不能解释为历史没有缺口，也不是完整可恢复缺口历史。
+应用层不加密。专用目录为 `0700`、文件为 `0600`，仍需保护主机、磁盘、快照和备份。逻辑到期和文件空间回收不等于磁盘、数据库空闲页、文件系统、快照或备份安全擦除；应用不控制外部副本的保留。没有安全擦除或 native 进程崩溃隔离保证；常规解析/队列/存储错误 fail-open，不代表零丢失、零延迟或吞吐承诺。诊断包含有界运行期原因码/已知计数，以及固定大小的持久缺口历史、已阅和重启摘要；运行期计数重启后归零，不能解释为历史没有缺口，不提供逐事件日志或未落盘副本恢复。ticket 12双平台结果及失败复测记录见[缺口历史验收](docs/verification/gap-history-alerts-2026-10-15.md)。
 
 宿主 `identity.seed` 必须与数据目录一起保护和备份；插件不读取/修改它的内容。已有数据但 seed 缺失、损坏或权限不合规时停采，不静默轮换全部对象。目录祖先不能是符号链接，macOS 使用真实路径，例如 `/private/var/...` 而非 `/var/...`。
 

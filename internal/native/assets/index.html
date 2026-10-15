@@ -2,7 +2,7 @@
 <!-- 本页面只托管无数据 shell；动态数据受宿主管理鉴权保护，管理 Key 仅在页面内存驻留。 -->
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-c9Z17w0HmSBFCWN8fO1MyPtYzkLStF2fVThH+P3l9Hc='; style-src 'sha256-mcEoXKWBfiRvpvTh90RoJs1oIgkKU4gVvUXfuAv9NcU='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-wstnsK+mzprvg6KgG7UKdntxyNJ4iJ05gMbv397vcyE='; style-src 'sha256-mcEoXKWBfiRvpvTh90RoJs1oIgkKU4gVvUXfuAv9NcU='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <title>输入审计</title>
 <style>
 :root{color-scheme:light dark;font-family:system-ui,sans-serif}body{max-width:1100px;margin:24px auto;padding:0 20px;line-height:1.6}input,select,button{font:inherit;margin:5px;padding:7px;max-width:95%}button{cursor:pointer}label{display:block}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #888;padding:9px;text-align:left;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:14px;border:1px solid #888}#notice{border-left:4px solid #888;padding-left:12px}code{overflow-wrap:anywhere}.object-id{font-size:.8em}section{margin-top:24px}
@@ -15,7 +15,7 @@
 <div id="content" hidden>
 <section><h2>监控对象与名称</h2><p>这里只显示宿主无秘密对象 ID，不展示原 Key、片段或上游账号。选择和命名不修改宿主 Key 配置。移除只停止后续采集，保留名称和已保存历史。</p><p id="catalog-state"></p><label>审计对象 <select id="objects"></select></label><label>名称 <input id="name" maxlength="256" placeholder="例如：合成业务对象"></label><p>名称最多 256 UTF-8 字节，不等于 256 个中文字符。</p><button id="monitor">选择并命名</button><button id="rename">仅改名</button><button id="remove">移除监控</button></section>
 <section><h2>总预算、保留期限与单条正文上限</h2><p id="settings-state"></p><label>总存储预算（MiB） <input id="budget-mib" type="number" min="4" max="1024" step="any" required></label><p>合法范围为 4–1024 MiB，默认 1024 MiB；允许能精确换算为整数字节的小数。预算包含正文、配置、诊断、未知辅助文件和维护临时空间，预留不是额外额度。保存后的预算优先于 YAML 初始默认值；降低预算不删除未过期历史，已有占用超过新预算时停止新采集。正常满额可使用配置预留；主动降额超预算后，部分管理写入可能被拒绝，需调高到足够预算。预算不保证任意流量都能保存七天。</p><label>保留天数 <input id="retention-days" type="number" min="1" max="30" step="1" required></label><p>合法范围为 1–30 天，默认 7 天，从服务端接收提交起算；暂停、移除监控和停机不冻结期限。到期立即退出查询，后台每分钟清理。调长保留期不延长已有历史；缩短会使现有历史提前到期，保存前必须确认。</p><label>UTF-8 字节上限 <input id="max-text-bytes" type="number" min="1" max="65536" step="1" required></label><p>合法范围为 1–65536 字节；仅改变后续提交，已接收副本保留原上限，旧正文不重新截断，不改变模型收到的完整输入。</p><button id="save-settings">保存设置</button><p>三项设置一起保存；取消缩短确认时三项都不提交。逻辑到期和空间回收不等于磁盘、数据库空闲页、快照或备份的安全擦除；应用层不加密。</p></section>
-<section><h2>采集状态</h2><p id="capture-state">等待采集状态。</p><button id="pause">暂停采集</button><button id="resume">恢复采集</button><pre id="health" aria-label="采集状态"></pre><p id="gap-history"></p><p id="recovery-state"></p><button id="refresh">刷新已保存记录</button></section>
+<section><h2>采集状态</h2><p id="capture-state">等待采集状态。</p><button id="pause">暂停采集</button><button id="resume">恢复采集</button><pre id="health" aria-label="采集状态"></pre><h3>缺口提醒与已阅</h3><p id="gap-unread">缺口提醒状态未知。</p><button id="acknowledge-gaps" disabled>确认当前提醒已阅</button><p id="gap-message">确认只减少当前快照的提醒，不删除历史、不解除故障，也不改变完整性结论；新缺口会重新提醒。</p><p id="gap-acknowledged"></p><h3>当前活动故障</h3><pre id="gap-active"></pre><h3>保留期内缺口历史</h3><pre id="gap-history"></pre><p id="recovery-state"></p><button id="refresh">刷新已保存记录</button></section>
 <section><h2>已保存输入记录</h2><label>历史对象筛选 <select id="object-filter"><option value="">全部对象</option></select></label><label>接收时间起点 <input id="from-filter" type="datetime-local" step="0.001"></label><label>接收时间终点 <input id="to-filter" type="datetime-local" step="0.001"></label><p>按服务端接收时刻筛选，包含起点和终点；输入使用浏览器本地时间。</p><label>客户端请求模型筛选 <input id="model-filter" maxlength="1024" placeholder="客户端提交的精确模型名"></label><label>正文关键词 <input id="keyword-filter" maxlength="65536" placeholder="已保存正文中的字面子串"></label><p>条件取交集；模型名精确匹配，关键词仅忽略英文字母大小写，不解释正则或搜索语法，不搜索未保存部分。模型最多1024 UTF-8字节，关键词最多65536字节。</p><button id="apply-filters">应用筛选</button><button id="clear-filters">清空筛选</button><p id="records-state"></p><p id="empty">没有匹配的已保存记录。入队不等于落盘。</p><table id="records"><thead><tr><th>接收时间</th><th>对象</th><th>协议</th><th>请求模型</th><th>纯文本预览</th><th>状态</th><th>详情</th></tr></thead><tbody></tbody></table><button id="previous">上一页</button><button id="next">下一页</button><span id="page"></span></section>
 <section><h2>单条详情</h2><p id="detail-meta"></p><pre id="detail" aria-label="已保存纯文本正文">请选择一条记录。</pre></section>
 </div>
@@ -23,9 +23,9 @@
 'use strict';
 // 认证材料只驻留闭包；所有数据通过同源受保护 API 获取，禁止把正文/名称作为 HTML。
 (() => {
-  let key = '', offset = 0, total = 0, catalogAvailable = false;
+  let key = '', session = 0, offset = 0, total = 0, catalogAvailable = false;
   let knownObjects = [], selectedFilter = '', busy = false, capturePaused = false, observerAvailable = false;
-  let appliedFilters = {}, currentRetentionDays, settingsAvailable = false, recordsAvailable = false;
+  let appliedFilters = {}, currentRetentionDays, settingsAvailable = false, recordsAvailable = false, gapAlerts, statusController;
   const base = '/v0/management/plugins/request-input-audit';
   const $ = id => document.getElementById(id);
   const message = text => { $('message').textContent = text; };
@@ -43,15 +43,23 @@
       return typeof state.managementKey === 'string' ? state.managementKey : '';
     } catch { return ''; }
   }
-  async function api(path, method = 'GET', payload) {
-    const response = await fetch(base + path, {method, credentials:'omit', cache:'no-store', headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'}, body:payload === undefined ? undefined : JSON.stringify(payload)});
+  async function api(path, method = 'GET', payload, signal) {
+    const requestedSession = session;
+    const response = await fetch(base + path, {method, signal, credentials:'omit', cache:'no-store', headers:{Authorization:'Bearer '+key,'Content-Type':'application/json'}, body:payload === undefined ? undefined : JSON.stringify(payload)});
+    // 手动操作取消旧状态请求；登录代次同时使已撤销鉴权的并行响应失效。
+    const checkCurrent = () => {
+      if (requestedSession !== session || signal?.aborted) throw new DOMException('请求已过期。','AbortError');
+    };
+    checkCurrent();
     if (response.status === 401 || response.status === 403) {
-      key = ''; $('login').hidden = false; $('content').hidden = true;
+      key = '';session++; $('login').hidden = false; $('content').hidden = true;
       throw new Error('管理鉴权失败，请重新输入临时管理 Key。');
     }
     if (response.status === 409 && path === '/settings') throw new Error('保留期已变化，缩短需要确认；请刷新设置后重试，现有历史将提前到期。');
+    if (path === '/gaps/acknowledge' && response.status === 409) throw new Error('缺口快照已变化；已刷新状态，请查看新提醒后重新确认。');
+    if (path === '/gaps/acknowledge' && response.status === 503) throw new Error('已阅确认未持久化；不能视为已保存，请在存储恢复后重试。');
     if (!response.ok) throw new Error('操作未完成（HTTP '+response.status+'），请查看采集状态。');
-    return response.json();
+    const data = await response.json();checkCurrent();return data;
   }
   function objectLabel(object) {
     const status = object.monitored ? '受监控' : object.has_history ? '已移除但有历史' : object.name ? '已移除监控' : '未监控';
@@ -65,6 +73,7 @@
     $('remove').disabled = busy || !object?.monitored;
     $('pause').disabled = busy || !observerAvailable || capturePaused;
     $('resume').disabled = busy || !observerAvailable || !capturePaused;
+    $('acknowledge-gaps').disabled = busy || !gapAlerts || !gapAlerts.unread;
     for (const id of ['save-settings','max-text-bytes','retention-days','budget-mib']) $(id).disabled = busy || !observerAvailable || !settingsAvailable;
     $('previous').disabled = busy || !recordsAvailable || offset===0;$('next').disabled = busy || !recordsAvailable || offset+20>=total;
     for (const id of ['connect','refresh','objects','name','object-filter','from-filter','to-filter','model-filter','keyword-filter','apply-filters','clear-filters']) $(id).disabled = busy;
@@ -106,6 +115,12 @@
     if (record.extraction_incomplete) labels.push('提取不完整');
     return labels.length ? labels.join(' · ') : '已保存允许内容';
   }
+  // 观察时刻只说明何时发现问题；计数单位不同，不能相加推算丢失提交。
+  function gapDescription(item) {
+    const units = {submissions:'提交',incomplete_submissions:'提取不完整的提交（不等于整条写入失败）',bridge_failures:'桥接失败（不等于已知丢失提交数）',unknown:'未知单位'};
+    const count = item.affected_count === null || item.count_accuracy === 'unknown' ? '未知' : (item.count_accuracy === 'at_least' ? '至少 ' : '精确 ')+item.affected_count;
+    return '原因：'+item.reason+'；'+(item.active?'故障仍活动':'当前未活动')+'；'+(item.unread?'未阅':'已阅')+'\n数量：'+count+'；单位：'+units[item.count_unit]+'\n首次观察：'+(item.first_observed_at ?? '未知')+'；最后观察：'+(item.last_observed_at || '已到期或未知')+'\n损失范围：起点 '+(item.lost_from ?? '未知')+'，终点 '+(item.lost_until ?? '未知')+'。观察时间不等于损失范围。';
+  }
   function renderStatus(status) {
     const state = status.state ?? {}, gaps = state.gaps ?? {};
     capturePaused = state.capture_paused === true;observerAvailable = status.available === true;
@@ -120,8 +135,11 @@
     if (observerAvailable && state.state === 'active' && !capturePaused && state.diagnostics_persisted === true) capture.push('实际可采集：受监控对象的后续提交可采集，入队不等于落盘。');
     $('capture-state').textContent = capture.join(' ');
     $('health').textContent = '观察契约：'+(observerAvailable?'可用':'不可用')+'\n存储运行状态：'+(state.state??'不可用')+'\n主动暂停：'+(capturePaused?'是':'否')+'\n原因：'+(status.reason||state.reason||'无')+'\n已保存：'+(state.saved??'未知')+'；排队：'+(state.queued??'未知')+'\n保守占用：'+(state.used_bytes??'未知')+' / '+(state.budget_bytes??'未知')+' 字节\n超额：'+(state.over_budget_bytes??'未知')+' 字节\n配置与维护预留：'+(state.reserved_bytes??'未知')+' 字节（包含在预算内，不是额外额度）\n恢复所需空闲：'+(state.resume_required_bytes??'未知')+' 字节（预留 + 最坏一条编码记录 + 4096 字节轮转开销 + 256 KiB 滞回量）\n容量告警：'+(state.capacity_gap?'已记录；保留期内恢复或重启不清除，未恢复故障持续显示':'未记录；不代表完整历史无缺口')+'\n诊断持久化：'+(state.diagnostics_persisted===true?'已保存':'未保存或未知；不能据此报告无缺口')+'\n本次运行已知缺口计数（重启归零，不代表历史无缺口）：'+JSON.stringify(gaps)+'\n恢复主动采集不会解除存储故障；过期数据后台每分钟清理。常规故障 fail-open 不等于 native 进程级崩溃隔离。';
-    const history = Object.entries(state.gap_history ?? {});
-    $('gap-history').textContent = '基础历史缺口：'+(history.length ? history.map(([reason,time])=>reason+'；最后发生：'+time).join(' / ') : state.gap_history ? '未记录；不代表完整历史无缺口。' : '状态未知；不能用本次运行计数判断历史无缺口。');
+    const alerts = state.gap_alerts;gapAlerts = alerts;
+    $('gap-acknowledged').textContent = alerts ? '已阅原因：'+(alerts.items.filter(item=>!item.unread).map(item=>item.reason).join('、') || '暂无')+'。已阅不代表故障恢复或历史完整。' : '已阅状态未知。';
+    $('gap-unread').textContent = !alerts ? '缺口提醒状态未知。' : alerts.unread ? '有未阅缺口提醒；请查看历史与当前活动故障。' : '当前缺口提醒均已阅；不代表历史完整或故障恢复。';
+    $('gap-active').textContent = !alerts ? '当前活动故障：状态未知。' : alerts.items.filter(item=>item.active).map(gapDescription).join('\n\n') || '未报告活动故障；不代表历史无缺口。';
+    $('gap-history').textContent = !alerts ? '缺口历史：状态未知。' : (alerts.retention_uncertain ? '当前无法读取保留策略；这里只保留最长30天内的运行期证据，恢复后按实际策略过滤，不能视为精确保留期历史。\n' : '')+(alerts.items.filter(item=>item.history_retained).map(gapDescription).join('\n\n') || '保留期内未记录缺口；不代表完整历史无缺口。');
     const recovery = state.recovery;
     // detected_at 是发现时刻，不是损失起止时刻；未知数量和时段不能从运行计数推算。
     $('recovery-state').textContent = !recovery ? '重启不确定性：状态未知。' : recovery.uncertain ? '重启不确定性：可能存在未落盘输入；发现时刻：'+(recovery.detected_at || '未知')+'；原因：'+recovery.reason+'；丢失数量：'+(recovery.lost_count ?? '未知')+'；丢失时段：起点 '+(recovery.lost_from ?? '未知')+'，终点 '+(recovery.lost_until ?? '未知')+'。发现时刻不代表损失开始或结束。' : '重启不确定性：未检测到；不代表历史无缺口。';
@@ -168,15 +186,26 @@
   }
   // 分区读取失败只清除自己的旧呈现；401/403 仍由 api 隐藏整个受保护页面并终止登录。
   async function loadSection(action, failed) {
-    try {await action();} catch(error) {if (!key) throw error;failed(error.message);}
+    try {await action();} catch(error) {if (!key || error.name === 'AbortError') throw error;failed(error.message);}
+  }
+  async function refreshStatus() {
+    const controller = new AbortController();statusController = controller;
+    try {renderStatus(await api('/status','GET',undefined,controller.signal));}
+    catch(error) {
+      if (!key || error.name === 'AbortError') throw error;
+      observerAvailable = false;capturePaused = false;gapAlerts = undefined;
+      $('capture-state').textContent = '采集状态加载失败：'+error.message;
+      $('health').textContent = '';$('gap-history').textContent = '缺口历史：状态未知。';$('recovery-state').textContent = '重启不确定性：状态未知。';
+      $('gap-unread').textContent = '缺口提醒状态未知。';$('gap-active').textContent = '当前活动故障：状态未知。';$('gap-acknowledged').textContent = '已阅状态未知。';
+    } finally {if (statusController === controller) statusController = undefined;}
+  }
+  async function autoRefreshStatus() {
+    if (!key || busy || document.visibilityState !== 'visible' || statusController) return;
+    try {await refreshStatus();} catch(error) {if (error.name !== 'AbortError') message(error.message);} finally {updateControls();}
   }
   async function refresh() {
     // 状态先展示，不能等待目录、记录或设置成功；严重存储故障时这些查询本身也会失败。
-    await loadSection(async()=>renderStatus(await api('/status')),error=>{
-      observerAvailable = false;capturePaused = false;
-      $('capture-state').textContent = '采集状态加载失败：'+error;
-      $('health').textContent = '';$('gap-history').textContent = '基础历史缺口：状态未知。';$('recovery-state').textContent = '重启不确定性：状态未知。';
-    });
+    await refreshStatus();
     $('login').hidden = true;$('content').hidden = false;
     await loadSection(objects,error=>{
       catalogAvailable = false;knownObjects = [];selectedFilter = '';offset = 0;
@@ -193,10 +222,12 @@
   async function guard(action) {
     if (busy) return;
     // 管理写入后的目录/列表刷新必须完成后才能查看详情，避免旧异步刷新擦掉刚打开的正文标签。
-    busy = true;updateControls();
-    try {await action();}catch(error){message(error.message);}finally{busy=false;updateControls();}
+    busy = true;
+    statusController?.abort();statusController = undefined;
+    updateControls();
+    try {await action();}catch(error){if (error.name !== 'AbortError') message(error.message);}finally{busy=false;updateControls();}
   }
-  $('connect').addEventListener('click',()=>guard(async()=>{key=$('management-key').value;$('management-key').value='';await connect();}));
+  $('connect').addEventListener('click',()=>guard(async()=>{session++;key=$('management-key').value;$('management-key').value='';await connect();}));
   async function saveObject(path, success) {
     const name = $('name').value;
     if (path !== '/remove' && (!name.trim() || new TextEncoder().encode(name).length > 256)) throw new Error('名称不能为空，且最多 256 UTF-8 字节。');
@@ -215,6 +246,16 @@
       payload.confirm_retention_shortening = true;
     }
     await api('/settings','POST',payload);await refresh();message('正文上限已保存；仅后续提交采用新上限，已接收副本不变。保留期已保存；调长不延长已有历史。总预算已保存；当前是否可采集请查看采集状态。');
+  }));
+  $('acknowledge-gaps').addEventListener('click',()=>guard(async()=>{
+    const {generation,revision} = gapAlerts;
+    try {
+      const result = await api('/gaps/acknowledge','POST',{generation,revision});
+      $('gap-message').textContent = result.diagnostics_persisted ? '当前快照已确认已阅并保存；历史、活动故障和完整性结论不变，新缺口仍会提醒。' : '已阅确认未持久化；不能视为已保存，请在存储恢复后重试。';
+    } catch(error) {
+      $('gap-message').textContent = error.message;
+      throw error;
+    } finally {if (key) await refreshStatus();}
   }));
   $('objects').addEventListener('change',selectObject);
   $('monitor').addEventListener('click',()=>guard(()=>saveObject('/monitor','监控配置已保存；已接收提交保留原决策，后续提交采用新配置。')));
@@ -243,7 +284,9 @@
   $('refresh').addEventListener('click',()=>guard(async()=>{await refresh();}));
   $('previous').addEventListener('click',()=>guard(async()=>{offset=Math.max(0,offset-20);await refresh();}));
   $('next').addEventListener('click',()=>guard(async()=>{if(offset+20<total){offset+=20;await refresh();}}));
-  window.addEventListener('pagehide',()=>{key='';});
+  // 十秒只更新状态，不读取设置、目录或列表，保留用户尚未提交的表单内容。
+  setInterval(autoRefreshStatus,10000);
+  window.addEventListener('pagehide',()=>{key='';session++;statusController?.abort();$('content').hidden = true;$('login').hidden = false;});
   key=inheritedKey();if(key)guard(connect);
 })();
 </script></body></html>

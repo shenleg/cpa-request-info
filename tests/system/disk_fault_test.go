@@ -221,6 +221,17 @@ func TestRealENOSPCFailOpen(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	alerts := readGapAlerts(t, h)
+	if item := gapItem(t, alerts, "storage_error"); !item.Active || !item.HistoryRetained || item.AffectedCount == nil || *item.AffectedCount < 1 {
+		t.Fatal("真实ENOSPC未显示活动故障和已知未保存次数")
+	}
+	// 固定诊断原位写可能仍成功；ENOSPC本身不等于所有既有块都不可写。
+	if code := acknowledgeGaps(t, h, alerts, adminKey); code != http.StatusOK && code != http.StatusServiceUnavailable {
+		t.Fatalf("ENOSPC下确认返回错误状态: %d", code)
+	}
+	if !gapItem(t, readGapAlerts(t, h), "storage_error").Active {
+		t.Fatal("已阅隐藏真实ENOSPC活动故障")
+	}
 	after := h.waitRecords(t, 1)[0]
 	if before.ID != after.ID {
 		t.Fatal("真实写满挤掉原来已保存记录")

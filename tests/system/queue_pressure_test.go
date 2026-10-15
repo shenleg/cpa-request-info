@@ -333,6 +333,9 @@ func TestQueueFullPreservesUpstreamAndDrains(t *testing.T) {
 	if int64(len(seenInputs)) != final.State.Saved {
 		t.Fatal("管理 API 返回的完整已保存记录数量不匹配")
 	}
+	if item := gapItem(t, readGapAlerts(t, h), "queue_full"); item.AffectedCount == nil || *item.AffectedCount != final.State.Gaps["queue_full"] || item.CountAccuracy != "exact" || item.Active {
+		t.Fatal("队列排空后缺口历史次数不准确或被误报为持续故障")
+	}
 	if restartStatus(t, h).State.GapHistory["queue_full"] == "" {
 		t.Fatal("真实队列满没有保留基础缺口信号")
 	}

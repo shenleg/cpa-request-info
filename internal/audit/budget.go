@@ -21,8 +21,9 @@ type diagnosticSummary struct {
 	CapacityGap  bool              `json:"capacity_gap"`
 	LastAt       string            `json:"last_at"`
 	SessionDirty bool              `json:"session_dirty"`
-	GapHistory   map[string]string `json:"gap_history"`
+	GapHistory   map[string]string `json:"gap_history,omitempty"`
 	Recovery     Recovery          `json:"recovery"`
+	Alerts       *gapDisk          `json:"alerts,omitempty"`
 }
 
 // openDiagnostics 在ioMu内打开固定分配文件；会话开始先同步dirty，重复打开不重新解释本会话。
@@ -92,10 +93,52 @@ func (c *Collector) openDiagnostics() error {
 			c.status.Recovery = Recovery{Uncertain: true, DetectedAt: auditNow().UTC().Format(time.RFC3339Nano), Reason: "legacy_unknown"}
 		} else {
 			c.status.GapHistory, c.status.Recovery = summary.GapHistory, summary.Recovery
+			if summary.Version == 3 {
+				c.gapEntries = summary.Alerts.Entries
+				c.alertRevision, c.acknowledgedRevision = summary.Alerts.Revision, summary.Alerts.Acknowledged
+				c.status.GapHistory = make(map[string]string)
+				c.previousActive = make(map[string]gapEntry)
+				for reason, entry := range c.gapEntries {
+					if entry.Flags&gapActive != 0 {
+						c.previousActive[reason] = entry
+					}
+					// 当前健康必须重新探测；磁盘中的活动标记不能把已恢复故障永远保留。
+					entry.Flags &^= gapActive
+					c.gapEntries[reason] = entry
+					if entry.Last != 0 {
+						c.status.GapHistory[reason] = gapTime(entry.Last)
+					}
+				}
+			} else {
+				for reason, last := range summary.GapHistory {
+					at, _ := time.Parse(time.RFC3339Nano, last)
+					c.recordGap(reason, 0, false, at)
+					entry := c.gapEntries[reason]
+					entry.First = 0
+					c.gapEntries[reason] = entry
+				}
+			}
 			if summary.SessionDirty {
 				c.status.Recovery = Recovery{Uncertain: true, DetectedAt: auditNow().UTC().Format(time.RFC3339Nano), Reason: "unclean_shutdown"}
 			}
 		}
+	}
+	if c.status.CapacityGap {
+		if _, exists := c.gapEntries["budget_exhausted"]; !exists {
+			at, _ := time.Parse(time.RFC3339Nano, c.capacityLastAt)
+			c.recordGap("budget_exhausted", 0, false, at)
+			entry := c.gapEntries["budget_exhausted"]
+			entry.First = 0
+			c.gapEntries["budget_exhausted"] = entry
+		}
+	}
+	if r := c.status.Recovery; r.Uncertain && (create || summary.Version != 3 || summary.SessionDirty) {
+		at, _ := time.Parse(time.RFC3339Nano, r.DetectedAt)
+		c.recordGap(r.Reason, 0, false, at)
+	}
+	if c.status.State == "paused" {
+		reason := c.status.Reason
+		c.beginFault(reason)
 	}
 	c.sessionDirty = true
 	c.mu.Unlock()
@@ -122,7 +165,7 @@ func (c *Collector) decodeDiagnostics(data []byte) (diagnosticSummary, error) {
 	defer c.mu.Unlock()
 	var summary diagnosticSummary
 	fields, err := protocolObject(data)
-	if err != nil || json.Unmarshal(data, &summary) != nil || (summary.Version != 1 && summary.Version != 2) {
+	if err != nil || json.Unmarshal(data, &summary) != nil || (summary.Version != 1 && summary.Version != 2 && summary.Version != 3) {
 		return summary, errors.New("storage_error")
 	}
 	for _, key := range []string{"version", "capacity_gap", "last_at"} {
@@ -145,13 +188,24 @@ func (c *Collector) decodeDiagnostics(data []byte) (diagnosticSummary, error) {
 		}
 		return summary, nil
 	}
-	for _, key := range []string{"session_dirty", "gap_history", "recovery"} {
+	historyField := "gap_history"
+	if summary.Version == 3 {
+		historyField = "alerts"
+	}
+	for _, key := range []string{"session_dirty", historyField, "recovery"} {
 		if _, ok := fields[key]; !ok {
 			return summary, errors.New("storage_error")
 		}
 	}
 	var dirty *bool
-	if len(fields) != 6 || json.Unmarshal(fields["session_dirty"], &dirty) != nil || dirty == nil || summary.GapHistory == nil || len(summary.GapHistory) > len(c.status.Gaps) {
+	if len(fields) != 6 || json.Unmarshal(fields["session_dirty"], &dirty) != nil || dirty == nil {
+		return summary, errors.New("storage_error")
+	}
+	if summary.Version == 3 {
+		if err := validateGapDisk(fields["alerts"], summary.Alerts); err != nil {
+			return summary, err
+		}
+	} else if summary.GapHistory == nil || len(summary.GapHistory) > len(c.status.Gaps) {
 		return summary, errors.New("storage_error")
 	}
 	for reason, last := range summary.GapHistory {
@@ -192,10 +246,12 @@ func (c *Collector) decodeDiagnostics(data []byte) (diagnosticSummary, error) {
 // saveDiagnostics 由单写入者原位覆盖既有4KiB；原位写不原子，失败时绝不保证告警已落盘。
 func (c *Collector) saveDiagnostics() error {
 	c.mu.Lock()
-	summary := diagnosticSummary{Version: 2, CapacityGap: c.status.CapacityGap, LastAt: c.capacityLastAt, SessionDirty: c.sessionDirty, GapHistory: make(map[string]string, len(c.status.GapHistory)), Recovery: c.status.Recovery}
-	for reason, last := range c.status.GapHistory {
-		summary.GapHistory[reason] = last
+	c.pruneGaps(auditNow())
+	alerts := &gapDisk{Entries: make(map[string]gapEntry, len(c.gapEntries)), Revision: c.alertRevision, Acknowledged: c.acknowledgedRevision}
+	for reason, entry := range c.gapEntries {
+		alerts.Entries[reason] = entry
 	}
+	summary := diagnosticSummary{Version: 3, CapacityGap: c.status.CapacityGap, LastAt: c.capacityLastAt, SessionDirty: c.sessionDirty, Recovery: c.status.Recovery, Alerts: alerts}
 	revision := c.diagnosticRevision
 	c.status.DiagnosticsPersisted = false
 	c.mu.Unlock()
@@ -248,11 +304,19 @@ func (c *Collector) refreshCapacity() error {
 		if c.status.Reason != "budget_exhausted" {
 			c.status.State = "paused"
 			c.status.Reason = "budget_exhausted"
+			c.recordGap("budget_exhausted", 0, false, auditNow())
+			entry := c.gapEntries["budget_exhausted"]
+			entry.Flags |= gapActive
+			c.gapEntries["budget_exhausted"] = entry
 			c.markGapHistory("budget_exhausted")
 		}
 	} else if c.status.Reason == "budget_exhausted" && c.status.BudgetBytes-used >= resumeRequiredBytes {
 		c.status.State = "active"
 		c.status.Reason = ""
+		entry := c.gapEntries["budget_exhausted"]
+		entry.Flags &^= gapActive
+		c.gapEntries["budget_exhausted"] = entry
+		c.diagnosticsChanged()
 	}
 	// 摘要以最后一次事件起算；活动故障持续显示，调长不延长旧摘要。
 	if c.status.CapacityGap && c.status.Reason != "budget_exhausted" && c.expired(Record{ReceivedAt: c.capacityLastAt}, auditNow()) {

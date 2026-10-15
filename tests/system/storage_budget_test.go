@@ -148,12 +148,28 @@ func TestBudgetExpiryResumesWithGap(t *testing.T) {
 	}
 	paused := waitBudgetState(t, h, func(s budgetState) bool { return s.Reason == "budget_exhausted" })
 	before := searchRecords(t, h, nil).Total
+	alerts := readGapAlerts(t, h)
+	if !gapItem(t, alerts, "budget_exhausted").Active || acknowledgeGaps(t, h, alerts, adminKey) != http.StatusOK {
+		t.Fatal("容量暂停未显示可确认的活动故障")
+	}
+	if after := readGapAlerts(t, h); after.Unread || !gapItem(t, after, "budget_exhausted").Active {
+		t.Fatal("已阅未减少提醒或隐藏了活动容量故障")
+	}
+	h.stop()
+	h = startRetentionHost(t, 4<<20, "", clock, h.stateDir)
+	if after := readGapAlerts(t, h); after.Unread || !gapItem(t, after, "budget_exhausted").Active {
+		t.Fatal("正常重启将同一持续容量故障误报成新提醒")
+	}
+	paused = readBudgetState(t, h)
 	// 缺口晚于历史输入一天，清理原输入时缺口仍在自己的保留期内。
 	retentionClock(t, clock, now.Add(24*time.Hour), 0)
 	for n := 0; n < 3; n++ {
 		h.request(t, "POST", "/v1/chat/completions", keyA, body)
 	}
 	blocked := readBudgetState(t, h)
+	if !readGapAlerts(t, h).Unread {
+		t.Fatal("容量拒收的新缺口没有重新提醒")
+	}
 	if blocked.Gaps["observer_unavailable"] != paused.Gaps["observer_unavailable"] || blocked.Gaps["budget_exhausted"] < paused.Gaps["budget_exhausted"]+3 {
 		t.Fatal("容量拒收必须归入容量缺口，不能变成桥接故障")
 	}
@@ -166,6 +182,9 @@ func TestBudgetExpiryResumesWithGap(t *testing.T) {
 	})
 	if !resumed.CapacityGap || !resumed.DiagnosticsPersisted || resumed.Gaps["budget_exhausted"] < blocked.Gaps["budget_exhausted"] || resumed.ReservedBytes == 0 || resumed.ResumeRequiredBytes <= resumed.ReservedBytes {
 		t.Fatal("恢复应保留容量告警和计数，并说明预留/恢复空间")
+	}
+	if item := gapItem(t, readGapAlerts(t, h), "budget_exhausted"); item.Active || !item.HistoryRetained {
+		t.Fatal("容量恢复删除了未到期历史或仍报告活动容量故障")
 	}
 	searchSubmit(t, h, keyA, "missing", "BUDGET-RESUMED")
 	stateDir := h.stateDir
@@ -211,8 +230,12 @@ func TestBudgetLoweredMaintenanceContinues(t *testing.T) {
 	retentionClock(t, clock, now.Add(7*24*time.Hour), 2)
 	waitRetentionOutput(t, h, func(raw []byte) bool { return !bytes.Contains(raw, []byte("BUDGET-MIXED-OLD")) })
 	state = waitBudgetState(t, h, func(s budgetState) bool { return s.State == "active" })
-	if !state.CapturePaused || !state.CapacityGap || searchRecords(t, h, nil).Total != 1 {
-		t.Fatal("容量恢复解除主动暂停、丢失告警或损坏幸存历史")
+	if !state.CapturePaused || searchRecords(t, h, nil).Total != 1 {
+		t.Fatal("容量恢复解除主动暂停或损坏幸存历史")
+	}
+	// 同一持续容量故障的重复维护不是新缺口；恢复时原始证据恰满七天，不能靠维护刷新它的期限。
+	if state.CapacityGap {
+		t.Fatal("重复维护延长了已到期容量历史")
 	}
 	code, raw := h.request(t, "GET", api+"/detail?id="+live.ID, adminKey, nil)
 	var detail savedRecord
@@ -345,10 +368,20 @@ func TestBudgetAlertRetention(t *testing.T) {
 	waitBudgetState(t, h, func(s budgetState) bool {
 		return s.Reason == "budget_exhausted" && s.CapacityGap && s.DiagnosticsPersisted
 	})
+	if acknowledgeGaps(t, h, readGapAlerts(t, h), adminKey) != http.StatusOK {
+		t.Fatal("不能确认持续容量故障")
+	}
 	retentionClock(t, clock, now.Add(40*24*time.Hour), 5)
 	waitBudgetState(t, h, func(s budgetState) bool {
 		return s.Reason == "budget_exhausted" && s.CapacityGap && s.DiagnosticsPersisted
 	})
+	h.stop()
+	h = startRetentionHost(t, 4<<20, "", clock, h.stateDir)
+	alerts := readGapAlerts(t, h)
+	item := gapItem(t, alerts, "budget_exhausted")
+	if !item.Active || item.HistoryRetained || item.AffectedCount != nil || item.CountAccuracy != "unknown" || alerts.Unread {
+		t.Fatal("持续容量故障到期重启后丢失未知语义或重新提醒")
+	}
 }
 
 // TestBudgetExpectedSkipsStaySkips 验证容量暂停不把工具续跑、非用户尾项和空输入误报为丢失的新用户输入。
