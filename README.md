@@ -1,6 +1,6 @@
-# CPA 请求输入审计：最小安全闭环
+# CPA 请求输入审计
 
-本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)、[ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md)、[ticket 03](.scratch/request-input-audit/issues/03-chat-input-boundaries.md)、[ticket 04](.scratch/request-input-audit/issues/04-responses-http.md)、[ticket 05](.scratch/request-input-audit/issues/05-anthropic-messages.md) 、[ticket 06](.scratch/request-input-audit/issues/06-http-request-once.md) 、[ticket 07](.scratch/request-input-audit/issues/07-responses-websocket.md) 、[ticket 08](.scratch/request-input-audit/issues/08-search-and-browse.md) 、[ticket 09](.scratch/request-input-audit/issues/09-retention-and-settings.md) 、[ticket 10](.scratch/request-input-audit/issues/10-storage-budget.md) 、[ticket 11](.scratch/request-input-audit/issues/11-fail-open-and-restart.md) 与 [ticket 12](.scratch/request-input-audit/issues/12-gap-history-and-alerts.md) 的双端验收范围，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
+本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)、[ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md)、[ticket 03](.scratch/request-input-audit/issues/03-chat-input-boundaries.md)、[ticket 04](.scratch/request-input-audit/issues/04-responses-http.md)、[ticket 05](.scratch/request-input-audit/issues/05-anthropic-messages.md) 、[ticket 06](.scratch/request-input-audit/issues/06-http-request-once.md) 、[ticket 07](.scratch/request-input-audit/issues/07-responses-websocket.md) 、[ticket 08](.scratch/request-input-audit/issues/08-search-and-browse.md) 、[ticket 09](.scratch/request-input-audit/issues/09-retention-and-settings.md) 、[ticket 10](.scratch/request-input-audit/issues/10-storage-budget.md) 、[ticket 11](.scratch/request-input-audit/issues/11-fail-open-and-restart.md) 、[ticket 12](.scratch/request-input-audit/issues/12-gap-history-and-alerts.md) 与 [ticket 13](.scratch/request-input-audit/issues/13-delivery-and-platform-validation.md) 的固定基线功能范围。**完整第一版已在macOS arm64、Linux amd64／arm64完成隔离合成系统验收，不代表生产部署、性能或未验证故障已通过**；实际命令、失败复测及范围见[交付验收记录](docs/verification/delivery-platform-validation-2026-10-15.md)。
 
 ## 已实现范围
 
@@ -31,9 +31,9 @@
 
 ## 未完成与风险
 
-尚无上述白名单以外的内容类型、三协议完整 SSE/重试/断开回归矩阵或异常退出未落盘副本重放。当前异常重启只检测并报告不确定性，不恢复内存队列，也不是 exactly-once。Linux amd64 已在 Debian 13 原生构建并完成现有系统、工具及八个浏览器场景各两轮回归，本票另以隔离64MiB tmpfs验证真实ENOSPC和只读重启故障；Linux arm64、其他块设备/文件系统及运行中热切只读仍未验证，详见[本票双平台验收记录](docs/verification/fail-open-restart-2026-10-15.md)、[容量票记录](docs/verification/storage-budget-2026-10-15.md)和[前序Linux记录](docs/verification/linux-amd64-2026-10-15.md)。当前已增加统一到期隐藏、周期回收与保留设置；暂停、移除不会改变接收时间或提前删除未到期历史。容量自动恢复不代表真实 I/O/完整性故障可自动恢复；本票基本重启诊断不等于完整故障恢复。
+不支持上述白名单之外的内容类型，也不重放异常退出时未落盘副本。异常重启只检测并报告不确定性，不恢复内存队列，不是 exactly-once。票13已分别完成三协议正常／SSE、失败／重试／超时／断开及一次提交回归，并在macOS arm64、Debian13 Linux amd64、Debian12 Linux arm64原生构建、加载和运行系统／工具／八浏览器场景各两轮；两Linux另以隔离64MiB tmpfs实测ENOSPC和只读重启，详见[交付验收记录](docs/verification/delivery-platform-validation-2026-10-15.md)。其他块设备／文件系统、断电及运行中热切只读仍未验证。暂停、移除不冻结期限或提前删除未到期历史；容量自动恢复不代表真实I/O／完整性损坏能自动修复。
 
-应用层不加密。专用目录为 `0700`、文件为 `0600`，仍需保护主机、磁盘、快照和备份。逻辑到期和文件空间回收不等于磁盘、数据库空闲页、文件系统、快照或备份安全擦除；应用不控制外部副本的保留。没有安全擦除或 native 进程崩溃隔离保证；常规解析/队列/存储错误 fail-open，不代表零丢失、零延迟或吞吐承诺。诊断包含有界运行期原因码/已知计数，以及固定大小的持久缺口历史、已阅和重启摘要；运行期计数重启后归零，不能解释为历史没有缺口，不提供逐事件日志或未落盘副本恢复。ticket 12双平台结果及失败复测记录见[缺口历史验收](docs/verification/gap-history-alerts-2026-10-15.md)。
+应用层不加密。专用目录为 `0700`、文件为 `0600`，主机高权限、数据卷、快照和备份读取者仍能读取正文；管理员必须保护这些访问边界。逻辑到期和文件空间回收不等于磁盘、数据库空闲页、文件系统、快照或备份安全擦除；应用不控制外部副本的保留。没有安全擦除或 native 进程崩溃隔离保证；常规解析/队列/存储错误 fail-open，不代表零丢失、零延迟或吞吐承诺。诊断包含有界运行期原因码/已知计数，以及固定大小的持久缺口历史、已阅和重启摘要；运行期计数重启后归零，不能解释为历史没有缺口，不提供逐事件日志或未落盘副本恢复。ticket 12双平台结果及失败复测记录见[缺口历史验收](docs/verification/gap-history-alerts-2026-10-15.md)。
 
 宿主 `identity.seed` 必须与数据目录一起保护和备份；插件不读取/修改它的内容。已有数据但 seed 缺失、损坏或权限不合规时停采，不静默轮换全部对象。目录祖先不能是符号链接，macOS 使用真实路径，例如 `/private/var/...` 而非 `/var/...`。
 
@@ -41,7 +41,9 @@
 
 ## 本地构建
 
-需要 Go ≥ 1.26、启用 CGO、C 编译器、Git、Python 3、`tar` 和 `patch`。已在 macOS arm64 和 Debian 13 / Linux amd64 上使用 Go 1.27.2 原生构建并运行验收；仅交叉编译不算目标平台运行通过。Linux 浏览器还需 Chromium 系统运行库，具体环境和未验证项见[Linux amd64 验收记录](docs/verification/linux-amd64-2026-10-15.md)。
+管理员独立加载配置、版本／ABI／观察契约的区别、成功判据及Linux私有小卷命令见[本地交付说明](docs/local-delivery.md)。完整交付的实际结果与未验证项集中在[票13验收记录](docs/verification/delivery-platform-validation-2026-10-15.md)，不能以构建成功代替目标平台运行。
+
+需要 Go ≥ 1.26、启用 CGO、C 编译器、Git、Python 3、`tar` 和 `patch`。已在macOS arm64、Debian13 Linux amd64及Debian12 Linux arm64上使用Go1.27.2原生构建并运行验收；仅交叉编译不算目标平台运行通过。Linux浏览器还需Chromium运行库，具体环境、arm64私有依赖准备和未验证项见[交付验收记录](docs/verification/delivery-platform-validation-2026-10-15.md)。
 
 ```bash
 make deps              # 明确准备 Go/Node 依赖；不执行 npm 生命周期脚本
@@ -62,7 +64,7 @@ make verify            # 全部系统/工具/浏览器验收；正常停止进�
 
 ```text
 .build/bin/cliproxyapi
-.build/plugins/request-input-audit.dylib  # macOS；Linux amd64 为 .so，已完成 Debian 13 原生运行验收
+.build/plugins/request-input-audit.dylib  # macOS；Linux amd64/arm64 为 .so，均已实际加载和运行
 ```
 
 `go test ./...` 的系统测试要求先构建宿主及插件，不因产物缺失静默跳过。测试仅创建合成配置和受控 HTTP 上游，数据保留在 `.test-data/`；正常停止本测试创建的进程，不自动删除数据。
@@ -145,11 +147,11 @@ make test-one TEST='TestAnthropic'
 make browser-run
 ```
 
-Anthropic 本票未宣称该协议的重试/断开完整矩阵、其他平台或后续票据已完成；Responses WebSocket 单独见下节 ticket 07 验收。
+上述Anthropic输入边界专项与后续票13的重试／取消／断开矩阵互补；平台和完整交付结论以[票13验收记录](docs/verification/delivery-platform-validation-2026-10-15.md)为准。Responses WebSocket另见下节消息级验收。
 
 ## HTTP 一次提交语义验收
 
-`tests/system/http_once*_test.go` 在 Chat Completions 已可用链路验证通用机制，不据此宣称 Responses HTTP、Anthropic Messages 的完整失败/重试矩阵已完成；三协议回归仍由 ticket 13 执行。
+`tests/system/http_once*_test.go` 保留Chat Completions的通用机制验收；票13新增 `http_once_protocols_test.go` 与 `http_protocol*_test.go`，分别执行三协议正常／SSE回复前保存、上游失败／408、SSE中途错误、真实客户端取消／期限超时／首token后断开、重试／账号切换／嵌套执行、重复提交、路由／认证／读体失败及存储故障恢复。每项同实例两轮，核对实际模型请求、公开响应和一次保存；408不冒充传输超时。平台实际结果见[交付验收记录](docs/verification/delivery-platform-validation-2026-10-15.md)，不以单一协议通过推广其他协议。
 
 - 相同文本、相同客户端请求 ID/会话信息重交两次，产生不同宿主提交 ID 的独立记录，不按内容或客户端字段去重。
 - 正常、上游失败、上游 `408` 超时响应及 SSE 请求，在上游响应/首 token 被通道屏障阻塞时已能查询本轮精确详情；SSE token 后失败保留原错误完成语义。公开响应及转发请求与关闭审计的宿主对照，不把正常协议改写当作审计副作用。
@@ -181,7 +183,7 @@ make test-one TEST='TestResponsesWebsocket|TestSettings'
 make browser-run
 ```
 
-管理页面复用原列表/单条详情，`responses-websocket` 显示为 Responses WebSocket，截断和提取不完整独立标记。当前浏览器七场景各两轮，仅保存有限状态截图/结果；macOS arm64与原SSH Debian 13 / Linux amd64环境均已验证，预算新增场景也在两端实际运行。异常恢复、Linux arm64、Linux 磁盘故障及三协议最终失败矩阵仍未完成，未宣称完整第一版已交付。
+管理页面复用原列表/单条详情，`responses-websocket` 显示为 Responses WebSocket，截断和提取不完整独立标记。浏览器现有八场景各两轮，只保存有限状态截图／结果；异常重启、缺口已阅和Linux真实磁盘测试已加入。最新三端和三协议交付结论统一见[票13验收记录](docs/verification/delivery-platform-validation-2026-10-15.md)，旧票结果不替代本轮运行。
 
 ## 保留期与配置验收
 
@@ -204,7 +206,7 @@ make test-one TEST='TestRetention|TestSettings|TestSearch'
 - 正文准入：`used + 本次最坏增长 + 1MiB配置预留 + (1MiB+4KiB)维护预留 <= budget`。配置原子替换可以使用自己的预留，但临时副本及目录增长仍须在预算内；混合段维护需要完整副本峰值，不能用临时文件绕过限制。
 - 降低预算先在旧预算内完成设置文件替换及同步，然后发布新预算。允许已有未过期历史暂时超过新预算，管理状态显示 `over_budget_bytes` 并暂停新采集。超额时需要新增临时空间的配置/混合维护会明确拒绝；仍可提高到足够预算，整段到期回收无需增长空间，不受前面混合段阻塞。超额期间主动暂停写入也可能被拒绝，不能把容量暂停当作持久的主动暂停。
 - 仅容量原因自动恢复：空闲至少 **2,891,776字节**，即配置/维护预留 + 512KiB最坏编码行 + 4KiB轮转开销 + 256KiB滞回量。启动、每分钟维护和成功配置事务后重评，必须实际写入并同步诊断文件；真实存储/完整性故障不会被提高预算清除。
-- 固定4KiB容量告警文件只保存版本、容量标记和最后发生时刻，异步合并原位写，不存原Key、正文或逐提交日志。正常关闭尽力同步；基础摘要在保留期内跨恢复/重启存在，以最后容量事件起算，调长不延长旧摘要，活动故障不因到期隐藏。运行期计数并非跨重启精确丢失数；完整缺口历史及已阅交互由后续票完善。诊断磁盘写入失败时 `diagnostics_persisted=false`，运行期仍显示真实故障，不保证底层磁盘耗尽时告警可持久化。
+- 固定4KiB诊断已由ticket12升级为v3，包含容量及其他固定原因的历史、可确定次数／下界／未知、观察时刻和已阅版本，不存原Key、正文或逐提交日志。正常关闭尽力同步；摘要在保留期内跨恢复／重启存在，调长不延长旧证据，活动故障不因到期或已阅隐藏。运行期计数不是跨重启精确丢失总数。诊断写入失败时 `diagnostics_persisted=false`，运行期仍显示真实故障，不保证底层磁盘耗尽时告警持久化。
 - 容量暂停仍通过只读观察判断预期跳过，工具续跑、控制和空输入不变成容量缺口；本应保存的新输入拒收才报告容量原因，不触发宿主桥接warning。模型调用不等待诊断落盘，不改变上游输入。1GiB不承诺完整保存任意流量七天。
 
 ## 管理 API
@@ -222,7 +224,8 @@ make test-one TEST='TestRetention|TestSettings|TestSearch'
 | POST | `/settings` | 可部分更新 `max_text_bytes:1..65536`、`retention_days:1..30`、`budget_bytes:4194304..1073741824`（均为整数）；缩短保留期必须附 `confirm_retention_shortening:true`，否则409；三字段一次原子提交，非法设置400，不接受重复/未知字段或null |
 | GET | `/records?offset=0&limit=20&object_id=<64hex>&from=<RFC3339Nano>&to=<RFC3339Nano>&model=<name>&q=<keyword>` | 所有筛选可选、取交集后分页；`offset`为0–10000000，`limit`为1–100，默认20；仅返回短预览及白名单元数据 |
 | GET | `/detail?id=<recordID>` | 独立记录正文和白名单元数据 |
-| GET | `/status` | 实时观察契约状态和基础采集诊断 |
+| GET | `/status` | 实时观察契约状态、采集诊断及 `state.gap_alerts` 历史／已阅快照 |
+| POST | `/gaps/acknowledge` | `{"generation":"实际展示的会话","revision":实际展示的版本}`；只确认已看到的提醒，不删除历史或解除活动故障；新事件并发／旧会话409，诊断不可用503，200响应的 `diagnostics_persisted=false` 明确尚未持久化 |
 
 `from`/`to` 按服务端接收时刻比较，包含两端；RFC3339Nano 可使用时区偏移，同一时刻不因字符串表示不同而被排除。页面输入使用浏览器本地时间，发送时转为 ISO 时间。`model` 精确匹配客户端提交的模型名，最多1024 UTF-8字节，不采用上游实际名。`q` 最多65536字节，按已保存正文的字面子串搜索，仅 ASCII 英文字母忽略大小写，不 trim，不解释正则或搜索语法。空模型/关键词表示不限制；时间参数提供后不得为空。重复的已知参数、非法时间/反向区间或越界参数返回固定400错误，不回显值。关键词仅作为本次查询使用，不持久化查询历史。
 

@@ -1,7 +1,8 @@
-// tooling 包通过公开脚本命令验证快速检查、暂存区门禁和无覆盖 hook 安装。
+// tooling 包验证公开检查、暂存门禁、无覆盖 hook 安装和隔离构建的 overlay 路径。
 package tooling
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -276,6 +277,63 @@ func TestInstallIsIdempotentAndHookChecksIndex(t *testing.T) {
 	output, err := commandFixture(root, "bash", filepath.Join(root, ".githooks/pre-commit"))
 	if err == nil || !strings.Contains(output, "gofmt") {
 		t.Fatalf("自带入口必须调用暂存检查，err=%v\n%s", err, output)
+	}
+}
+
+// TestBuildOverlayWithSymlinkBuild 验证 .build 指向其他卷时，Go -C 仍实际采用两个隔离构建脚本的 overlay 路径。
+func TestBuildOverlayWithSymlinkBuild(t *testing.T) {
+	for _, script := range []string{"build-retention-test.sh", "build-compatibility-test.sh"} {
+		t.Run(script, func(t *testing.T) {
+			root := newFixture(t)
+			physical := newFixture(t)
+			if err := os.Symlink(physical, filepath.Join(root, ".build")); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(filepath.Join(projectRoot(t), "scripts", script))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// 直接执行脚本实际使用的路径赋值，避免复制修复表达式后测试与脚本各自通过。
+			var assignments []string
+			for _, line := range strings.Split(string(data), "\n") {
+				if strings.HasPrefix(line, "WORK=") || strings.HasPrefix(line, "OVERLAY_DIR=") {
+					assignments = append(assignments, line)
+				}
+			}
+			if len(assignments) != 2 {
+				t.Fatalf("构建脚本应分别创建 WORK 和 OVERLAY_DIR：%v", assignments)
+			}
+			runFixture(t, root, "mkdir", "-p", ".build/overlay-test/sources")
+			setup := "set -euo pipefail\nOUT=\"$1/.build/overlay-test\"\n" + strings.Join(assignments, "\n") + "\nprintf '%s\\n' \"$WORK\" \"$OVERLAY_DIR\"\n"
+			paths := strings.Split(strings.TrimSpace(runFixture(t, root, "bash", "-c", setup, "overlay-test", root)), "\n")
+			if len(paths) != 2 {
+				t.Fatalf("路径输出不完整：%v", paths)
+			}
+			work, overlayDir := paths[0], paths[1]
+			writeFixture(t, work, "go.mod", "module overlayfixture\n\ngo 1.26.0\n")
+			writeFixture(t, work, "main.go", "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"ordinary-host\") }\n")
+			writeFixture(t, overlayDir, "main.go", "package main\n\nimport \"fmt\"\n\nfunc main() { fmt.Println(\"overlay-applied\") }\n")
+			overlay := filepath.Join(overlayDir, "overlay.json")
+			mapping, err := json.Marshal(map[string]any{"Replace": map[string]string{filepath.Join(work, "main.go"): filepath.Join(overlayDir, "main.go")}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeFixture(t, overlayDir, "overlay.json", string(mapping))
+			binary := filepath.Join(overlayDir, "host")
+			runFixture(t, root, "go", "-C", work, "build", "-overlay", overlay, "-o", binary, ".")
+			if got := strings.TrimSpace(runFixture(t, root, binary)); got != "overlay-applied" {
+				t.Fatalf("符号链接目录下的 overlay 被静默忽略：%q", got)
+			}
+			for _, path := range paths {
+				physicalPath, err := filepath.EvalSymlinks(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if path != physicalPath {
+					t.Fatalf("WORK 和 OVERLAY_DIR 均应使用物理路径：%q != %q", path, physicalPath)
+				}
+			}
+		})
 	}
 }
 

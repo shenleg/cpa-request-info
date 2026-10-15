@@ -219,8 +219,7 @@ plugins:
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
-	raw, _ := os.ReadFile(filepath.Join(dir, "host.log"))
-	t.Fatalf("宿主未启动（%s/%s）: %s", runtime.GOOS, runtime.GOARCH, raw)
+	t.Fatalf("宿主未启动（%s/%s）；诊断保留在隔离目录，不输出日志原文", runtime.GOOS, runtime.GOARCH)
 	return nil
 }
 

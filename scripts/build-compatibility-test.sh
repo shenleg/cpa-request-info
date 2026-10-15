@@ -16,12 +16,13 @@ assert manifest['commit'] == sys.argv[2], '宿主清单 commit 不匹配'
 for item in manifest['patches']:
     assert hashlib.sha256((root / 'host' / item['path']).read_bytes()).hexdigest() == item['sha256'], '宿主补丁摘要不匹配'
 PY
-WORK="$(mktemp -d "$OUT/sources/host.XXXXXX")"
+# Go -C 使用物理目录；overlay 路径也必须解析 .build 的符号链接，否则替换会被静默忽略。
+WORK="$(cd "$(mktemp -d "$OUT/sources/host.XXXXXX")" && pwd -P)"
 git -C "$SOURCE" archive "$COMMIT" | tar -x -C "$WORK"
 PATCH="$ROOT/host/patches/0001-readonly-input-audit.patch"
 patch -d "$WORK" -p1 --batch --fuzz=0 --dry-run < "$PATCH"
 patch -d "$WORK" -p1 --batch --fuzz=0 < "$PATCH"
-OVERLAY_DIR="$(mktemp -d "$OUT/sources/overlay.XXXXXX")"
+OVERLAY_DIR="$(cd "$(mktemp -d "$OUT/sources/overlay.XXXXXX")" && pwd -P)"
 python3 -I - "$WORK" "$OVERLAY_DIR" <<'PY'
 # 只替代真实宿主契约/注册能力；断言仍经真实鉴权、模型 HTTP 与管理 HTTP，而非插件私有方法。
 import json, pathlib, sys

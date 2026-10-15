@@ -107,13 +107,23 @@ func executeNested(raw []byte) bool {
 	if json.Unmarshal(raw, &req) != nil {
 		return false
 	}
+	type message struct{ Role, Content string }
 	var body struct {
-		Messages []struct{ Role, Content string }
+		Messages []message
+		Input    []message
 	}
-	if json.Unmarshal(req.Body, &body) != nil || len(body.Messages) == 0 {
+	if json.Unmarshal(req.Body, &body) != nil {
 		return true
 	}
-	last := body.Messages[len(body.Messages)-1]
+	messages := body.Messages
+	if len(body.Input) > 0 {
+		// Responses的原始入站使用input；不等宿主转换为messages才触发内部执行。
+		messages = body.Input
+	}
+	if len(messages) == 0 {
+		return true
+	}
+	last := messages[len(messages)-1]
 	if last.Role != "user" || !strings.HasPrefix(last.Content, "HTTP-NESTED-") {
 		return true
 	}

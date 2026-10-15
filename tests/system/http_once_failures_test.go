@@ -139,8 +139,8 @@ func TestHTTPOnceClientCancellation(t *testing.T) {
 }
 
 // incompleteHTTPOnce 经真实 TCP 在100屏障后发送未完整 chunk（内含完整 JSON），半关闭写端触发读体错误。
-// 返回公开错误响应；连接或读取失败终止测试，cleanup 仅关闭连接，不保存网络原文。
-func incompleteHTTPOnce(t *testing.T, h *instance, body []byte) httpOnceOutcome {
+// path 省略时使用 Chat；返回公开错误响应，连接或读取失败终止测试，仅关闭连接，不保存网络原文。
+func incompleteHTTPOnce(t *testing.T, h *instance, body []byte, path ...string) httpOnceOutcome {
 	t.Helper()
 	u, err := url.Parse(h.base)
 	if err != nil {
@@ -154,8 +154,12 @@ func incompleteHTTPOnce(t *testing.T, h *instance, body []byte) httpOnceOutcome 
 	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatal("不完整提交期限设置失败")
 	}
+	route := "/v1/chat/completions"
+	if len(path) > 0 {
+		route = path[0]
+	}
 	// chunked 避免日志中间件鉴权前读体；100此时证明请求已进入原协议读体边界。
-	if _, err := fmt.Fprintf(conn, "POST /v1/chat/completions HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n", u.Host, keyA); err != nil {
+	if _, err := fmt.Fprintf(conn, "POST %s HTTP/1.1\r\nHost: %s\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\nExpect: 100-continue\r\nConnection: close\r\n\r\n", route, u.Host, keyA); err != nil {
 		t.Fatal("不完整提交头发送失败")
 	}
 	reader := bufio.NewReader(conn)

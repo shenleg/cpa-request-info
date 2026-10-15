@@ -20,12 +20,13 @@ for item in manifest['patches']:
     actual = hashlib.sha256((root / 'host' / item['path']).read_bytes()).hexdigest()
     assert actual == item['sha256'], '宿主补丁摘要不匹配'
 PY
-WORK="$(mktemp -d "$OUT/sources/host.XXXXXX")"
+# Go -C 使用物理目录；overlay 路径也必须解析 .build 的符号链接，否则替换会被静默忽略。
+WORK="$(cd "$(mktemp -d "$OUT/sources/host.XXXXXX")" && pwd -P)"
 git -C "$SOURCE" archive "$COMMIT" | tar -x -C "$WORK"
 PATCH="$ROOT/host/patches/0001-readonly-input-audit.patch"
 patch -d "$WORK" -p1 --batch --fuzz=0 --dry-run < "$PATCH"
 patch -d "$WORK" -p1 --batch --fuzz=0 < "$PATCH"
-OVERLAY_DIR="$(mktemp -d "$OUT/sources/clock-overlay.XXXXXX")"
+OVERLAY_DIR="$(cd "$(mktemp -d "$OUT/sources/clock-overlay.XXXXXX")" && pwd -P)"
 OVERLAY="$(python3 -I "$ROOT/scripts/retention-clock-overlay.py" "$WORK" "$ROOT" "$OVERLAY_DIR")"
 gofmt -w "$OVERLAY_DIR/input_audit.go"
 CGO_ENABLED=1 go -C "$WORK" build -overlay "$OVERLAY" -o "$OUT/bin/cliproxyapi" ./cmd/server

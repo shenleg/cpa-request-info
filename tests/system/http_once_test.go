@@ -28,11 +28,15 @@ type httpOnceOutcome struct {
 	err  error
 }
 
-// beginHTTPOnce 发出公开 Chat 请求并异步读取完整响应；ctx 可取消，body 是合成原始提交。
-// 返回本轮结果通道，网络/读取错误随结果返回；调用者必须等待结果或取消，不在 goroutine 中终止测试。
-func beginHTTPOnce(t *testing.T, h *instance, ctx context.Context, body []byte) <-chan httpOnceOutcome {
+// beginHTTPOnce 发出公开模型请求并异步读取完整响应；ctx 可取消，body 是合成原始提交。
+// path 省略时使用 Chat 路径；返回结果通道，网络/读取错误随结果返回，调用者必须等待或取消。
+func beginHTTPOnce(t *testing.T, h *instance, ctx context.Context, body []byte, path ...string) <-chan httpOnceOutcome {
 	t.Helper()
-	req, err := http.NewRequestWithContext(ctx, "POST", h.base+"/v1/chat/completions", bytes.NewReader(body))
+	route := "/v1/chat/completions"
+	if len(path) > 0 {
+		route = path[0]
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", h.base+route, bytes.NewReader(body))
 	if err != nil {
 		t.Fatal("一次提交请求构造失败")
 	}
