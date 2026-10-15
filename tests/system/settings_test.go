@@ -18,8 +18,8 @@ func settingsLimit(t *testing.T, h *instance) int {
 	code, raw := h.request(t, "GET", api+"/settings", adminKey, nil)
 	var fields map[string]json.RawMessage
 	var limit int
-	if code != http.StatusOK || json.Unmarshal(raw, &fields) != nil || len(fields) != 2 || json.Unmarshal(fields["max_text_bytes"], &limit) != nil {
-		t.Fatalf("settings 应返回正文上限和保留天数，实际 HTTP=%d", code)
+	if code != http.StatusOK || json.Unmarshal(raw, &fields) != nil || len(fields) != 3 || fields["retention_days"] == nil || fields["budget_bytes"] == nil || json.Unmarshal(fields["max_text_bytes"], &limit) != nil {
+		t.Fatalf("settings 应返回正文上限、保留天数和总预算，实际 HTTP=%d", code)
 	}
 	return limit
 }

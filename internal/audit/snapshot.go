@@ -10,7 +10,7 @@ type Snapshot struct {
 }
 
 // Prepare 根据接收时配置给 event 返回独立决策；event 仅含可信身份和提交元数据，不传正文。
-// 无磁盘 I/O 或异常；未监控/主动暂停为skip，无效事件或存储故障为unavailable，不影响模型调用。
+// 无磁盘 I/O 或异常；未监控/主动暂停为skip，无效事件或非容量存储故障为unavailable，容量由Observe归因，不影响模型调用。
 func (c *Collector) Prepare(event Event) Snapshot {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -26,7 +26,8 @@ func (c *Collector) Prepare(event Event) Snapshot {
 		result.Decision = "skip"
 		return result
 	}
-	if c.closed || c.status.State != "active" {
+	// 容量拒收交给 Observe 记为容量缺口，不伪装桥接不可用或新增宿主 warning。
+	if c.closed || (c.status.State != "active" && c.status.Reason != "budget_exhausted") {
 		return result
 	}
 	result.Decision = "capture"

@@ -1,4 +1,4 @@
-// 本文件维护有界审计对象目录、正文上限及保留配置；持久化成功后才发布，停用不删除未到期历史。
+// 本文件维护有界对象目录、正文上限、保留期和总预算；持久化成功后才发布，停用不删除未到期历史。
 package audit
 
 import (
@@ -21,6 +21,7 @@ type configuration struct {
 	Objects       map[string]Object `json:"objects"`
 	RetentionDays int               `json:"retention_days"`
 	RetentionCaps []retentionCap    `json:"retention_caps"`
+	BudgetBytes   int64             `json:"budget_bytes"`
 }
 
 // Monitor 添加或重新启用 objectID 并设置当前 name；名称最多256 UTF-8字节，身份为64位十六进制。
@@ -126,7 +127,7 @@ func (c *Collector) changeConfiguration(change func(*configuration) error) error
 		return errors.New("configuration_unavailable")
 	}
 	next := c.config
-	next.Version = 3
+	next.Version = 4
 	next.RetentionCaps = append([]retentionCap{}, c.config.RetentionCaps...)
 	next.Objects = cloneObjects(c.config.Objects)
 	c.mu.Unlock()
@@ -141,7 +142,11 @@ func (c *Collector) changeConfiguration(change func(*configuration) error) error
 	if err != nil || len(data) > maxLine {
 		return errors.New("monitor_limit")
 	}
-	if err = c.saveMonitors(data); err != nil {
+	// 降额先按旧预算完成原子替换；提高预算则允许使用管理员新授权的空间。
+	c.mu.Lock()
+	writeBudget := max(c.config.BudgetBytes, next.BudgetBytes)
+	c.mu.Unlock()
+	if err = c.saveMonitors(data, writeBudget); err != nil {
 		reason := "storage_error"
 		if err.Error() == "budget_exhausted" {
 			reason = "budget_exhausted"
@@ -151,7 +156,12 @@ func (c *Collector) changeConfiguration(change func(*configuration) error) error
 	}
 	c.mu.Lock()
 	c.config = next
+	c.status.BudgetBytes = next.BudgetBytes
 	c.mu.Unlock()
+	if err := c.refreshCapacity(); err != nil {
+		// 配置已经同步成功；独立的写入健康故障不能伪装为本次设置未保存。
+		c.pauseStorage(err)
+	}
 	return nil
 }
 
@@ -160,7 +170,7 @@ func decodeConfiguration(data []byte) (configuration, error) {
 	if err != nil {
 		return configuration{}, errors.New("invalid_configuration")
 	}
-	config := configuration{Version: 3, MaxTextBytes: maxText, RetentionDays: defaultRetentionDays, RetentionCaps: []retentionCap{}, Objects: make(map[string]Object)}
+	config := configuration{Version: 4, MaxTextBytes: maxText, RetentionDays: defaultRetentionDays, RetentionCaps: []retentionCap{}, Objects: make(map[string]Object)}
 	if _, versioned := fields["version"]; versioned {
 		var version *int
 		var paused *bool
@@ -174,10 +184,18 @@ func decodeConfiguration(data []byte) (configuration, error) {
 			config.MaxTextBytes = *limit
 		}
 		// 旧version2缺省保留期为七天；新版要求完整期限字段，不能把损坏配置当作默认设置。
-		if json.Unmarshal(fields["version"], &version) != nil || version == nil || (*version != 2 && *version != 3) {
+		if json.Unmarshal(fields["version"], &version) != nil || version == nil || (*version != 2 && *version != 3 && *version != 4) {
 			return configuration{}, errors.New("invalid_configuration")
 		}
-		if *version == 3 {
+		if *version == 4 {
+			expectedFields++
+			var budget *int64
+			if json.Unmarshal(fields["budget_bytes"], &budget) != nil || budget == nil || *budget < minBudget || *budget > defaultBudget {
+				return configuration{}, errors.New("invalid_configuration")
+			}
+			config.BudgetBytes = *budget
+		}
+		if *version >= 3 {
 			expectedFields += 2
 			var days *int
 			if json.Unmarshal(fields["retention_days"], &days) != nil || days == nil || *days < 1 || *days > maxRetentionDays || decodeRetentionCaps(fields["retention_caps"], *days, &config.RetentionCaps) != nil {

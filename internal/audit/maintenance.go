@@ -35,6 +35,7 @@ func (c *Collector) sweepExpired(now time.Time) error {
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
+	capacityBlocked := false
 	for index := 0; index < len(c.segments); {
 		seg := c.segments[index]
 		expired := 0
@@ -67,7 +68,13 @@ func (c *Collector) sweepExpired(now time.Time) error {
 		} else {
 			committed, err := c.retainLiveLines(seg, now)
 			if err != nil {
-				return err
+				if err.Error() != "budget_exhausted" {
+					return err
+				}
+				// 降额后混合段可能无副本空间；后面的全到期段仍能不增加占用地释放空间。
+				capacityBlocked = true
+				index++
+				continue
 			}
 			c.segments[index].committed = committed
 			c.segments[index].count -= expired
@@ -84,6 +91,9 @@ func (c *Collector) sweepExpired(now time.Time) error {
 	c.mu.Lock()
 	c.status.UsedBytes = used
 	c.mu.Unlock()
+	if err == nil && capacityBlocked {
+		return errors.New("budget_exhausted")
+	}
 	return err
 }
 
@@ -96,7 +106,7 @@ func (c *Collector) retainLiveLines(seg segment, now time.Time) (int64, error) {
 	c.mu.Lock()
 	budget := c.status.BudgetBytes
 	c.mu.Unlock()
-	if used+rounded(seg.committed)+auxiliaryReserve > budget {
+	if used+rounded(seg.committed)+4096+auxiliaryReserve > budget {
 		return 0, errors.New("budget_exhausted")
 	}
 	source, err := c.root.OpenFile(seg.name, os.O_RDONLY|syscall.O_NOFOLLOW, 0)

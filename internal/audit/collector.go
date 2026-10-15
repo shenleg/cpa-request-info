@@ -54,17 +54,22 @@ type Record struct {
 
 // Status 是有界运行状态快照；Gaps 仅有固定原因码，不携带输入或底层错误上下文。
 type Status struct {
-	CapturePaused bool              `json:"capture_paused"`
-	Available     bool              `json:"available"`
-	State         string            `json:"state"`
-	Reason        string            `json:"reason"`
-	Saved         int64             `json:"saved"`
-	Queued        int64             `json:"queued"`
-	Gaps          map[string]uint64 `json:"gaps"`
-	UsedBytes     int64             `json:"used_bytes"`
-	BudgetBytes   int64             `json:"budget_bytes"`
-	MaxTextBytes  int               `json:"max_text_bytes"`
-	RetentionDays int               `json:"retention_days"`
+	CapturePaused        bool              `json:"capture_paused"`
+	Available            bool              `json:"available"`
+	State                string            `json:"state"`
+	Reason               string            `json:"reason"`
+	Saved                int64             `json:"saved"`
+	Queued               int64             `json:"queued"`
+	Gaps                 map[string]uint64 `json:"gaps"`
+	UsedBytes            int64             `json:"used_bytes"`
+	BudgetBytes          int64             `json:"budget_bytes"`
+	MaxTextBytes         int               `json:"max_text_bytes"`
+	RetentionDays        int               `json:"retention_days"`
+	ReservedBytes        int64             `json:"reserved_bytes"`
+	ResumeRequiredBytes  int64             `json:"resume_required_bytes"`
+	OverBudgetBytes      int64             `json:"over_budget_bytes"`
+	CapacityGap          bool              `json:"capacity_gap"`
+	DiagnosticsPersisted bool              `json:"diagnostics_persisted"`
 }
 
 // Collector 是审计深模块；所有存储、队列、解析和缺口诊断均由它管理。
@@ -76,10 +81,14 @@ type Collector struct {
 	lock        *os.File
 	directory   *os.File
 	active      *os.File
-	config      configuration
-	configValid bool
-	generation  string
-	segments    []segment
+	diagnostics *os.File
+	// diagnosticWake 只通知单写入者合并保存容量告警，不在模型请求中等待磁盘。
+	diagnosticWake chan struct{}
+	capacityLastAt string
+	config         configuration
+	configValid    bool
+	generation     string
+	segments       []segment
 	// 只保留最近查询页（最多100条）的文件位置，不缓存正文或建立全量身份索引；由 ioMu 保护。
 	pageHints   map[string]recordLocation
 	queue       chan queuedRecord
@@ -101,7 +110,7 @@ type segment struct {
 }
 
 // Open 打开独占审计目录并扫描已提交记录；dir 必须不经过符号链接。
-// budget 为总目录预算，0 使用 1 GiB，合法范围 4 MiB 至 1 GiB。
+// budget 是缺少持久预算时的初始值，0 使用 1 GiB，合法范围 4 MiB 至 1 GiB；已保存设置优先。
 // 返回可关闭的采集器；参数、随机代际来源、目录或锁不可用返回固定错误，损坏数据则返回停采实例。
 func Open(dir string, budget int64) (*Collector, error) {
 	if budget == 0 {
@@ -119,7 +128,7 @@ func Open(dir string, budget int64) (*Collector, error) {
 	if err != nil {
 		return nil, errors.New("storage_unavailable")
 	}
-	c := &Collector{root: root, generation: hex.EncodeToString(generation[:]), config: configuration{Version: 2, MaxTextBytes: maxText, RetentionDays: defaultRetentionDays, RetentionCaps: []retentionCap{}, Objects: make(map[string]Object)}, queue: make(chan queuedRecord, 64), done: make(chan struct{}), status: Status{Available: true, State: "active", BudgetBytes: budget, Gaps: map[string]uint64{}}}
+	c := &Collector{root: root, diagnosticWake: make(chan struct{}, 1), generation: hex.EncodeToString(generation[:]), config: configuration{Version: 4, BudgetBytes: budget, MaxTextBytes: maxText, RetentionDays: defaultRetentionDays, RetentionCaps: []retentionCap{}, Objects: make(map[string]Object)}, queue: make(chan queuedRecord, 64), done: make(chan struct{}), status: Status{Available: true, State: "active", BudgetBytes: budget, Gaps: map[string]uint64{}}}
 	for _, key := range []string{"read_error", "invalid_event", "invalid_json", "unsupported_protocol", "unsupported_content", "metadata_too_large", "queue_full", "storage_error", "budget_exhausted", "observer_unavailable"} {
 		c.status.Gaps[key] = 0
 	}
@@ -136,6 +145,7 @@ func Open(dir string, budget int64) (*Collector, error) {
 func (c *Collector) Observe(event Event) {
 	c.mu.Lock()
 	accepting := !c.closed && c.status.State == "active"
+	reason := c.status.Reason
 	generation := c.generation
 	c.mu.Unlock()
 	if event.Snapshot.Version != 3 || event.Snapshot.CollectorGeneration != generation {
@@ -150,10 +160,11 @@ func (c *Collector) Observe(event Event) {
 		return
 	}
 	// 名单和主动暂停只在 Prepare 决定；此处只能因真实存储故障/关闭拒绝旧副本。
-	if !accepting {
+	if !accepting && reason != "budget_exhausted" {
 		c.gap("storage_error")
 		return
 	}
+	// 容量暂停仍判断预期跳过；只有本应保存的新输入才在入队边界记容量缺口，不将工具续跑误报为丢失。
 	if event.ReadError {
 		c.gap("read_error")
 		return
@@ -249,6 +260,11 @@ func (c *Collector) Observe(event Event) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed || c.status.State != "active" {
+		reason := "storage_error"
+		if c.status.Reason == "budget_exhausted" {
+			reason = "budget_exhausted"
+		}
+		c.incrementGap(reason)
 		return
 	}
 	if c.queuedBytes+size > maxQueuedBytes {
@@ -272,6 +288,12 @@ func (c *Collector) Status() Status {
 	result.CapturePaused = c.config.CapturePaused
 	result.MaxTextBytes = c.config.MaxTextBytes
 	result.RetentionDays = c.config.RetentionDays
+	result.ReservedBytes = auxiliaryReserve + maintenanceReserve
+	result.ResumeRequiredBytes = resumeRequiredBytes
+	result.OverBudgetBytes = max(0, result.UsedBytes-result.BudgetBytes)
+	if result.CapacityGap && result.Reason != "budget_exhausted" {
+		result.CapacityGap = !c.expired(Record{ReceivedAt: c.capacityLastAt}, auditNow())
+	}
 	result.Gaps = make(map[string]uint64, len(c.status.Gaps))
 	for key, value := range c.status.Gaps {
 		result.Gaps[key] = value
@@ -289,6 +311,11 @@ func (c *Collector) Close() {
 		c.mu.Unlock()
 		<-c.done
 		c.ioMu.Lock()
+		if c.diagnostics != nil {
+			if err := c.saveDiagnostics(); err != nil {
+				c.pauseStorage(err)
+			}
+		}
 		c.releaseFiles()
 		c.ioMu.Unlock()
 		c.mu.Lock()
@@ -306,15 +333,28 @@ func (c *Collector) incrementGap(key string) {
 	if c.status.Gaps[key] != ^uint64(0) {
 		c.status.Gaps[key]++
 	}
+	if key == "budget_exhausted" {
+		c.status.CapacityGap = true
+		c.capacityLastAt = auditNow().UTC().Format(time.RFC3339Nano)
+		c.status.DiagnosticsPersisted = false
+		select {
+		case c.diagnosticWake <- struct{}{}:
+		default:
+		}
+	}
 }
 func (c *Collector) pause(reason string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.status.State = "paused"
-	c.status.Reason = reason
 	if _, exists := c.status.Gaps[reason]; exists {
 		c.incrementGap(reason)
 	}
+	// 容量配置失败不能覆盖尚未核实的I/O或完整性故障，否则调高预算会错误地恢复采集。
+	if reason == "budget_exhausted" && c.status.State == "paused" && c.status.Reason != "budget_exhausted" {
+		return
+	}
+	c.status.State = "paused"
+	c.status.Reason = reason
 }
 func protocolObject(raw []byte) (map[string]json.RawMessage, error) {
 	if !utf8.Valid(raw) {

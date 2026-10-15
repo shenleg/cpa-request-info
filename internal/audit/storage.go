@@ -109,7 +109,12 @@ func (c *Collector) initialize() error {
 			c.pause("storage_error")
 			return nil
 		}
+		if config.BudgetBytes == 0 {
+			// 只有旧版没有持久预算；后续保存后启动默认值不再覆盖管理员设置。
+			config.BudgetBytes = c.status.BudgetBytes
+		}
 		c.config = config
+		c.status.BudgetBytes = config.BudgetBytes
 	} else if !errors.Is(err, os.ErrNotExist) {
 		c.pause("storage_error")
 		return nil
@@ -133,12 +138,18 @@ func (c *Collector) initialize() error {
 			return nil
 		}
 	}
-	if err := c.sweepExpired(auditNow()); err != nil {
-		c.pause("storage_error")
-		return nil
+	if err := c.openDiagnostics(); err != nil {
+		c.pauseStorage(err)
 	}
-	if c.status.UsedBytes+auxiliaryReserve+maintenanceReserve >= c.status.BudgetBytes {
+	if err := c.sweepExpired(auditNow()); err != nil {
+		c.pauseStorage(err)
+	}
+	// 新实例没有上一运行期的暂停原因；启动也须留出最坏写入和滞回空间，不能因默认active绕过恢复门槛。
+	if c.status.State == "active" && c.status.BudgetBytes-c.status.UsedBytes < resumeRequiredBytes {
 		c.pause("budget_exhausted")
+	}
+	if err := c.refreshCapacity(); err != nil {
+		c.pauseStorage(err)
 	}
 	return nil
 }
@@ -295,17 +306,16 @@ func eachRecord(file io.Reader, limit int64, visit func(Record, int64) error) er
 	}
 }
 
-func (c *Collector) saveMonitors(data []byte) error {
+func (c *Collector) saveMonitors(data []byte, budget int64) error {
 	_, used, err := c.scanDirectory()
 	if err != nil {
 		return errors.New("storage_error")
 	}
 	c.mu.Lock()
 	c.status.UsedBytes = used
-	budget := c.status.BudgetBytes
 	c.mu.Unlock()
-	if used+rounded(int64(len(data)))+auxiliaryReserve+maintenanceReserve > budget {
-		c.pause("budget_exhausted")
+	// 配置可以使用自己的预留，但临时副本和目录增长必须仍在事务预算内。
+	if used+rounded(int64(len(data)))+4096 > budget {
 		return errors.New("budget_exhausted")
 	}
 	file, err := c.root.OpenFile("monitors.tmp", os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
@@ -338,10 +348,22 @@ func (c *Collector) writeLoop() {
 	for {
 		var queued queuedRecord
 		select {
+		case <-c.diagnosticWake:
+			c.ioMu.Lock()
+			if c.diagnostics != nil {
+				if err := c.saveDiagnostics(); err != nil {
+					c.pauseStorage(err)
+				}
+			}
+			c.ioMu.Unlock()
+			continue
 		case <-ticks:
 			c.ioMu.Lock()
 			if err := c.sweepExpired(auditNow()); err != nil {
-				c.pause("storage_error")
+				c.pauseStorage(err)
+			}
+			if err := c.refreshCapacity(); err != nil {
+				c.pauseStorage(err)
 			}
 			c.ioMu.Unlock()
 			continue
@@ -464,6 +486,12 @@ func (c *Collector) releaseFiles() {
 			failed = true
 		}
 		c.active = nil
+	}
+	if c.diagnostics != nil {
+		if c.diagnostics.Close() != nil {
+			failed = true
+		}
+		c.diagnostics = nil
 	}
 	if c.lock != nil {
 		if syscall.Flock(int(c.lock.Fd()), syscall.LOCK_UN) != nil {

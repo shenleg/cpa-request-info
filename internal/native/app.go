@@ -34,7 +34,6 @@ type App struct {
 	host      HostCall
 	collector *audit.Collector
 	dir       string
-	budget    int64
 	available bool
 	reason    string
 }
@@ -129,6 +128,10 @@ func (a *App) configure(raw []byte) {
 	if cfg.Budget == 0 {
 		cfg.Budget = 1 << 30
 	}
+	if cfg.Budget < 4<<20 || cfg.Budget > 1<<30 {
+		a.reason = "configuration_invalid"
+		return
+	}
 	caps, err := a.host("host.input_audit.capabilities", struct{}{})
 	var capability struct {
 		ContractVersion int      `json:"contract_version"`
@@ -144,7 +147,8 @@ func (a *App) configure(raw []byte) {
 		a.reason = "configuration_invalid"
 		return
 	}
-	if a.collector != nil && a.dir == dir && a.budget == cfg.Budget {
+	// YAML 预算只初始化旧配置；同目录重载不能覆盖管理端已保存的预算或重开写入者。
+	if a.collector != nil && a.dir == dir {
 		a.available = true
 		a.reason = ""
 		return
@@ -160,7 +164,6 @@ func (a *App) configure(raw []byte) {
 	}
 	a.collector = c
 	a.dir = dir
-	a.budget = cfg.Budget
 	a.available = true
 	a.reason = ""
 }
@@ -257,7 +260,7 @@ func (a *App) management(req managementRequest) any {
 	if strings.HasSuffix(req.Path, "/settings") {
 		if req.Method == "GET" {
 			state := c.Status()
-			return responseJSON(200, map[string]int{"max_text_bytes": state.MaxTextBytes, "retention_days": state.RetentionDays})
+			return responseJSON(200, map[string]any{"max_text_bytes": state.MaxTextBytes, "retention_days": state.RetentionDays, "budget_bytes": state.BudgetBytes})
 		}
 		if len(req.Body) > 2048 {
 			return responseJSON(400, map[string]string{"error": "invalid_settings"})
@@ -414,6 +417,12 @@ func settingsChange(raw []byte) (audit.SettingsChange, error) {
 				}
 				change.RetentionDays = value
 			}
+		case "budget_bytes":
+			var value *int64
+			if decoder.Decode(&value) != nil || value == nil || *value < 4<<20 || *value > 1<<30 {
+				return change, invalid
+			}
+			change.BudgetBytes = value
 		case "confirm_retention_shortening":
 			var confirmed *bool
 			if decoder.Decode(&confirmed) != nil || confirmed == nil {
@@ -428,7 +437,7 @@ func settingsChange(raw []byte) (audit.SettingsChange, error) {
 		return change, invalid
 	}
 	var trailing any
-	if decoder.Decode(&trailing) != io.EOF || change.MaxTextBytes == nil && change.RetentionDays == nil {
+	if decoder.Decode(&trailing) != io.EOF || change.MaxTextBytes == nil && change.RetentionDays == nil && change.BudgetBytes == nil {
 		return change, invalid
 	}
 	return change, nil

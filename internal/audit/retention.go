@@ -20,11 +20,12 @@ type retentionCap struct {
 type SettingsChange struct {
 	MaxTextBytes               *int
 	RetentionDays              *int
+	BudgetBytes                *int64
 	ConfirmRetentionShortening bool
 }
 
-// SetSettings 原子保存保留期及后续提交的正文上限；缩短必须由管理员显式确认。
-// 保留期接受1–30整天，上限接受1–65536字节；验证、确认或持久化失败返回固定错误，不部分发布。
+// SetSettings 原子保存保留期、正文上限和总预算；缩短保留期必须由管理员显式确认。
+// 保留期接受1–30整天，上限1–65536字节，预算4MiB–1GiB；验证、确认或持久化失败返回固定错误，不部分发布。
 func (c *Collector) SetSettings(change SettingsChange) error {
 	if change.MaxTextBytes != nil && (*change.MaxTextBytes < 1 || *change.MaxTextBytes > maxText) {
 		return errors.New("invalid_max_text_bytes")
@@ -32,7 +33,13 @@ func (c *Collector) SetSettings(change SettingsChange) error {
 	if change.RetentionDays != nil && (*change.RetentionDays < 1 || *change.RetentionDays > maxRetentionDays) {
 		return errors.New("invalid_retention_days")
 	}
+	if change.BudgetBytes != nil && (*change.BudgetBytes < minBudget || *change.BudgetBytes > defaultBudget) {
+		return errors.New("invalid_budget")
+	}
 	return c.changeConfiguration(func(next *configuration) error {
+		if change.BudgetBytes != nil {
+			next.BudgetBytes = *change.BudgetBytes
+		}
 		if change.RetentionDays != nil {
 			days := *change.RetentionDays
 			if days < next.RetentionDays && !change.ConfirmRetentionShortening {

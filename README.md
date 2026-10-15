@@ -1,6 +1,6 @@
 # CPA 请求输入审计：最小安全闭环
 
-本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)、[ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md)、[ticket 03](.scratch/request-input-audit/issues/03-chat-input-boundaries.md)、[ticket 04](.scratch/request-input-audit/issues/04-responses-http.md)、[ticket 05](.scratch/request-input-audit/issues/05-anthropic-messages.md) 、[ticket 06](.scratch/request-input-audit/issues/06-http-request-once.md) 、[ticket 07](.scratch/request-input-audit/issues/07-responses-websocket.md) 、[ticket 08](.scratch/request-input-audit/issues/08-search-and-browse.md) 与 [ticket 09](.scratch/request-input-audit/issues/09-retention-and-settings.md) 的本地验收范围，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
+本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)、[ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md)、[ticket 03](.scratch/request-input-audit/issues/03-chat-input-boundaries.md)、[ticket 04](.scratch/request-input-audit/issues/04-responses-http.md)、[ticket 05](.scratch/request-input-audit/issues/05-anthropic-messages.md) 、[ticket 06](.scratch/request-input-audit/issues/06-http-request-once.md) 、[ticket 07](.scratch/request-input-audit/issues/07-responses-websocket.md) 、[ticket 08](.scratch/request-input-audit/issues/08-search-and-browse.md) 、[ticket 09](.scratch/request-input-audit/issues/09-retention-and-settings.md) 与 [ticket 10](.scratch/request-input-audit/issues/10-storage-budget.md) 的本地验收范围，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
 
 ## 已实现范围
 
@@ -18,7 +18,7 @@
 - `previous_response_id` 不参与历史回查或持久化，显式重发独立记录；客户端请求模型先于路由及上游别名映射提取，不从回复补猜。宿主 capabilities 必须显式声明三种 HTTP 协议及 `responses-websocket`，契约版本不是3或缺少任一接入点均拒绝采集，不静默显示全覆盖。
 - Anthropic Messages 在 `/v1/messages` 认证后、模型 DD 名称改写/协议转换/路由之前观察原始消息。末尾连续 `user` 只取最后一条；纯 `tool_result` 正常跳过，混合消息只提取新 `text` 和固定附件占位符，不提取工具结果内嵌文本、图片、文件或引用。`image` 只留 `[图片]`，`document`（包括 text/content 来源）只留 `[文件]`；未知类型/来源报告提取不完整或解析缺口，不猜测其他协议的内容类型。
 - 64 条 / 8 MiB 有界副本队列，约 1 MiB 分段 JSONL，写入并同步成功后才允许管理查询；入队不等于保存。
-- 默认总预算 1 GiB，合法启动预算 4 MiB–1 GiB；保守核算整个专用目录及辅助文件，预留 1 MiB 配置更新空间，另预留一个最大分段及目录块（1 MiB + 4 KiB）供原子回收。满额停采，不覆盖或提前删除未到期历史。
+- 默认总预算 1 GiB，合法范围 4 MiB–1 GiB，可通过管理页面/接口调整并持久化；保守核算整个专用目录及辅助文件，预算内预留 1 MiB 配置更新空间及 1 MiB + 4 KiB 维护空间。满额停采，不覆盖或提前删除未到期历史；正常清理或调高预算释放足够余量后自动恢复，主动暂停不受影响。容量基础告警保留到自身到期，不因恢复/重启清除，未恢复容量故障持续显示。
 - 输入默认从宿主接收提交起保留7个24小时，管理页面/API可调整为1–30整天；限制最短一天避免零期限，最长30天限制敏感数据寿命并使历史期限规则有界。到期即退出列表、组合搜索、详情和对象历史标记，不等待文件回收；启动及每分钟清理，暂停、移除和停机不冻结期限。
 - 缩短需明确确认历史提前到期的影响；未确认返回409且不部分修改配置。调长只适用于生效时刻之后的提交，不延长旧历史或使记录重新可查；慢体和排队副本从原接收时间算起。没有清空对象、全量清空或提前删除未到期历史的管理功能。
 - 宿主插件菜单、无数据静态 shell、受保护对象/选择/状态/列表/详情 API。正文和名称只按纯文本展示，不渲染 HTML/Markdown，不自动加载外部资源。
@@ -28,9 +28,9 @@
 
 ## 未完成与风险
 
-尚无上述白名单以外的内容类型、三协议完整 SSE/重试/断开回归矩阵、动态预算管理、满额自动恢复、异常退出恢复或完整缺口历史。Linux amd64 已在 Debian 13 原生构建并完成现有系统、工具及浏览器回归；Linux arm64 和 Linux 真实 ENOSPC/只读卷故障仍未验证，详见[验收记录](docs/verification/linux-amd64-2026-10-15.md)。当前已增加统一到期隐藏、周期回收与保留设置；暂停、移除不会改变接收时间或提前删除未到期历史。周期清理不代表预算恢复和完整故障恢复已完成，正常重启也不等于异常恢复 ticket 11 已完成。
+尚无上述白名单以外的内容类型、三协议完整 SSE/重试/断开回归矩阵、异常退出恢复或完整缺口历史。Linux amd64 已在 Debian 13 原生构建并完成现有系统、工具及七个浏览器场景各两轮回归，本票另以隔离64MiB tmpfs验证真实ENOSPC和只读重启故障；Linux arm64、其他块设备/文件系统及运行中热切只读仍未验证，详见[本票双平台验收记录](docs/verification/storage-budget-2026-10-15.md)和[上一票Linux记录](docs/verification/linux-amd64-2026-10-15.md)。当前已增加统一到期隐藏、周期回收与保留设置；暂停、移除不会改变接收时间或提前删除未到期历史。容量自动恢复不代表真实 I/O/完整性故障可自动恢复，正常重启也不等于异常恢复 ticket 11 已完成。
 
-应用层不加密。专用目录为 `0700`、文件为 `0600`，仍需保护主机、磁盘、快照和备份。逻辑到期和文件空间回收不等于磁盘、数据库空闲页、文件系统、快照或备份安全擦除；应用不控制外部副本的保留。没有安全擦除或 native 进程崩溃隔离保证；常规解析/队列/存储错误 fail-open，不代表零丢失、零延迟或吞吐承诺。诊断是有界运行期原因码和已知计数，不是完整可恢复缺口历史。
+应用层不加密。专用目录为 `0700`、文件为 `0600`，仍需保护主机、磁盘、快照和备份。逻辑到期和文件空间回收不等于磁盘、数据库空闲页、文件系统、快照或备份安全擦除；应用不控制外部副本的保留。没有安全擦除或 native 进程崩溃隔离保证；常规解析/队列/存储错误 fail-open，不代表零丢失、零延迟或吞吐承诺。诊断包含有界运行期原因码/已知计数，以及固定大小的持久容量告警摘要；运行期计数正常重启后归零，不能解释为历史没有缺口，也不是完整可恢复缺口历史。
 
 宿主 `identity.seed` 必须与数据目录一起保护和备份；插件不读取/修改它的内容。已有数据但 seed 缺失、损坏或权限不合规时停采，不静默轮换全部对象。目录祖先不能是符号链接，macOS 使用真实路径，例如 `/private/var/...` 而非 `/var/...`。
 
@@ -51,7 +51,7 @@ make verify            # 全部系统/工具/浏览器验收；正常停止进�
 
 快速检查离线执行，缺少依赖会失败，需先 `make deps`。pre-commit 通过 `git write-tree` 导出真实 index 的独立快照，避免部分暂存时工作树的未暂存修复掩盖坏代码；它不自动格式化、不修改 index、不下载依赖、不跑压力或磁盘故障测试。导出快照保留在 `.test-data/`。可显式运行 `make check-staged`。
 
-本项目仅执行本地验收，不配置或触发远端 CI。统一入口为 `make verify`；本地通过仅表示当前机器上的实际结果，不代表未运行平台已验证。
+本项目执行本机macOS及 `ssh linux-service` 隔离Linux验收，不配置或触发远端CI。统一入口为 `make verify`；每张ticket以同一份最新运行源码在两端完成本票要求的构建、系统、工具和浏览器验收后才标记完成，具体规则见[验证与交付约定](docs/agents/verification.md)。单端通过不代表另一平台已验证。
 
 构建脚本核实 Git commit 和补丁摘要，从精确 Git 对象导出**全新隔离目录**，应用无 fuzz 补丁，避免把旧工作树改动混入构建。不执行下载的安装脚本，不自动删除目录。
 
@@ -79,7 +79,7 @@ go test ./tests/system -run 'TestRealENOSPCFailOpen|TestRealReadOnlyVolumeFailOp
 - **ENOSPC**：macOS `hdiutil` 创建全新的 64 MiB HFS+ 镜像，先校验独立设备与容量，再仅在该卷的审计目录之外填充，必须实测得到 `ENOSPC`。随后真实模型调用仍应为 `200`，采集停下且出现 `storage_error`，失败副本不能冒充保存，原已保存记录保留。
 - **只读卷**：先在可写镜像保存输入，停止本测试宿主后正常卸载，原镜像以 `-readonly` 重挂；外部创建文件必须实际得到 `EROFS`。重新启动宿主后观察/存储初始化明确不可用，实际模型调用仍为 `200`。这是**只读环境下重启的 fail-open 验证**，不冒称运行中写入者经历热切只读，也不保证只读状态下管理页能查询历史。
 
-镜像测试不使用 `sudo`、不格式化物理磁盘、不强制卸载、不修改全局磁盘设置。只卸载本次新镜像，不删除镜像、填充文件或验收目录。macOS 镜像单项失败会明确报错；其他平台此镜像夹具明确跳过，不能据此宣称 Linux 故障路径已验收。
+镜像测试不使用 `sudo`、不格式化物理磁盘、不强制卸载、不修改全局磁盘设置。只卸载本次新镜像，不删除镜像、填充文件或验收目录。macOS 镜像单项失败会明确报错；其他平台此镜像夹具明确跳过，不能以skip宣称通过。本票另在原SSH Linux环境用私有64MiB tmpfs补测实际ENOSPC及停止写入者后的只读重启，结果与范围见[双平台验收记录](docs/verification/storage-budget-2026-10-15.md)。
 
 ## 合成浏览器验收
 
@@ -100,7 +100,7 @@ go build -o .build/bin/audit-demo ./cmd/audit-demo
 
 自动验收只需 `make browser`：构建固定宿主/插件及 demo、核对管理页面、启动真实实例、运行六个场景各两轮并停止进程，不依赖 MCP。已有构建产物时可用 `make browser-run`。启动 JSON 只有健康检查通过后才发 `ready`，失败/超时有明确退出；runner 不保存子进程 stderr 原文或 Playwright 可能含凭据的调用日志，只报告固定阶段/原因和本项目场景行号。
 
-场景位于 `tests/browser/smoke.js`、`tests/browser/truncation.js`、`tests/browser/lifecycle.js`、`tests/browser/responses-websocket.js` 、`tests/browser/search-browse.js` 与 `tests/browser/retention-settings.js`。保留设置场景验证缩短影响确认、取消无写入、合法范围、原子保存、页面重载/刷新保持设置，每轮恢复默认值。搜索场景验证四条件交集、23条匹配结果的翻页与重新筛选、双状态详情、恶意正文/名称/模型纯文本以及没有外部请求。其余场景分别验证菜单与纯文本安全展示、65,535字节截断标签/提取不完整/双状态及可见缺口、Responses 协议与请求模型/未知模型展示、Anthropic 工具混合输入与原协议/双状态展示，以及页面改名、移除后历史筛选、同Key重新加入、主动暂停/恢复；WebSocket 场景在同连接提交五次，验证逐条详情、协议与独立状态、上限改为7字节/刷新/拒绝非法值/恢复默认且不追溯改旧正文。同一宿主连续两轮且每次使用唯一标记/记录 ID，旧数据不能冒充本轮通过。有限证据保存在 `.test-data/verification-*/result.json` 和状态标签截图；没有成功验收的结果不会报告为通过。
+场景位于 `tests/browser/smoke.js`、`tests/browser/truncation.js`、`tests/browser/lifecycle.js`、`tests/browser/responses-websocket.js` 、`tests/browser/search-browse.js` 、`tests/browser/retention-settings.js` 与 `tests/browser/storage-budget.js`。预算场景验证三项原子设置、精确字节转换、非法值不发请求、刷新/重载、容量/超额暂停、未到期历史保留、调高自动恢复及主动暂停独立。保留设置场景验证缩短影响确认、取消无写入、合法范围、原子保存、页面重载/刷新保持设置，每轮恢复默认值。搜索场景验证四条件交集、23条匹配结果的翻页与重新筛选、双状态详情、恶意正文/名称/模型纯文本以及没有外部请求。其余场景分别验证菜单与纯文本安全展示、65,535字节截断标签/提取不完整/双状态及可见缺口、Responses 协议与请求模型/未知模型展示、Anthropic 工具混合输入与原协议/双状态展示，以及页面改名、移除后历史筛选、同Key重新加入、主动暂停/恢复；WebSocket 场景在同连接提交五次，验证逐条详情、协议与独立状态、上限改为7字节/刷新/拒绝非法值/恢复默认且不追溯改旧正文。同一宿主连续两轮且每次使用唯一标记/记录 ID，旧数据不能冒充本轮通过。有限证据保存在 `.test-data/verification-*/result.json` 和状态标签截图；没有成功验收的结果不会报告为通过。
 
 浏览器环境使用精确版本 Playwright 和明确的 `zh-CN` locale，匹配固定管理前端；不宣称所有浏览器/语言/未来前端已验证。验收责任与工作区审查的项目约定见 `docs/agents/verification.md`；个人技能文件不修改。
 
@@ -176,7 +176,7 @@ make test-one TEST='TestResponsesWebsocket|TestSettings'
 make browser-run
 ```
 
-管理页面复用原列表/单条详情，`responses-websocket` 显示为 Responses WebSocket，截断和提取不完整独立标记。当前浏览器六场景各两轮，仅保存有限状态截图/结果；macOS arm64 和 Debian 13 / Linux amd64 均已实际运行。异常恢复、Linux arm64、Linux 磁盘故障及三协议最终失败矩阵仍未完成，未宣称完整第一版已交付。
+管理页面复用原列表/单条详情，`responses-websocket` 显示为 Responses WebSocket，截断和提取不完整独立标记。当前浏览器七场景各两轮，仅保存有限状态截图/结果；macOS arm64与原SSH Debian 13 / Linux amd64环境均已验证，预算新增场景也在两端实际运行。异常恢复、Linux arm64、Linux 磁盘故障及三协议最终失败矩阵仍未完成，未宣称完整第一版已交付。
 
 ## 保留期与配置验收
 
@@ -191,6 +191,17 @@ make test-one TEST='TestRetention|TestSettings|TestSearch'
 
 保留策略与当前设置一次保存：成功事务的开始时刻是策略生效时刻，和该事务重叠的提交按服务端接收时刻归属，不按内存发布时间或落盘顺序归属。正文上限仍按各提交的接收快照处理。服务端时钟回拨到既有历史边界之前时，调长会被拒绝，避免生成次序不明的规则。
 
+## 总预算与容量恢复
+
+`tests/system/storage_budget_test.go` 经公开宿主接口和隔离输出验证动态预算、严格校验、连续提交、重启、辅助文件增长、降额、混合/整段回收、恢复滞回和主动暂停。运行 `make test-one TEST='TestBudget'`；可控时间仍只在独立验收构建启用。
+
+- 占用为专用目录下每个文件和目录的 `max(按4KiB向上取整的逻辑长度, 实际分配块)`，空文件/目录至少4KiB；包括身份seed、锁、配置、固定容量诊断、未知辅助文件和子目录，不仅统计正文。当前使用JSONL，没有数据库WAL或持久索引；未来添加的持久化仍必须计入。
+- 正文准入：`used + 本次最坏增长 + 1MiB配置预留 + (1MiB+4KiB)维护预留 <= budget`。配置原子替换可以使用自己的预留，但临时副本及目录增长仍须在预算内；混合段维护需要完整副本峰值，不能用临时文件绕过限制。
+- 降低预算先在旧预算内完成设置文件替换及同步，然后发布新预算。允许已有未过期历史暂时超过新预算，管理状态显示 `over_budget_bytes` 并暂停新采集。超额时需要新增临时空间的配置/混合维护会明确拒绝；仍可提高到足够预算，整段到期回收无需增长空间，不受前面混合段阻塞。超额期间主动暂停写入也可能被拒绝，不能把容量暂停当作持久的主动暂停。
+- 仅容量原因自动恢复：空闲至少 **2,891,776字节**，即配置/维护预留 + 512KiB最坏编码行 + 4KiB轮转开销 + 256KiB滞回量。启动、每分钟维护和成功配置事务后重评，必须实际写入并同步诊断文件；真实存储/完整性故障不会被提高预算清除。
+- 固定4KiB容量告警文件只保存版本、容量标记和最后发生时刻，异步合并原位写，不存原Key、正文或逐提交日志。正常关闭尽力同步；基础摘要在保留期内跨恢复/重启存在，以最后容量事件起算，调长不延长旧摘要，活动故障不因到期隐藏。运行期计数并非跨重启精确丢失数；完整缺口历史及已阅交互由后续票完善。诊断磁盘写入失败时 `diagnostics_persisted=false`，运行期仍显示真实故障，不保证底层磁盘耗尽时告警可持久化。
+- 容量暂停仍通过只读观察判断预期跳过，工具续跑、控制和空输入不变成容量缺口；本应保存的新输入拒收才报告容量原因，不触发宿主桥接warning。模型调用不等待诊断落盘，不改变上游输入。1GiB不承诺完整保存任意流量七天。
+
 ## 管理 API
 
 全部动态接口要求**宿主管理鉴权**；匿名、普通客户端 Key 和对象 ID 都不能读取。以下路径由官方 native 管理注册合同托管，并非第二套账号系统。
@@ -202,8 +213,8 @@ make test-one TEST='TestRetention|TestSettings|TestSearch'
 | POST | `/rename` | 相同参数；仅更新已知对象的当前名称，不改启用状态，允许无效 Key 的历史对象 |
 | POST | `/remove` | `{"object_id":"64hex"}`；停用后续采集，不删除名称或历史 |
 | POST | `/pause` | `{"paused":true}` 或 `false`；成功提交不解除既有存储故障；保存失败可能新增存储故障 |
-| GET | `/settings` | 当前正文上限 `max_text_bytes`（默认65536）和 `retention_days`（默认7） |
-| POST | `/settings` | 可部分更新 `max_text_bytes:1..65536`、`retention_days:1..30`；缩短必须附 `confirm_retention_shortening:true`，否则409；两字段一次原子提交，非法设置400，不接受重复/未知字段或null |
+| GET | `/settings` | 当前 `max_text_bytes`（默认65536）、`retention_days`（默认7）、`budget_bytes`（默认1073741824） |
+| POST | `/settings` | 可部分更新 `max_text_bytes:1..65536`、`retention_days:1..30`、`budget_bytes:4194304..1073741824`（均为整数）；缩短保留期必须附 `confirm_retention_shortening:true`，否则409；三字段一次原子提交，非法设置400，不接受重复/未知字段或null |
 | GET | `/records?offset=0&limit=20&object_id=<64hex>&from=<RFC3339Nano>&to=<RFC3339Nano>&model=<name>&q=<keyword>` | 所有筛选可选、取交集后分页；`offset`为0–10000000，`limit`为1–100，默认20；仅返回短预览及白名单元数据 |
 | GET | `/detail?id=<recordID>` | 独立记录正文和白名单元数据 |
 | GET | `/status` | 实时观察契约状态和基础采集诊断 |
@@ -218,7 +229,7 @@ make test-one TEST='TestRetention|TestSettings|TestSearch'
 
 记录只持久化：`id`、`object_id`、`received_at`、`protocol`、`model`、`text`、`truncated` 和为 true 时的 `extraction_incomplete`。列表/详情显式返回两种布尔标记；旧记录缺失不完整字段按 false 读取，不重写历史正文。名称存在对象配置中，查询时关联，不逐条快照保存。配置、状态和新增诊断不能包含原认证 Key、历史、指令、工具数据、模型回复、请求头、完整 URL 或上游账号。
 
-对象及保留配置采用version3 `monitors.json`，包含 `max_text_bytes`、`retention_days` 和最多29条按接收时刻划分的历史期限上限；兼容旧 `map[id]name` 和version2配置，读取默认65536字节/7天；旧格式在下一次成功修改时升级，不在启动时擅自改写。损坏、未知版本、歧义字段或超限配置会明确停采，不能以管理操作覆盖成空名单。新配置也纳入总目录预算；没有删除已知对象的管理功能。配置保存失败不发布本轮内存变更，但替换文件后的目录同步/扫描失败不能保证磁盘回滚：会停采，重启可能加载已替换值，管理员应核对结果，不把错误响应理解成必然维持旧磁盘配置。
+对象及设置配置采用version4 `monitors.json`，包含 `max_text_bytes`、`retention_days`、`budget_bytes` 和最多29条按接收时刻划分的历史期限上限；兼容旧 `map[id]name`、version2及version3配置，旧字段缺省时使用65536字节/7天；缺少持久预算时使用宿主 `budget-bytes`（0表示1GiB）作为初始值，保存后持久预算优先，同目录YAML重载不覆盖它。旧格式在下一次成功修改时升级，不在启动时擅自改写。损坏、未知版本、歧义字段或超限配置会明确停采，不能以管理操作覆盖成空名单。新配置也纳入总目录预算；没有删除已知对象的管理功能。配置保存失败不发布本轮内存变更，但替换文件后的目录同步/扫描失败不能保证磁盘回滚：会停采，重启可能加载已替换值，管理员应核对结果，不把错误响应理解成必然维持旧磁盘配置。
 
 接收快照不持久化。请求只携带固定小决策、上限与随机采集器代际，不保存待提交映射或旧配置副本；观察者替换/采集器重开导致旧快照失效，属于能力故障，不伪装为主动暂停。普通关闭、存储或容量故障仍可能丢失副本，不承诺零丢失。宿主准备/投递桥接的可恢复错误、无效快照及旧实例失效使用实例内有界饱和计数，管理状态合并到 `gaps.observer_unavailable` 并在无活动故障时保留 `observer_bridge_error` 提示（已有存储故障原因优先展示）；后续成功不抹去历史计数，正常重启会重置该运行期计数，不冒充完整可恢复缺口历史。
 
