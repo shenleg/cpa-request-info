@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 
 	"github.com/shenleg/cpa-request-info/internal/audit"
@@ -327,6 +328,11 @@ func (a *App) management(req managementRequest) any {
 		return responseJSON(200, map[string]bool{"saved": true})
 	}
 	if strings.HasSuffix(req.Path, "/records") {
+		for _, name := range []string{"offset", "limit", "object_id", "from", "to", "model", "q"} {
+			if len(req.Query[name]) > 1 {
+				return responseJSON(400, map[string]string{"error": "invalid_query"})
+			}
+		}
 		offset, err := queryNumber(req.Query, "offset", 0, 0, 10000000)
 		if err != nil {
 			return responseJSON(400, map[string]string{"error": "invalid_pagination"})
@@ -335,13 +341,11 @@ func (a *App) management(req managementRequest) any {
 		if err != nil {
 			return responseJSON(400, map[string]string{"error": "invalid_pagination"})
 		}
-		objectID := queryValue(req.Query, "object_id")
-		if objectID != "" {
-			if len(objectID) != 64 || strings.Trim(objectID, "0123456789abcdefABCDEF") != "" {
-				return responseJSON(400, map[string]string{"error": "invalid_object"})
-			}
+		filter, err := recordQuery(req.Query)
+		if err != nil {
+			return responseJSON(400, map[string]string{"error": err.Error()})
 		}
-		records, total, err := c.List(offset, limit, objectID)
+		records, total, err := c.List(offset, limit, filter)
 		if err != nil {
 			return responseJSON(503, map[string]string{"error": "storage_unavailable"})
 		}
@@ -418,6 +422,34 @@ func (a *App) catalog() ([]object, error) {
 	}
 	return catalog.Objects, nil
 }
+
+// recordQuery 在管理 HTTP 边界解析已保存记录的交集条件；错误只含固定原因，不回显不可信查询值。
+func recordQuery(query map[string][]string) (audit.Query, error) {
+	filter := audit.Query{ObjectID: queryValue(query, "object_id"), Model: queryValue(query, "model"), Keyword: queryValue(query, "q")}
+	if filter.ObjectID != "" && (len(filter.ObjectID) != 64 || strings.Trim(filter.ObjectID, "0123456789abcdefABCDEF") != "") {
+		return audit.Query{}, errors.New("invalid_object")
+	}
+	if len(filter.Model) > 1024 || len(filter.Keyword) > 65536 {
+		return audit.Query{}, errors.New("invalid_query")
+	}
+	for _, bound := range []struct {
+		name   string
+		target **time.Time
+	}{{"from", &filter.From}, {"to", &filter.To}} {
+		if _, exists := query[bound.name]; exists {
+			parsed, err := time.Parse(time.RFC3339Nano, queryValue(query, bound.name))
+			if err != nil {
+				return audit.Query{}, errors.New("invalid_time_range")
+			}
+			*bound.target = &parsed
+		}
+	}
+	if filter.From != nil && filter.To != nil && filter.From.After(*filter.To) {
+		return audit.Query{}, errors.New("invalid_time_range")
+	}
+	return filter, nil
+}
+
 func queryValue(query map[string][]string, key string) string {
 	if len(query[key]) > 0 {
 		return query[key][0]

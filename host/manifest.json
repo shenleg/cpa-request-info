@@ -8,7 +8,7 @@
   "patches": [
     {
       "path": "patches/0001-readonly-input-audit.patch",
-      "sha256": "0e259c93830aad3d5bf4acd1debc9c83c8941d919331f9f035357b4d521ebfc4"
+      "sha256": "193c64ce7bbc804bf66f4c4fe142323089aaf161a4dffdb97d1e5eab4f917065"
     }
   ],
   "input_audit": {

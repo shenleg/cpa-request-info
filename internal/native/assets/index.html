@@ -2,7 +2,7 @@
 <!-- 本页面只托管无数据 shell；动态数据受宿主管理鉴权保护，管理 Key 仅在页面内存驻留。 -->
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-tNkEvhku23JNh83wp5H5llFU0Su7u7kE6trfg7IIH20='; style-src 'sha256-mcEoXKWBfiRvpvTh90RoJs1oIgkKU4gVvUXfuAv9NcU='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-qROgWupsSfhBf2kEn5P1HQ7Tzc9F4yyhFvCN8c/SWRc='; style-src 'sha256-mcEoXKWBfiRvpvTh90RoJs1oIgkKU4gVvUXfuAv9NcU='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <title>输入审计</title>
 <style>
 :root{color-scheme:light dark;font-family:system-ui,sans-serif}body{max-width:1100px;margin:24px auto;padding:0 20px;line-height:1.6}input,select,button{font:inherit;margin:5px;padding:7px;max-width:95%}button{cursor:pointer}label{display:block}table{width:100%;border-collapse:collapse}td,th{border-bottom:1px solid #888;padding:9px;text-align:left;overflow-wrap:anywhere}pre{white-space:pre-wrap;overflow-wrap:anywhere;padding:14px;border:1px solid #888}#notice{border-left:4px solid #888;padding-left:12px}code{overflow-wrap:anywhere}.object-id{font-size:.8em}section{margin-top:24px}
@@ -16,7 +16,7 @@
 <section><h2>监控对象与名称</h2><p>这里只显示宿主无秘密对象 ID，不展示原 Key、片段或上游账号。选择和命名不修改宿主 Key 配置。移除只停止后续采集，保留名称和已保存历史。</p><p id="catalog-state"></p><label>审计对象 <select id="objects"></select></label><label>名称 <input id="name" maxlength="256" placeholder="例如：合成业务对象"></label><p>名称最多 256 UTF-8 字节，不等于 256 个中文字符。</p><button id="monitor">选择并命名</button><button id="rename">仅改名</button><button id="remove">移除监控</button></section>
 <section><h2>单条正文上限</h2><label>UTF-8 字节上限 <input id="max-text-bytes" type="number" min="1" max="65536" step="1" required></label><button id="save-settings">保存上限</button><p>合法范围为 1–65536 字节；仅改变后续提交，已接收副本保留原上限，不改变模型收到的完整输入。</p></section>
 <section><h2>采集状态</h2><p id="capture-state">等待采集状态。</p><button id="pause">暂停采集</button><button id="resume">恢复采集</button><pre id="health" aria-label="采集状态"></pre><button id="refresh">刷新已保存记录</button></section>
-<section><h2>已保存输入记录</h2><label>历史对象筛选 <select id="object-filter"><option value="">全部对象</option></select></label><p id="empty">暂无已保存记录。入队不等于落盘。</p><table id="records"><thead><tr><th>接收时间</th><th>对象</th><th>协议</th><th>请求模型</th><th>纯文本预览</th><th>状态</th><th>详情</th></tr></thead><tbody></tbody></table><button id="previous">上一页</button><button id="next">下一页</button><span id="page"></span></section>
+<section><h2>已保存输入记录</h2><label>历史对象筛选 <select id="object-filter"><option value="">全部对象</option></select></label><label>接收时间起点 <input id="from-filter" type="datetime-local" step="0.001"></label><label>接收时间终点 <input id="to-filter" type="datetime-local" step="0.001"></label><p>按服务端接收时刻筛选，包含起点和终点；输入使用浏览器本地时间。</p><label>客户端请求模型筛选 <input id="model-filter" maxlength="1024" placeholder="客户端提交的精确模型名"></label><label>正文关键词 <input id="keyword-filter" maxlength="65536" placeholder="已保存正文中的字面子串"></label><p>条件取交集；模型名精确匹配，关键词仅忽略英文字母大小写，不解释正则或搜索语法，不搜索未保存部分。模型最多1024 UTF-8字节，关键词最多65536字节。</p><button id="apply-filters">应用筛选</button><button id="clear-filters">清空筛选</button><p id="empty">没有匹配的已保存记录。入队不等于落盘。</p><table id="records"><thead><tr><th>接收时间</th><th>对象</th><th>协议</th><th>请求模型</th><th>纯文本预览</th><th>状态</th><th>详情</th></tr></thead><tbody></tbody></table><button id="previous">上一页</button><button id="next">下一页</button><span id="page"></span></section>
 <section><h2>单条详情</h2><p id="detail-meta"></p><pre id="detail" aria-label="已保存纯文本正文">请选择一条记录。</pre></section>
 </div>
 <script>
@@ -25,6 +25,7 @@
 (() => {
   let key = '', offset = 0, total = 0, catalogAvailable = false;
   let knownObjects = [], selectedFilter = '', busy = false, capturePaused = false, observerAvailable = false;
+  let appliedFilters = {};
   const base = '/v0/management/plugins/request-input-audit';
   const $ = id => document.getElementById(id);
   const message = text => { $('message').textContent = text; };
@@ -66,7 +67,7 @@
     $('save-settings').disabled = busy || !observerAvailable;
     $('max-text-bytes').disabled = busy || !observerAvailable;
     $('previous').disabled = busy || offset===0;$('next').disabled = busy || offset+20>=total;
-    for (const id of ['connect','refresh','objects','name','object-filter']) $(id).disabled = busy;
+    for (const id of ['connect','refresh','objects','name','object-filter','from-filter','to-filter','model-filter','keyword-filter','apply-filters','clear-filters']) $(id).disabled = busy;
     for (const button of $('records').querySelectorAll('tbody button')) button.disabled = busy;
   }
   function selectObject() {
@@ -106,7 +107,8 @@
     return labels.length ? labels.join(' · ') : '已保存允许内容';
   }
   async function refresh() {
-    const [status, data, settings] = await Promise.all([api('/status'),api('/records?offset='+offset+'&limit=20&object_id='+encodeURIComponent(selectedFilter)),api('/settings')]);
+    const query = new URLSearchParams({offset,limit:20,object_id:selectedFilter,...appliedFilters});
+    const [status, data, settings] = await Promise.all([api('/status'),api('/records?'+query),api('/settings')]);
     $('max-text-bytes').value = settings.max_text_bytes;
     const state = status.state ?? {}, gaps = state.gaps ?? {};
     capturePaused = state.capture_paused === true;observerAvailable = status.available === true;
@@ -125,7 +127,7 @@
       button.addEventListener('click',()=>guard(async()=>{const r=await api('/detail?id='+encodeURIComponent(record.id));$('detail-meta').textContent=(r.name||r.object_id)+' · '+r.received_at+' · '+protocolLabel(r.protocol)+' · '+(r.model||'未知')+' · '+contentStatus(r);$('detail').textContent=r.text;}));
       cell.append(button);row.append(cell);tbody.append(row);
     }
-    $('page').textContent='第 '+(Math.floor(offset/20)+1)+' 页；已保存 '+total+' 条';
+    $('page').textContent='第 '+(Math.floor(offset/20)+1)+' 页；匹配 '+total+' 条';
     updateControls();
   }
   async function connect() {await objects();await refresh();$('login').hidden=true;$('content').hidden=false;message('管理鉴权通过。只展示已落盘记录。');}
@@ -152,6 +154,24 @@
   $('rename').addEventListener('click',()=>guard(()=>saveObject('/rename','名称已保存；旧记录和新记录统一显示当前名称。')));
   $('remove').addEventListener('click',()=>guard(()=>saveObject('/remove','已移除监控；后续提交不采集，已保存历史仍可查询。')));
   for (const [id,paused] of [['pause',true],['resume',false]]) $(id).addEventListener('click',()=>guard(async()=>{await api('/pause','POST',{paused});await objects();await refresh();message(paused?'已主动暂停；不删除历史，不取消已接收副本。':'已恢复主动采集；后续提交采用新配置，存储故障不会被清除。');}));
+  $('apply-filters').addEventListener('click',()=>guard(async()=>{
+    const filters = {};
+    for (const [id,name] of [['from-filter','from'],['to-filter','to']]) {
+      const input = $(id);
+      if (!input.validity.valid) throw new Error('接收时间格式不正确。');
+      if (input.value) filters[name] = new Date(input.value).toISOString();
+    }
+    if (filters.from && filters.to && new Date(filters.from) > new Date(filters.to)) throw new Error('接收时间起点不能晚于终点。');
+    const model = $('model-filter').value, keyword = $('keyword-filter').value;
+    if (new TextEncoder().encode(model).length > 1024 || new TextEncoder().encode(keyword).length > 65536) throw new Error('模型最多1024 UTF-8字节，关键词最多65536字节。');
+    if (model) filters.model = model;
+    if (keyword) filters.q = keyword;
+    appliedFilters = filters;offset = 0;await refresh();
+  }));
+  $('clear-filters').addEventListener('click',()=>guard(async()=>{
+    for (const id of ['from-filter','to-filter','model-filter','keyword-filter']) $(id).value = '';
+    selectedFilter = '';$('object-filter').value = '';appliedFilters = {};offset = 0;await refresh();
+  }));
   $('object-filter').addEventListener('change',()=>guard(async()=>{selectedFilter=$('object-filter').value;offset=0;await refresh();}));
   $('refresh').addEventListener('click',()=>guard(async()=>{await objects();await refresh();}));
   $('previous').addEventListener('click',()=>guard(async()=>{offset=Math.max(0,offset-20);await refresh();}));

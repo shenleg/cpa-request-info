@@ -1,6 +1,6 @@
 # CPA 请求输入审计：最小安全闭环
 
-本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)、[ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md)、[ticket 03](.scratch/request-input-audit/issues/03-chat-input-boundaries.md)、[ticket 04](.scratch/request-input-audit/issues/04-responses-http.md)、[ticket 05](.scratch/request-input-audit/issues/05-anthropic-messages.md) 、[ticket 06](.scratch/request-input-audit/issues/06-http-request-once.md) 与 [ticket 07](.scratch/request-input-audit/issues/07-responses-websocket.md) 的本地验收范围，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
+本仓库提供 CLIProxyAPI `v8.0.27` 的最小宿主补丁及真实 C ABI 原生插件。当前覆盖 [ticket 01](.scratch/request-input-audit/issues/01-minimal-safe-audit-loop.md)、[ticket 02](.scratch/request-input-audit/issues/02-monitoring-lifecycle.md)、[ticket 03](.scratch/request-input-audit/issues/03-chat-input-boundaries.md)、[ticket 04](.scratch/request-input-audit/issues/04-responses-http.md)、[ticket 05](.scratch/request-input-audit/issues/05-anthropic-messages.md) 、[ticket 06](.scratch/request-input-audit/issues/06-http-request-once.md) 、[ticket 07](.scratch/request-input-audit/issues/07-responses-websocket.md) 与 [ticket 08](.scratch/request-input-audit/issues/08-search-and-browse.md) 的本地验收范围，**仅供隔离合成数据验收，不是完整第一版或生产审计交付**。
 
 ## 已实现范围
 
@@ -20,11 +20,13 @@
 - 64 条 / 8 MiB 有界副本队列，约 1 MiB 分段 JSONL，写入并同步成功后才允许管理查询；入队不等于保存。
 - 默认总预算 1 GiB，合法启动预算 4 MiB–1 GiB；保守核算整个专用目录及辅助文件，预留 1 MiB 配置更新等维护空间。满额停采，不覆盖或删除旧记录。
 - 宿主插件菜单、无数据静态 shell、受保护对象/选择/状态/列表/详情 API。正文和名称只按纯文本展示，不渲染 HTML/Markdown，不自动加载外部资源。
-- 最近查询页最多保留 100 条记录的分段/偏移位置提示，详情只读取对应已同步行并重新校验；不缓存正文、不建立全量 ID 索引、不新增持久化文件。未命中时仍可扫描查询。
+- 对象、服务端接收时间、客户端请求模型和正文关键词取交集后计数/分页；只搜索已保存全文，英文忽略大小写、中文与搜索语法字符按字面，不搜索未保存历史、截断尾部或附件载荷。列表最多100条、预览最多512 UTF-8字节；详情独立显示单次提交及两个内容状态，不拼会话。
+- 最近查询页最多保留 100 条记录的分段/偏移位置提示，详情只读取对应已同步行并重新校验；不缓存正文、不建立全量 ID 索引、不新增持久化文件。筛选采用有界逐条扫描，未承诺大历史搜索延迟。
+- 输入审计管理路径的宿主访问日志不记录查询字符串，避免额外保存搜索词或被误填作关键词的认证 Key；方法、路径、状态及耗时等原日志仍保留，其他路径不变。未命中时仍可扫描查询。
 
 ## 未完成与风险
 
-尚无上述白名单以外的内容类型、三协议完整 SSE/重试/断开回归矩阵、组合搜索、七天过期清理、动态预算管理、满额自动恢复、异常退出恢复、完整缺口历史或 Linux 双架构运行验收。**已保存输入目前不会自动到期清理。** 当前实现最小闭环、配置生命周期、三种 HTTP 输入提取、Chat HTTP 一次提交机制及 Responses WebSocket 消息级审计；暂停、移除不会改变接收时间或删除历史，保留期限/清理由后续票完成，正常重启不等于异常恢复 ticket 11 已完成。
+尚无上述白名单以外的内容类型、三协议完整 SSE/重试/断开回归矩阵、七天到期隐藏及过期清理、动态预算管理、满额自动恢复、异常退出恢复、完整缺口历史或 Linux 双架构运行验收。**已保存输入目前不会自动到期清理。** 当前实现最小闭环、配置生命周期、三种 HTTP 输入提取、Chat HTTP 一次提交机制、Responses WebSocket 消息级审计及组合查询/安全浏览；暂停、移除不会改变接收时间或删除历史，保留期限/清理由后续票完成，正常重启不等于异常恢复 ticket 11 已完成。
 
 应用层不加密。专用目录为 `0700`、文件为 `0600`，仍需保护主机、磁盘、快照和备份。没有安全擦除或 native 进程崩溃隔离保证；常规解析/队列/存储错误 fail-open，不代表零丢失、零延迟或吞吐承诺。诊断是有界运行期原因码和已知计数，不是完整可恢复缺口历史。
 
@@ -94,9 +96,9 @@ go build -o .build/bin/audit-demo ./cmd/audit-demo
 
 固定官方管理前端为 `v1.26.2`，摘要见 `host/management-ui.json`。复用的 `cli-proxy-auth` 状态格式是此版本的兼容契约，不声称官方有临时 token 桥或未来前端自动兼容。插件不新增凭据持久化；宿主管理前端自身的“记住密码”行为不由插件改变。
 
-自动验收只需 `make browser`：构建固定宿主/插件及 demo、核对管理页面、启动真实实例、运行四个场景各两轮并停止进程，不依赖 MCP。已有构建产物时可用 `make browser-run`。启动 JSON 只有健康检查通过后才发 `ready`，失败/超时有明确退出；runner 不保存子进程 stderr 原文或 Playwright 可能含凭据的调用日志，只报告固定阶段/原因和本项目场景行号。
+自动验收只需 `make browser`：构建固定宿主/插件及 demo、核对管理页面、启动真实实例、运行五个场景各两轮并停止进程，不依赖 MCP。已有构建产物时可用 `make browser-run`。启动 JSON 只有健康检查通过后才发 `ready`，失败/超时有明确退出；runner 不保存子进程 stderr 原文或 Playwright 可能含凭据的调用日志，只报告固定阶段/原因和本项目场景行号。
 
-场景位于 `tests/browser/smoke.js`、`tests/browser/truncation.js`、`tests/browser/lifecycle.js` 与 `tests/browser/responses-websocket.js`。分别验证菜单与纯文本安全展示、65,535字节截断标签/提取不完整/双状态及可见缺口、Responses 协议与请求模型/未知模型展示、Anthropic 工具混合输入与原协议/双状态展示，以及页面改名、移除后历史筛选、同Key重新加入、主动暂停/恢复；WebSocket 场景在同连接提交五次，验证逐条详情、协议与独立状态、上限改为7字节/刷新/拒绝非法值/恢复默认且不追溯改旧正文。同一宿主连续两轮且每次使用唯一标记/记录 ID，旧数据不能冒充本轮通过。有限证据保存在 `.test-data/verification-*/result.json` 和状态标签截图；没有成功验收的结果不会报告为通过。
+场景位于 `tests/browser/smoke.js`、`tests/browser/truncation.js`、`tests/browser/lifecycle.js`、`tests/browser/responses-websocket.js` 与 `tests/browser/search-browse.js`。搜索场景验证四条件交集、23条匹配结果的翻页与重新筛选、双状态详情、恶意正文/名称/模型纯文本以及没有外部请求。其余场景分别验证菜单与纯文本安全展示、65,535字节截断标签/提取不完整/双状态及可见缺口、Responses 协议与请求模型/未知模型展示、Anthropic 工具混合输入与原协议/双状态展示，以及页面改名、移除后历史筛选、同Key重新加入、主动暂停/恢复；WebSocket 场景在同连接提交五次，验证逐条详情、协议与独立状态、上限改为7字节/刷新/拒绝非法值/恢复默认且不追溯改旧正文。同一宿主连续两轮且每次使用唯一标记/记录 ID，旧数据不能冒充本轮通过。有限证据保存在 `.test-data/verification-*/result.json` 和状态标签截图；没有成功验收的结果不会报告为通过。
 
 浏览器环境使用精确版本 Playwright 和明确的 `zh-CN` locale，匹配固定管理前端；不宣称所有浏览器/语言/未来前端已验证。验收责任与工作区审查的项目约定见 `docs/agents/verification.md`；个人技能文件不修改。
 
@@ -187,9 +189,15 @@ make browser-run
 | POST | `/pause` | `{"paused":true}` 或 `false`；成功提交不解除既有存储故障；保存失败可能新增存储故障 |
 | GET | `/settings` | 当前单条正文上限 `max_text_bytes`，默认65536 |
 | POST | `/settings` | `{"max_text_bytes":1..65536}`；精确唯一字段、整数，只影响之后的提交快照 |
-| GET | `/records?offset=0&limit=20&object_id=<64hex>` | 可选对象精确筛选；分页前过滤，总数仅统计匹配记录，`limit`为1–100 |
+| GET | `/records?offset=0&limit=20&object_id=<64hex>&from=<RFC3339Nano>&to=<RFC3339Nano>&model=<name>&q=<keyword>` | 所有筛选可选、取交集后分页；`offset`为0–10000000，`limit`为1–100，默认20；仅返回短预览及白名单元数据 |
 | GET | `/detail?id=<recordID>` | 独立记录正文和白名单元数据 |
 | GET | `/status` | 实时观察契约状态和基础采集诊断 |
+
+`from`/`to` 按服务端接收时刻比较，包含两端；RFC3339Nano 可使用时区偏移，同一时刻不因字符串表示不同而被排除。页面输入使用浏览器本地时间，发送时转为 ISO 时间。`model` 精确匹配客户端提交的模型名，最多1024 UTF-8字节，不采用上游实际名。`q` 最多65536字节，按已保存正文的字面子串搜索，仅 ASCII 英文字母忽略大小写，不 trim，不解释正则或搜索语法。空模型/关键词表示不限制；时间参数提供后不得为空。重复的已知参数、非法时间/反向区间或越界参数返回固定400错误，不回显值。关键词仅作为本次查询使用，不持久化查询历史。
+
+到期可见性当前仍为 `retention: not_implemented`，普通列表、筛选、搜索及详情均未自动隐藏到期记录；ticket 09 负责统一实现，不把本票的组合搜索视为七天保留已经完成。
+
+`tests/system/search_browse_test.go` 在真实宿主中验证交集、筛选后分页、时间端点/时区、预览外匹配、字面字符、状态保留、四协议共用查询、管理权限与搜索日志隐私。运行 `make test-one TEST='TestSearch'`。
 
 公开静态 shell 位于 `/v0/resource/plugins/request-input-audit/index.html`，不包含任何对象、记录或凭据。插件管理注册仍使用官方 `v8.0.27` 的 native `/v0` 合同，不因此修改宿主其他弃用管理功能。
 

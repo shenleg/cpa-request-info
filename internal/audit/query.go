@@ -5,7 +5,9 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"syscall"
+	"time"
 )
 
 type recordLocation struct {
@@ -14,10 +16,43 @@ type recordLocation struct {
 	length       int64
 }
 
-// List 按分段/追加顺序倒序返回已保存记录及总数；offset 非负，limit 范围1至100，objectID空值表示所有对象。
+// Query 指定已保存记录的交集条件；空字符串及 nil 时间表示不限制，时间包含两端，Model 精确匹配客户端请求名。
+// Keyword 只匹配已保存正文的字面子串，ASCII 英文字母忽略大小写，不解释搜索语法。
+type Query struct {
+	ObjectID string
+	From     *time.Time
+	To       *time.Time
+	Model    string
+	Keyword  string
+}
+
+func (q Query) matches(record Record) bool {
+	if q.ObjectID != "" && record.ObjectID != q.ObjectID || q.Model != "" && record.Model != q.Model {
+		return false
+	}
+	if q.From != nil || q.To != nil {
+		// 持久化读取已验证接收时间；此处比较时刻，不受序列化时区或小数位数影响。
+		received, _ := time.Parse(time.RFC3339Nano, record.ReceivedAt)
+		if q.From != nil && received.Before(*q.From) || q.To != nil && received.After(*q.To) {
+			return false
+		}
+	}
+	return q.Keyword == "" || strings.Contains(lowerASCII(record.Text), q.Keyword)
+}
+
+func lowerASCII(text string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'A' && r <= 'Z' {
+			return r + ('a' - 'A')
+		}
+		return r
+	}, text)
+}
+
+// List 按分段/追加顺序倒序返回已保存记录及匹配总数；offset 非负，limit 范围1至100，query 在分页前取交集。
 // 返回独立记录副本；身份/分页非法、关闭或读取失败返回固定错误，不读取队列和未提交尾部。
-func (c *Collector) List(offset, limit int, objectID string) ([]Record, int, error) {
-	if objectID != "" && !validObjectID(objectID) {
+func (c *Collector) List(offset, limit int, query Query) ([]Record, int, error) {
+	if query.ObjectID != "" && !validObjectID(query.ObjectID) {
 		return nil, 0, errors.New("invalid_object")
 	}
 	if offset < 0 || limit < 1 || limit > 100 {
@@ -32,8 +67,9 @@ func (c *Collector) List(offset, limit int, objectID string) ([]Record, int, err
 	for _, seg := range c.segments {
 		total += seg.count
 	}
-	if objectID != "" {
-		return c.listObject(offset, limit, objectID)
+	if query != (Query{}) {
+		query.Keyword = lowerASCII(query.Keyword)
+		return c.listFiltered(offset, limit, query)
 	}
 	result := make([]Record, 0, limit)
 	c.pageHints = nil
@@ -78,13 +114,14 @@ func (c *Collector) List(offset, limit int, objectID string) ([]Record, int, err
 	return result, total, nil
 }
 
-// listObject 两遍扫描已提交边界：先独立计数，再选取匹配序号，避免先分页后过滤导致总数和页内容错误。
-func (c *Collector) listObject(offset, limit int, objectID string) ([]Record, int, error) {
+// listFiltered 两遍扫描已提交边界：先独立计数，再选取匹配序号，避免先分页后过滤导致总数和页内容错误。
+// 列表与搜索共用记录读取入口；到期可见性应在查询模块统一实现，不能只在关键词分支过滤。
+func (c *Collector) listFiltered(offset, limit int, query Query) ([]Record, int, error) {
 	c.pageHints = nil
 	total := 0
 	for _, seg := range c.segments {
 		if err := c.readSegment(seg, func(record Record, _ int64) error {
-			if record.ObjectID == objectID {
+			if query.matches(record) {
 				total++
 			}
 			return nil
@@ -107,7 +144,7 @@ func (c *Collector) listObject(offset, limit int, objectID string) ([]Record, in
 	for index, seg := range c.segments {
 		var position int64
 		if err := c.readSegment(seg, func(record Record, bytes int64) error {
-			if record.ObjectID == objectID {
+			if query.matches(record) {
 				if current >= start && current < end {
 					result = append(result, record)
 					hints[record.ID] = recordLocation{segmentIndex: index, offset: position, length: bytes}

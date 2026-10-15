@@ -18,6 +18,23 @@ diff --git a/internal/access/config_access/provider.go b/internal/access/config_
  				Metadata: map[string]string{
  					"source": candidate.source,
  				},
+diff --git a/internal/logging/gin_logger.go b/internal/logging/gin_logger.go
+--- a/internal/logging/gin_logger.go
++++ b/internal/logging/gin_logger.go
+@@ -42,7 +42,12 @@
+ 	return func(c *gin.Context) {
+ 		start := time.Now()
+ 		path := c.Request.URL.Path
+-		raw := util.MaskSensitiveQuery(c.Request.URL.RawQuery)
++		// Audit search values can contain input text or credentials supplied as a keyword.
++		// Never copy these query values into access logs, including rejected requests.
++		raw := ""
++		if path != "/v0/management/plugins/request-input-audit" && !strings.HasPrefix(path, "/v0/management/plugins/request-input-audit/") {
++			raw = util.MaskSensitiveQuery(c.Request.URL.RawQuery)
++		}
+
+ 		// Only generate request ID for AI API paths
+ 		var requestID string
 diff --git a/internal/api/server_middleware.go b/internal/api/server_middleware.go
 --- a/internal/api/server_middleware.go
 +++ b/internal/api/server_middleware.go
