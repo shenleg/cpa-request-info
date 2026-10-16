@@ -133,11 +133,11 @@ func TestBudgetExpiryResumesWithGap(t *testing.T) {
 	clock := newRetentionClock(t, now)
 	h := startRetentionHost(t, 4<<20, "", clock)
 	h.monitorAll(t)
-	body, _ := json.Marshal(map[string]any{"model": "missing", "messages": []map[string]string{{"role": "user", "content": strings.Repeat("b", 65536)}}})
+	body, _ := json.Marshal(map[string]any{"model": "audit-test-model", "messages": []map[string]string{{"role": "user", "content": strings.Repeat("b", 65536)}}})
 	for n := 0; n < 100; n++ {
 		code, _ := h.request(t, "POST", "/v1/chat/completions", keyA, body)
-		if code != http.StatusBadRequest {
-			t.Fatal("预算不应改变模型路由错误")
+		if code != http.StatusOK {
+			t.Fatal("预算不应改变合成模型成功响应")
 		}
 		if used := budgetOutputUsage(t, h.stateDir); used > 4<<20 {
 			t.Fatalf("连续提交使正文或辅助持久化超出预算：%d", used)
@@ -186,7 +186,7 @@ func TestBudgetExpiryResumesWithGap(t *testing.T) {
 	if item := gapItem(t, readGapAlerts(t, h), "budget_exhausted"); item.Active || !item.HistoryRetained {
 		t.Fatal("容量恢复删除了未到期历史或仍报告活动容量故障")
 	}
-	searchSubmit(t, h, keyA, "missing", "BUDGET-RESUMED")
+	searchSubmit(t, h, keyA, "audit-test-model", "BUDGET-RESUMED")
 	stateDir := h.stateDir
 	h.stop()
 	h = startRetentionHost(t, 4<<20, "", clock, stateDir)
@@ -201,11 +201,11 @@ func TestBudgetLoweredMaintenanceContinues(t *testing.T) {
 	clock := newRetentionClock(t, now)
 	h := startRetentionHost(t, 16<<20, "", clock)
 	h.monitorAll(t)
-	searchSubmit(t, h, keyA, "missing", "BUDGET-MIXED-OLD")
+	searchSubmit(t, h, keyA, "audit-test-model", "BUDGET-MIXED-OLD")
 	retentionClock(t, clock, now.Add(2*24*time.Hour), 0)
-	live := searchSubmit(t, h, keyA, "missing", "BUDGET-MIXED-LIVE")
+	live := searchSubmit(t, h, keyA, "audit-test-model", "BUDGET-MIXED-LIVE")
 	retentionClock(t, clock, now, 0)
-	body, _ := json.Marshal(map[string]any{"model": "missing", "messages": []map[string]string{{"role": "user", "content": strings.Repeat("c", 65536)}}})
+	body, _ := json.Marshal(map[string]any{"model": "audit-test-model", "messages": []map[string]string{{"role": "user", "content": strings.Repeat("c", 65536)}}})
 	for n := 0; n < 85; n++ {
 		h.request(t, "POST", "/v1/chat/completions", keyA, body)
 	}
@@ -396,10 +396,10 @@ func TestBudgetExpectedSkipsStaySkips(t *testing.T) {
 	retentionClock(t, clock, now, 1)
 	before := waitBudgetState(t, h, func(s budgetState) bool { return s.Reason == "budget_exhausted" && s.DiagnosticsPersisted })
 	for _, entry := range []struct{ path, body string }{
-		{"/v1/chat/completions", `{"model":"missing","messages":[{"role":"assistant","content":"synthetic continuation"}]}`},
-		{"/v1/chat/completions", `{"model":"missing","messages":[{"role":"user","content":""}]}`},
-		{"/v1/messages", `{"model":"missing","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"synthetic","content":"synthetic output"}]}]}`},
-		{"/v1/responses", `{"model":"missing","input":[{"type":"function_call_output","call_id":"synthetic","output":"synthetic output"}]}`},
+		{"/v1/chat/completions", `{"model":"audit-test-model","messages":[{"role":"assistant","content":"synthetic continuation"}]}`},
+		{"/v1/chat/completions", `{"model":"audit-test-model","messages":[{"role":"user","content":""}]}`},
+		{"/v1/messages", `{"model":"audit-test-model","messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"synthetic","content":"synthetic output"}]}]}`},
+		{"/v1/responses", `{"model":"audit-test-model","input":[{"type":"function_call_output","call_id":"synthetic","output":"synthetic output"}]}`},
 	} {
 		h.request(t, "POST", entry.path, keyA, []byte(entry.body))
 	}
@@ -419,7 +419,7 @@ func TestBudgetRestartKeepsRecoveryThreshold(t *testing.T) {
 		t.Fatal(err)
 	}
 	// 64KiB NUL 会按JSON编码为约384KiB，不能只按原文字节判断下一条写入空间。
-	body, _ := json.Marshal(map[string]any{"model": "missing", "messages": []map[string]string{{"role": "user", "content": strings.Repeat("\x00", 65536)}}})
+	body, _ := json.Marshal(map[string]any{"model": "audit-test-model", "messages": []map[string]string{{"role": "user", "content": strings.Repeat("\x00", 65536)}}})
 	h.request(t, "POST", "/v1/chat/completions", keyA, body)
 	paused := waitBudgetState(t, h, func(s budgetState) bool { return s.Reason == "budget_exhausted" && s.DiagnosticsPersisted })
 	free := paused.BudgetBytes - paused.UsedBytes

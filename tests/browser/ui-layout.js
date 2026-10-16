@@ -24,12 +24,13 @@ module.exports = async (page, fixture) => {
   }
   /** 点击 selector 发起查询；range 可指定预设端点契约，返回本次结果，查询或端点不符时抛错。 */
   async function query(selector, range) {
-    const pending=page.waitForResponse(response=>response.url().startsWith(api+'/records?'));
+    const pending=page.waitForResponse(response=>response.url()===api+'/records/search'&&response.request().method()==='POST');
     await frame.locator(selector).click();
     const response=await pending;
     if(range) {
-      const params=new URL(response.url()).searchParams;
-      assert(params.has('from')===(range!=='all') && !params.has('to'),'时间预设未使用预期的开放终点查询');
+      const filter=response.request().postDataJSON();
+      assert(Boolean(filter.from)===(range!=='all') && !filter.to,'时间预设未使用预期的开放终点 JSON 查询');
+      assert(new URL(response.url()).search==='', '时间筛选不得进入 URL');
     }
     return matched(response);
   }

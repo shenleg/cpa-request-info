@@ -4,6 +4,7 @@ package audit
 import (
 	"bufio"
 	"bytes"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,11 +64,11 @@ func openDirectory(path string) (*os.Root, error) {
 }
 
 func (c *Collector) initialize() error {
-	locked := false
-	// 历史扫描失败不意味着运行标记不可读；仍尽力恢复既有诊断，避免损坏尾部遮住异常退出。
-	// 未有标记时不在未知目录上新建文件，原故障状态保持可见。
+	identityReady := false
+	// 身份验证成功后，历史扫描失败仍尽力恢复既有诊断，避免损坏尾部遮住异常退出。
+	// 身份不可用或未有标记时不改写未知目录，原故障状态保持可见。
 	defer func() {
-		if c.diagnostics == nil && locked {
+		if c.diagnostics == nil && identityReady {
 			if _, err := c.root.Lstat(diagnosticName); err == nil {
 				if err := c.openDiagnostics(); err != nil {
 					c.pauseStorage(err)
@@ -91,17 +92,15 @@ func (c *Collector) initialize() error {
 	if err = syscall.Flock(int(c.lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return err
 	}
-	locked = true
+	if err := c.initializeCallerScopeSeed(); err != nil {
+		c.pause("identity_unavailable")
+		return nil
+	}
+	identityReady = true
 	names, used, err := c.scanDirectory()
 	c.status.UsedBytes = used
 	if err != nil {
 		c.pause("storage_error")
-		return nil
-	}
-	// 身份状态属于宿主；这里只核验，不创建、轮换或读取其秘密内容。
-	seed, err := c.root.Lstat("identity.seed")
-	if err != nil || !seed.Mode().IsRegular() || seed.Mode().Perm() != 0600 || seed.Size() != 32 {
-		c.pause("identity_unavailable")
 		return nil
 	}
 	if _, err = c.root.Lstat("monitors.tmp"); err == nil {
@@ -167,7 +166,71 @@ func (c *Collector) initialize() error {
 	return nil
 }
 
-// scanDirectory 将整个专用目录（包括未知辅助文件及嵌套文件）的保守分配空间纳入预算。
+const callerScopeSeedName = "caller-scope-v1.seed"
+const callerScopeSeedMagic = "cpa-request-info:caller-scope-seed:v1\n"
+const callerScopeSeedBytes = 32
+
+// initializeCallerScopeSeed 只在已有 flock 下初始化新身份域；失败遗留物保留，禁止轮换或迁移旧身份。
+func (c *Collector) initializeCallerScopeSeed() error {
+	if _, err := c.root.Lstat("identity.seed"); !errors.Is(err, os.ErrNotExist) {
+		return errors.New("identity_unavailable")
+	}
+	info, err := c.root.Lstat(callerScopeSeedName)
+	if errors.Is(err, os.ErrNotExist) {
+		directory, openErr := c.root.Open(".")
+		if openErr != nil {
+			return openErr
+		}
+		// 读两项就足以区分仅有自身锁的空目录，避免为未知旧目录建立无界列表。
+		entries, readErr := directory.ReadDir(2)
+		closeErr := directory.Close()
+		if (readErr != nil && !errors.Is(readErr, io.EOF)) || closeErr != nil || len(entries) != 1 || entries[0].Name() != ".audit.lock" {
+			return errors.New("identity_unavailable")
+		}
+		data := make([]byte, len(callerScopeSeedMagic)+callerScopeSeedBytes)
+		copy(data, callerScopeSeedMagic)
+		if _, err := rand.Read(data[len(callerScopeSeedMagic):]); err != nil {
+			return err
+		}
+		file, createErr := c.root.OpenFile(callerScopeSeedName, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
+		if createErr != nil {
+			return createErr
+		}
+		n, writeErr := file.Write(data)
+		syncErr := file.Sync()
+		closeErr = file.Close()
+		if writeErr != nil || n != len(data) || syncErr != nil || closeErr != nil {
+			return errors.New("identity_unavailable")
+		}
+		info, err = c.root.Lstat(callerScopeSeedName)
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() != int64(len(callerScopeSeedMagic)+callerScopeSeedBytes) {
+		return errors.New("identity_unavailable")
+	}
+	file, err := c.root.OpenFile(callerScopeSeedName, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	opened, err := file.Stat()
+	if err != nil || !os.SameFile(info, opened) || !opened.Mode().IsRegular() || opened.Mode().Perm() != 0600 || opened.Size() != info.Size() {
+		file.Close()
+		return errors.New("identity_unavailable")
+	}
+	data, readErr := io.ReadAll(io.LimitReader(file, int64(len(callerScopeSeedMagic)+callerScopeSeedBytes+1)))
+	// 重开同样同步文件和父目录；上次初始化若在同步期间失败，不能未经验证就启用身份。
+	syncErr := file.Sync()
+	closeErr := file.Close()
+	if readErr != nil || len(data) != len(callerScopeSeedMagic)+callerScopeSeedBytes || !bytes.HasPrefix(data, []byte(callerScopeSeedMagic)) || syncErr != nil || closeErr != nil {
+		return errors.New("identity_unavailable")
+	}
+	if err := c.directory.Sync(); err != nil {
+		return err
+	}
+	c.callerScopeSeed = data[len(callerScopeSeedMagic):]
+	return nil
+}
+
+// scanDirectory 将整个专用目录（包括新身份种子、未知辅助文件及嵌套文件）的保守分配空间纳入预算。
 // 分批读取及硬性条目/深度上限防止目录自身成为无界索引，任何链接/特殊文件均停采。
 func (c *Collector) scanDirectory() ([]string, int64, error) {
 	var names []string

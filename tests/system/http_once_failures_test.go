@@ -1,4 +1,4 @@
-// 本文件验证重交、真实客户端取消/超时、不完整接收及路由失败；模型失败与采集缺口分别从公开接口观察。
+// 本文件验证真实 HTTP 重交、客户端取消/超时与存储故障；不完整接收及路由前采集的旧契约在 legacy_patched 文件。
 package system
 
 import (
@@ -83,6 +83,9 @@ func TestHTTPOnceClientCancellation(t *testing.T) {
 			received := make(chan []byte, 2)
 			canceled := make(chan struct{}, 2)
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if respondDiscovery(w, r) {
+					return
+				}
 				raw, err := io.ReadAll(r.Body)
 				if err != nil {
 					w.WriteHeader(400)
@@ -185,51 +188,6 @@ func incompleteHTTPOnce(t *testing.T, h *instance, body []byte, path ...string) 
 	return httpOnceOutcome{code: response.StatusCode, body: raw, err: readErr}
 }
 
-// TestHTTPOnceRoutingAndReadFailures 验证路由前输入仍采集，鉴权拒绝不记录，不完整或畸形提交只报可确定的缺口。
-func TestHTTPOnceRoutingAndReadFailures(t *testing.T) {
-	h := startHostWithManagementAuth(t, 1<<30, true, "", true)
-	baseline := startHostWithManagementAuth(t, 1<<30, false, "", true)
-	h.monitorAll(t)
-	_, _, gaps := snapshotCounters(t, h)
-	for round := 0; round < 2; round++ {
-		for index, model := range []string{`"missing"`, `""`, `123`} {
-			marker := fmt.Sprintf("HTTP-ROUTE-%d-%d-%d", round, index, time.Now().UnixNano())
-			body := []byte(fmt.Sprintf(`{"model":%s,"messages":[{"role":"user","content":%q}]}`, model, marker))
-			code, raw := h.request(t, "POST", "/v1/chat/completions", keyA, body)
-			originalCode, originalRaw := baseline.request(t, "POST", "/v1/chat/completions", keyA, body)
-			if code != 400 || code != originalCode || !bytes.Equal(raw, originalRaw) {
-				t.Fatal("观察改变了路由前失败")
-			}
-			waitSnapshotRecord(t, h, marker)
-		}
-		unauthorized := snapshotInput(t, "FORBIDDEN_HTTP_UNAUTHENTICATED")
-		code, _ := h.request(t, "POST", "/v1/chat/completions", "synthetic-invalid-client", unauthorized)
-		if code != 401 {
-			t.Fatal("宿主鉴权拒绝行为改变")
-		}
-		partial := snapshotInput(t, "FORBIDDEN_HTTP_PARTIAL_INPUT")
-		outcome := incompleteHTTPOnce(t, h, partial)
-		original := incompleteHTTPOnce(t, baseline, partial)
-		if outcome.err != nil || original.err != nil || outcome.code != 400 || original.code != outcome.code || !bytes.Equal(original.body, outcome.body) {
-			t.Fatal("观察改变了不完整读体的公开错误")
-		}
-		gaps["read_error"]++
-		invalid := []byte(`{"model":"missing","messages":[{"role":"user","content":"FORBIDDEN_HTTP_MALFORMED_INPUT"}]`)
-		code, raw := h.request(t, "POST", "/v1/chat/completions", keyA, invalid)
-		originalCode, originalRaw := baseline.request(t, "POST", "/v1/chat/completions", keyA, invalid)
-		if code != originalCode || !bytes.Equal(raw, originalRaw) {
-			t.Fatal("观察改变了畸形输入的公开错误")
-		}
-		gaps["invalid_json"]++
-		// 后续唯一提交落盘是负向断言屏障，不用 sleep 猜测前面的跳过/失败已处理。
-		barrier := fmt.Sprintf("HTTP-FAILURE-BARRIER-%d-%d", round, time.Now().UnixNano())
-		h.request(t, "POST", "/v1/chat/completions", keyA, snapshotInput(t, barrier))
-		waitSnapshotRecord(t, h, barrier)
-		assertHTTPOnceState(t, h, int64(4*(round+1)), gaps)
-	}
-	assertChatPrivacy(t, h, "FORBIDDEN_HTTP_UNAUTHENTICATED", "FORBIDDEN_HTTP_PARTIAL_INPUT", "FORBIDDEN_HTTP_MALFORMED_INPUT")
-}
-
 // waitHTTPOnceGap 等待管理状态出现本轮固定原因的新增缺口；返回状态计数，失败或超时终止测试。
 func waitHTTPOnceGap(t *testing.T, h *instance, reason string, before uint64) (int64, map[string]uint64) {
 	t.Helper()
@@ -249,6 +207,9 @@ func waitHTTPOnceGap(t *testing.T, h *instance, reason string, before uint64) (i
 // TestHTTPOnceStorageFailureIndependent 验证异步保存失败单独报告，即使同一提交的模型也失败，公开错误仍与未加载审计一致。
 func TestHTTPOnceStorageFailureIndependent(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if respondDiscovery(w, r) {
+			return
+		}
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(400)

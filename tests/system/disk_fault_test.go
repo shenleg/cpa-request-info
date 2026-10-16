@@ -141,6 +141,9 @@ func controlledDiskUpstream(t *testing.T, expected string) (*httptest.Server, ch
 	t.Helper()
 	received := make(chan bool, 8)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if respondDiscovery(w, r) {
+			return
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			received <- false

@@ -32,6 +32,12 @@ module.exports = async (page, options = {}) => {
     assert(response.status()===200, '预算场景公开查询失败');
     return response.json();
   }
+  /** 以 JSON 提交 filter 查询已保存记录；返回 JSON，HTTP 失败抛错，不将正文关键词写入 URL。 */
+  async function search(filter) {
+    const response=await page.request.post(api+'/records/search',{headers:{Authorization:'Bearer '+admin},data:filter});
+    assert(response.status()===200,'预算场景记录查询失败');
+    return response.json();
+  }
   /** 等待页面管理操作结束；成功无返回值，超时由 Playwright 抛错。 */
   async function idle() {
     await page.waitForFunction(() => !document.querySelector('iframe[title="输入审计"]').contentDocument.querySelector('#save-settings').disabled);
@@ -127,7 +133,7 @@ module.exports = async (page, options = {}) => {
     const deadline = Date.now()+15000;
     let persisted = false;
     while (Date.now()<deadline) {
-      const records = await read('/records?q='+encodeURIComponent(runId));
+      const records = await search({q:runId});
       if (records.total===70) { persisted=true;break; }
     }
     assert(persisted, '本轮预算填充没有全部落盘');
@@ -151,7 +157,7 @@ module.exports = async (page, options = {}) => {
       if (gap.state.capacity_gap && gap.state.gaps.budget_exhausted>beforeGap && gap.state.diagnostics_persisted) break;
     } while (Date.now()<gapDeadline);
     assert(gap.state.capacity_gap && gap.state.gaps.budget_exhausted>beforeGap && gap.state.diagnostics_persisted, '容量缺口或持久化告警没有公开状态');
-    const retained = await read('/records?q='+encodeURIComponent(runId));
+    const retained = await search({q:runId});
     assert(retained.total===70, '降低预算删除了本轮历史或容量缺口被误存为正文');
     await refresh();
     await frame.locator('#health').filter({hasText:'容量告警：已记录'}).waitFor({state:'attached'});

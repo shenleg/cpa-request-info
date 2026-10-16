@@ -38,7 +38,7 @@ module.exports = async (page, options = {}) => {
     // 给真实 fsync 和管理鉴权查询十秒冷启动余量，不用固定 sleep 假定已经落盘。
     const deadline = Date.now() + 10000;
     while (!id && Date.now()<deadline) {
-      const response = await page.request.get(api + '/records', {headers:{Authorization:'Bearer '+admin}});
+      const response = await page.request.post(api + '/records/search', {headers:{Authorization:'Bearer '+admin},data:{q:fixture.marker,limit:100}});
       assert(response.status()===200, '受保护记录查询失败');
       const list = await response.json();
       const record = list.records.find(r => r.preview.startsWith(fixture.marker) && r.truncated===fixture.truncated && r.extraction_incomplete===fixture.incomplete);
@@ -111,25 +111,31 @@ module.exports = async (page, options = {}) => {
   } finally {
     page.off('request', onRequest);
   }
-  // Responses 通过同一个真实宿主提交；模型未知不能用上游回复或其他字段补猜。
-  for (const [i,model] of ['audit-test-model',null].entries()) {
-    const marker = 'BROWSER-RESPONSES-' + i + '-' + Date.now() + '-';
+  // 只对实际进入官方 HTTP 执行回调的 Responses 路由核对正文，失败路由单独验证不采集。
+  {
+    const model='audit-test-model';
+    const marker = 'BROWSER-RESPONSES-' + Date.now() + '-';
     const submitted = await page.request.post(origin + '/v1/responses', {
       headers:{Authorization:'Bearer synthetic-client-audit-a-only'},
       data:{model,input:[{type:'message',role:'user',content:[{type:'input_text',text:marker},{type:'input_image',image_url:'FORBIDDEN_BROWSER_RESPONSES_IMAGE'},unknown]}],previous_response_id:'FORBIDDEN_BROWSER_RESPONSES_PREVIOUS'}
     });
-    assert(submitted.status()===(i===0?200:400), 'Responses 审计改变了原模型路由结果');
+    assert(submitted.status()===200, 'Responses 审计改变了原模型路由结果');
     const detail = await openSavedDetail({marker,truncated:false,incomplete:true,label:'提取不完整'});
-    assert(detail.protocol==='responses' && detail.model===(model??'') && detail.text===marker+'[图片]', 'Responses 元数据或原协议正文不正确');
+    assert(detail.protocol==='responses' && detail.model===model && detail.text===marker+'[图片]', 'Responses 执行入口元数据或正文不正确');
     const row = frame.locator('#records tbody tr').filter({hasText:marker});
     await row.getByRole('cell', {name:'Responses HTTP',exact:true,includeHidden:true}).waitFor();
-    await row.getByRole('cell', {name:model??'未知',exact:true,includeHidden:true}).waitFor();
-    await frame.locator('#detail-meta').filter({hasText:'Responses HTTP · '+(model??'未知')}).waitFor();
-    const labelScreenshot = screenshot.replace(/\.png$/, i===0?'-responses.png':'-responses-unknown-model.png');
+    await row.getByRole('cell', {name:model,exact:true,includeHidden:true}).waitFor();
+    await frame.locator('#detail-meta').filter({hasText:'Responses HTTP · '+model}).waitFor();
+    const labelScreenshot = screenshot.replace(/\.png$/, '-responses.png');
     await frame.locator('#detail-meta').screenshot({path:labelScreenshot});
     extraScreenshots.push(require('node:path').basename(labelScreenshot));
     await frame.locator('#close-detail').click();
   }
+  const rejectedMarker='BROWSER-UNROUTED-'+require('node:crypto').randomUUID();
+  const rejected=await page.request.post(origin+'/v1/responses',{headers:{Authorization:'Bearer synthetic-client-audit-a-only'},data:{model:null,input:rejectedMarker}});
+  assert(rejected.status()===400,'缺少模型的 Responses 应由宿主路由拒绝');
+  const unobserved=await page.request.post(api+'/records/search',{headers:{Authorization:'Bearer '+admin},data:{q:rejectedMarker}});
+  assert(unobserved.status()===200 && (await unobserved.json()).total===0,'未进入 HTTP 执行的请求不应保存正文');
   // Anthropic 的工具结果即使带嵌套文本/附件也不是新用户输入；页面只显示允许正文与固定占位符。
   const anthropicMarker = 'BROWSER-ANTHROPIC-' + Date.now() + '-';
   const anthropicLimitMarker = 'BROWSER-ANTHROPIC-LIMIT-' + Date.now() + '-';
@@ -148,7 +154,7 @@ module.exports = async (page, options = {}) => {
       });
       assert(submitted.status()===200, 'Anthropic 审计改变了原模型调用结果');
       const detail = await openSavedDetail({...tc,incomplete:true});
-      assert(detail.protocol==='anthropic-messages' && detail.model==='audit-test-model' && detail.text===tc.want, 'Anthropic 原始内容、请求模型或协议错误');
+      assert(detail.protocol==='anthropic-messages' && detail.model==='audit-test-model' && detail.text===tc.want, 'Anthropic 执行入口正文、模型或协议错误');
       const row = frame.locator('#records tbody tr').filter({hasText:tc.marker});
       await row.getByRole('cell', {name:'Anthropic Messages',exact:true,includeHidden:true}).waitFor();
       await row.getByRole('cell', {name:'audit-test-model',exact:true,includeHidden:true}).waitFor();
@@ -166,5 +172,5 @@ module.exports = async (page, options = {}) => {
   }
   const notice = await frame.locator('#notice').textContent();
   assert(notice.includes('Responses HTTP') && notice.includes('Anthropic Messages') && notice.includes('tool_result'), '页面未说明实际 HTTP 支持及工具结果边界');
-  return {screenshot,extraScreenshots,modelStatus:200,listTruncationLabel:true,detailTruncationLabel:true,incompleteLabels:true,combinedLabels:true,visibleGap:true,literalPlaceholders:true,responsesProtocolLabels:true,responsesRequestModel:true,unknownRequestModel:true,anthropicProtocolLabels:true,anthropicToolBoundary:true,anthropicCombinedLabels:true,externalLoads,visibleBytes:visible.bytes,tailVisible:false,brokenUTF8:false};
+  return {screenshot,extraScreenshots,modelStatus:200,listTruncationLabel:true,detailTruncationLabel:true,incompleteLabels:true,combinedLabels:true,visibleGap:true,literalPlaceholders:true,responsesProtocolLabels:true,responsesExecutionModel:true,unroutedRequestNotCaptured:true,anthropicProtocolLabels:true,anthropicToolBoundary:true,anthropicCombinedLabels:true,externalLoads,visibleBytes:visible.bytes,tailVisible:false,brokenUTF8:false};
 }

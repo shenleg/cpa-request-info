@@ -51,6 +51,9 @@ func TestHTTPOnceSSEDisconnect(t *testing.T) {
 	received := make(chan []byte, 4)
 	canceled := make(chan struct{}, 4)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if respondDiscovery(w, r) {
+			return
+		}
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
 			w.WriteHeader(400)

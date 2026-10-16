@@ -133,6 +133,9 @@ func TestHTTPOnceCapturedBeforeReply(t *testing.T) {
 			}
 			plans := make(chan exchange, 2)
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if respondDiscovery(w, r) {
+					return
+				}
 				var plan exchange
 				select {
 				case plan = <-plans:

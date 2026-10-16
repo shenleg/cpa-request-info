@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 构建独立兼容性宿主与插件；故障仅存在于宿主 Go overlay，不修改正式产物或加入生产故障入口。
+# 历史补丁契约的隔离兼容性构建；精简版不运行此脚本，重现旧验收须使用旧提交的独立目录。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 COMMIT=bf9341629ef2300ac9d846a2e80fe2756f63a671
@@ -12,6 +12,8 @@ python3 -I - "$ROOT" "$COMMIT" <<'PY'
 import hashlib, json, pathlib, sys
 root = pathlib.Path(sys.argv[1])
 manifest = json.loads((root / 'host/manifest.json').read_text())
+if 'capture' in manifest:
+    raise SystemExit('历史 observer 兼容性构建已退出精简版门禁；请在 6711c1c 的独立源码目录重现。')
 assert manifest['commit'] == sys.argv[2], '宿主清单 commit 不匹配'
 for item in manifest['patches']:
     assert hashlib.sha256((root / 'host' / item['path']).read_bytes()).hexdigest() == item['sha256'], '宿主补丁摘要不匹配'

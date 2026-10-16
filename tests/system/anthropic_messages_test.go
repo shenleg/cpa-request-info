@@ -9,20 +9,20 @@ import (
 	"testing"
 )
 
-// TestAnthropicMessagesBeforeRouting 验证原始消息在模型路由失败前采集，列表和详情保留协议及客户端请求模型。
+// TestAnthropicMessagesBeforeRouting 验证原协议消息在模型执行前采集，列表和详情保留协议及客户端请求模型。
 func TestAnthropicMessagesBeforeRouting(t *testing.T) {
 	h := startHost(t, 1<<30, true, "")
 	ids := h.monitorAll(t)
-	body := []byte(`{"model":"anthropic-missing-client-model","max_tokens":32,"system":"FORBIDDEN_ANTHROPIC_SYSTEM","messages":[{"role":"user","content":"ANTHROPIC-BEFORE-ROUTING"}]}`)
+	body := []byte(`{"model":"audit-test-model","max_tokens":32,"system":"FORBIDDEN_ANTHROPIC_SYSTEM","messages":[{"role":"user","content":"ANTHROPIC-BEFORE-ROUTING"}]}`)
 	code, _ := h.request(t, "POST", "/v1/messages", keyA, body)
-	if code != 400 {
-		t.Fatal("审计不应改变 Anthropic 原路由失败")
+	if code != 200 {
+		t.Fatal("审计不应改变 Anthropic 合成模型调用")
 	}
 	r := waitChatDetail(t, h, "ANTHROPIC-BEFORE-ROUTING")
-	if r.Text != "ANTHROPIC-BEFORE-ROUTING" || r.Model != "anthropic-missing-client-model" || r.Protocol != "anthropic-messages" || r.Truncated || r.ExtractionIncomplete || (r.ObjectID != ids[0] && r.ObjectID != ids[1]) {
+	if r.Text != "ANTHROPIC-BEFORE-ROUTING" || r.Model != "audit-test-model" || r.Protocol != "anthropic-messages" || r.Truncated || r.ExtractionIncomplete || (r.ObjectID != ids[0] && r.ObjectID != ids[1]) {
 		t.Fatal("Anthropic 原始输入、可信客户端对象或请求元数据不正确")
 	}
-	code, raw := h.request(t, "GET", api+"/records", adminKey, nil)
+	code, raw := h.search(t, adminKey, nil)
 	var list struct {
 		Records []savedRecord `json:"records"`
 	}
@@ -35,15 +35,15 @@ func TestAnthropicMessagesBeforeRouting(t *testing.T) {
 // TestAnthropicMessagesAdmission 验证未监控、失败鉴权和 count_tokens 不采集，状态准确声明三协议 HTTP 支持。
 func TestAnthropicMessagesAdmission(t *testing.T) {
 	h := startHost(t, 1<<30, true, "")
-	h.request(t, "POST", "/v1/messages", keyA, []byte(`{"model":"missing","messages":[{"role":"user","content":"FORBIDDEN_ANTHROPIC_UNMONITORED"}]}`))
+	h.request(t, "POST", "/v1/messages", keyA, []byte(`{"model":"audit-test-model","messages":[{"role":"user","content":"FORBIDDEN_ANTHROPIC_UNMONITORED"}]}`))
 	h.monitorAll(t)
 	_, _, before := snapshotCounters(t, h)
-	code, _ := h.request(t, "POST", "/v1/messages", "synthetic-invalid-client", []byte(`{"model":"missing","messages":[{"role":"user","content":"FORBIDDEN_ANTHROPIC_UNAUTHENTICATED"}]}`))
+	code, _ := h.request(t, "POST", "/v1/messages", "synthetic-invalid-client", []byte(`{"model":"audit-test-model","messages":[{"role":"user","content":"FORBIDDEN_ANTHROPIC_UNAUTHENTICATED"}]}`))
 	if code != 401 {
 		t.Fatal("Anthropic 客户端鉴权被改变")
 	}
-	h.request(t, "POST", "/v1/messages/count_tokens", keyA, []byte(`{"model":"missing","messages":[{"role":"user","content":"FORBIDDEN_ANTHROPIC_COUNT_TOKENS"}]}`))
-	h.request(t, "POST", "/v1/messages", keyA, []byte(`{"model":"missing","messages":[{"role":"user","content":"ANTHROPIC-ADMISSION-DRAIN"}]}`))
+	h.request(t, "POST", "/v1/messages/count_tokens", keyA, []byte(`{"model":"audit-test-model","messages":[{"role":"user","content":"FORBIDDEN_ANTHROPIC_COUNT_TOKENS"}]}`))
+	h.request(t, "POST", "/v1/messages", keyA, []byte(`{"model":"audit-test-model","messages":[{"role":"user","content":"ANTHROPIC-ADMISSION-DRAIN"}]}`))
 	waitSnapshotRecord(t, h, "ANTHROPIC-ADMISSION-DRAIN")
 	saved, queued, after := snapshotCounters(t, h)
 	if saved != 1 || queued != 0 || !maps.Equal(before, after) {
@@ -55,12 +55,12 @@ func TestAnthropicMessagesAdmission(t *testing.T) {
 		SupportedProtocols []string `json:"supported_protocols"`
 		ResponsesWebSocket bool     `json:"responses_websocket"`
 	}
-	if code != 200 || json.Unmarshal(raw, &status) != nil || !status.Available || !slices.Contains(status.SupportedProtocols, "anthropic-messages") || !status.ResponsesWebSocket || !slices.Contains(status.SupportedProtocols, "responses-websocket") {
+	if code != 200 || json.Unmarshal(raw, &status) != nil || !status.Available || !slices.Contains(status.SupportedProtocols, "anthropic-messages") || status.ResponsesWebSocket || slices.Contains(status.SupportedProtocols, "responses-websocket") {
 		t.Fatal("管理状态没有准确声明 Anthropic Messages HTTP 支持")
 	}
 	for _, key := range []string{"", keyA} {
-		for _, path := range []string{"/records", "/detail?id=synthetic", "/status", "/objects"} {
-			code, _ := h.request(t, "GET", api+path, key, nil)
+		for _, path := range []string{"/records/search", "/detail?id=synthetic", "/status", "/objects"} {
+			code, _ := managementRead(t, h, path, key)
 			if code != 401 && code != 403 {
 				t.Fatal("非管理用户能访问 Anthropic 审计数据")
 			}
@@ -107,10 +107,10 @@ func TestAnthropicMessagesContent(t *testing.T) {
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			savedBefore, _, before := snapshotCounters(t, h)
-			h.request(t, "POST", "/v1/messages", keyA, []byte(`{"model":"missing","messages":[{"role":"user","content":`+tc.content+`}]}`))
+			h.request(t, "POST", "/v1/messages", keyA, []byte(`{"model":"audit-test-model","messages":[{"role":"user","content":`+tc.content+`}]}`))
 			// 唯一本轮记录落盘提供 FIFO 屏障，不以固定 sleep 证明空输入/工具续跑跳过。
 			barrier := fmt.Sprintf("ANTHROPIC-CONTENT-BARRIER-%d", i)
-			h.request(t, "POST", "/v1/messages", keyA, []byte(fmt.Sprintf(`{"model":"missing","messages":[{"role":"user","content":%q}]}`, barrier)))
+			h.request(t, "POST", "/v1/messages", keyA, []byte(fmt.Sprintf(`{"model":"audit-test-model","messages":[{"role":"user","content":%q}]}`, barrier)))
 			waitSnapshotRecord(t, h, barrier)
 			saved, queued, after := snapshotCounters(t, h)
 			wantSaved := savedBefore + 1
@@ -134,38 +134,37 @@ func TestAnthropicMessagesContent(t *testing.T) {
 	assertChatPrivacy(t, h, "FORBIDDEN_ANTHROPIC_")
 }
 
-// TestAnthropicMessagesAmbiguity 验证模型未知仍采集，歧义角色/内容及畸形 JSON 不会回退为完整输入。
+// TestAnthropicMessagesAmbiguity 验证未知模型不进入 Before，实际收到的畸形正文与歧义字段分别报告缺口。
 func TestAnthropicMessagesAmbiguity(t *testing.T) {
 	h := startHost(t, 1<<30, true, "")
 	h.monitorAll(t)
 	for i, model := range []string{"", `"model":null,`, `"model":123,`} {
 		marker := fmt.Sprintf("ANTHROPIC-UNKNOWN-MODEL-%d", i)
 		h.request(t, "POST", "/v1/messages", keyA, []byte(fmt.Sprintf(`{%s"messages":[{"role":"user","content":%q}]}`, model, marker)))
-		r := waitChatDetail(t, h, marker)
-		if r.Model != "" || r.Protocol != "anthropic-messages" || r.Text != marker {
-			t.Fatal("Anthropic 模型不可靠时丢弃或猜测了输入")
-		}
+		assertSnapshotSkipped(t, h, marker)
 	}
 	_, _, before := snapshotCounters(t, h)
 	for _, body := range []string{
-		`{"model":"missing","messages":[{"role":"assistant","role":"user","content":"FORBIDDEN_ANTHROPIC_DUPLICATE_ROLE"}]}`,
-		`{"model":"missing","messages":[{"role":"user","content":"FORBIDDEN_ANTHROPIC_DUPLICATE_CONTENT","content":"FORBIDDEN_ANTHROPIC_DUPLICATE_CONTENT_2"}]}`,
-		`{"model":"missing","messages":[{"role":"user","content":"FORBIDDEN_ANTHROPIC_DUPLICATE_MESSAGES"}],"messages":[]}`,
-		`{"model":"missing","messages":[`,
+		`{"model":"audit-test-model","messages":[{"role":"assistant","role":"user","content":"FORBIDDEN_ANTHROPIC_DUPLICATE_ROLE"}]}`,
+		`{"model":"audit-test-model","messages":[{"role":"user","content":"FORBIDDEN_ANTHROPIC_DUPLICATE_CONTENT","content":"FORBIDDEN_ANTHROPIC_DUPLICATE_CONTENT_2"}]}`,
+		`{"model":"audit-test-model","messages":[{"role":"user","content":"FORBIDDEN_ANTHROPIC_DUPLICATE_MESSAGES"}],"messages":[]}`,
+		`{"model":"audit-test-model","messages":[`,
 	} {
 		h.request(t, "POST", "/v1/messages", keyA, []byte(body))
 	}
 	for _, terminal := range []string{`{"Role":"user","content":"FORBIDDEN_ANTHROPIC_ROLE_ALIAS"}`, `{"role":"future","content":"FORBIDDEN_ANTHROPIC_UNKNOWN_ROLE"}`, `{"role":"user"}`} {
-		h.request(t, "POST", "/v1/messages", keyA, []byte(`{"model":"missing","messages":[{"role":"user","content":"FORBIDDEN_ANTHROPIC_AMBIGUOUS_HISTORY"},`+terminal+`]}`))
+		h.request(t, "POST", "/v1/messages", keyA, []byte(`{"model":"audit-test-model","messages":[{"role":"user","content":"FORBIDDEN_ANTHROPIC_AMBIGUOUS_HISTORY"},`+terminal+`]}`))
 	}
-	h.request(t, "POST", "/v1/messages", keyA, []byte(`{"model":"missing","messages":[{"role":"user","content":"ANTHROPIC-AMBIGUITY-DRAIN"}]}`))
+	h.request(t, "POST", "/v1/messages", keyA, []byte(`{"model":"audit-test-model","messages":[{"role":"user","content":"ANTHROPIC-AMBIGUITY-DRAIN"}]}`))
 	waitSnapshotRecord(t, h, "ANTHROPIC-AMBIGUITY-DRAIN")
 	saved, queued, after := snapshotCounters(t, h)
 	wantGaps := maps.Clone(before)
-	wantGaps["invalid_json"] += 4
+	wantGaps["invalid_json"] += 3
+	// 已识别模型的畸形正文仍到达官方回调，由 native 入参校验报告实际 invalid_event。
+	wantGaps["invalid_event"]++
 	wantGaps["unsupported_content"] += 3
-	if saved != 4 || queued != 0 || !maps.Equal(after, wantGaps) {
-		t.Fatal("Anthropic 字段歧义或缺失被保存/缺口分类错误")
+	if saved != 1 || queued != 0 || !maps.Equal(after, wantGaps) {
+		t.Fatalf("Anthropic 字段歧义或缺失被保存/缺口分类错误: saved=%d queued=%d gaps=%v want=%v", saved, queued, after, wantGaps)
 	}
 	assertChatPrivacy(t, h, "FORBIDDEN_ANTHROPIC_")
 }
@@ -183,13 +182,13 @@ func TestAnthropicMessagesToolBoundary(t *testing.T) {
 		`{"role":"system","content":"FORBIDDEN_ANTHROPIC_MESSAGE_SYSTEM"}`,
 		`{"role":"developer","content":"FORBIDDEN_ANTHROPIC_DEVELOPER"}`,
 	} {
-		h.request(t, "POST", "/v1/messages", keyA, []byte(`{"model":"missing","max_tokens":32,"messages":[{"role":"user","content":"FORBIDDEN_ANTHROPIC_HISTORY"},`+terminal+`]}`))
+		h.request(t, "POST", "/v1/messages", keyA, []byte(`{"model":"audit-test-model","max_tokens":32,"messages":[{"role":"user","content":"FORBIDDEN_ANTHROPIC_HISTORY"},`+terminal+`]}`))
 	}
-	body := []byte(`{"model":"missing","max_tokens":32,"system":"FORBIDDEN_ANTHROPIC_SYSTEM","messages":[{"role":"user","content":"FORBIDDEN_ANTHROPIC_CONSECUTIVE"},{"role":"user","content":[` + tool + `,{"type":"text","text":"ANTHROPIC-MIXED-前"},{"type":"image","source":{"type":"url","url":"FORBIDDEN_ANTHROPIC_IMAGE_URL"}},{"type":"document","source":{"type":"text","media_type":"text/plain","data":"FORBIDDEN_ANTHROPIC_DOCUMENT_TEXT"},"title":"FORBIDDEN_ANTHROPIC_FILENAME"},{"type":"text","text":"后"}]}]}`)
+	body := []byte(`{"model":"audit-test-model","max_tokens":32,"system":"FORBIDDEN_ANTHROPIC_SYSTEM","messages":[{"role":"user","content":"FORBIDDEN_ANTHROPIC_CONSECUTIVE"},{"role":"user","content":[` + tool + `,{"type":"text","text":"ANTHROPIC-MIXED-前"},{"type":"image","source":{"type":"url","url":"FORBIDDEN_ANTHROPIC_IMAGE_URL"}},{"type":"document","source":{"type":"text","media_type":"text/plain","data":"FORBIDDEN_ANTHROPIC_DOCUMENT_TEXT"},"title":"FORBIDDEN_ANTHROPIC_FILENAME"},{"type":"text","text":"后"}]}]}`)
 	for i := 0; i < 2; i++ {
 		h.request(t, "POST", "/v1/messages", keyA, body)
 		barrier := fmt.Sprintf("ANTHROPIC-TOOL-BARRIER-%d", i)
-		h.request(t, "POST", "/v1/messages", keyA, []byte(fmt.Sprintf(`{"model":"missing","messages":[{"role":"user","content":%q}]}`, barrier)))
+		h.request(t, "POST", "/v1/messages", keyA, []byte(fmt.Sprintf(`{"model":"audit-test-model","messages":[{"role":"user","content":%q}]}`, barrier)))
 		waitSnapshotRecord(t, h, barrier)
 	}
 	r := waitChatDetail(t, h, "ANTHROPIC-MIXED-前")

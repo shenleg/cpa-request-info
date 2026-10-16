@@ -223,7 +223,7 @@ func TestRestartDiagnosticExpiry(t *testing.T) {
 	clock := newRetentionClock(t, now)
 	h := startRetentionHost(t, 1<<30, "", clock)
 	h.monitorAll(t)
-	h.request(t, "POST", "/v1/chat/completions", keyA, []byte(`{"model":"missing","messages":[{"role":"user","content":[{"type":"unknown_block","value":"FORBIDDEN_UNKNOWN_PAYLOAD"}]}]}`))
+	h.request(t, "POST", "/v1/chat/completions", keyA, []byte(`{"model":"audit-test-model","messages":[{"role":"user","content":[{"type":"unknown_block","value":"FORBIDDEN_UNKNOWN_PAYLOAD"}]}]}`))
 	if err := h.cmd.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +231,7 @@ func TestRestartDiagnosticExpiry(t *testing.T) {
 	restarted := startRetentionHost(t, 1<<30, "", clock, h.stateDir)
 	assertUncertainRecovery(t, restarted, "unclean_shutdown")
 	// 未知块仍为明确缺口；正文安全提取为空不意味着正常空输入。只等待重启后本轮新增的运行计数。
-	restarted.request(t, "POST", "/v1/chat/completions", keyA, []byte(`{"model":"missing","messages":[{"role":"user","content":[{"type":"unknown_block"}]}]}`))
+	restarted.request(t, "POST", "/v1/chat/completions", keyA, []byte(`{"model":"audit-test-model","messages":[{"role":"user","content":[{"type":"unknown_block"}]}]}`))
 	waitBudgetState(t, restarted, func(state budgetState) bool {
 		return state.Gaps["unsupported_content"] == 1 && state.DiagnosticsPersisted
 	})
@@ -250,7 +250,7 @@ func TestRestartQueuedCrash(t *testing.T) {
 	h.monitorAll(t)
 	// 与既有真实队列满验收采用相同128并发；负载有界，强杀后允许在途请求被进程退出中断。
 	const requests = 1024
-	body := []byte(fmt.Sprintf(`{"model":"missing","messages":[{"role":"user","content":%q}]}`, strings.Repeat("queued-crash-", 5400)))
+	body := []byte(fmt.Sprintf(`{"model":"audit-test-model","messages":[{"role":"user","content":%q}]}`, strings.Repeat("queued-crash-", 5400)))
 	client := &http.Client{Timeout: 30 * time.Second}
 	defer client.CloseIdleConnections()
 	var workers sync.WaitGroup

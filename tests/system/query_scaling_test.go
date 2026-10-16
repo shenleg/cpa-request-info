@@ -18,7 +18,7 @@ func TestPagedDetailsRemainBounded(t *testing.T) {
 	for i := 0; i < records; i++ {
 		// 19字节序号前缀加65500字节正文，低于64KiB且接近压力用例大小。
 		text := fmt.Sprintf("query-scaling-%04d:", i) + strings.Repeat("s", 65500)
-		body, _ := json.Marshal(map[string]any{"model": "missing", "messages": []map[string]string{{"role": "user", "content": text}}})
+		body, _ := json.Marshal(map[string]any{"model": "audit-test-model", "messages": []map[string]string{{"role": "user", "content": text}}})
 		h.request(t, "POST", "/v1/chat/completions", keyA, body)
 		deadline := time.Now().Add(5 * time.Second)
 		for {
@@ -40,7 +40,7 @@ func TestPagedDetailsRemainBounded(t *testing.T) {
 			time.Sleep(5 * time.Millisecond)
 		}
 	}
-	code, raw := h.request(t, "GET", api+"/records?offset=156&limit=100", adminKey, nil)
+	code, raw := h.search(t, adminKey, map[string]any{"offset": 156, "limit": 100})
 	var page struct {
 		Records []savedRecord `json:"records"`
 	}

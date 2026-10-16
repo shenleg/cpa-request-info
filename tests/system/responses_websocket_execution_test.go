@@ -1,3 +1,6 @@
+//go:build legacy_patched
+
+// 历史私有原帧执行契约；当前明确排除所有 WebSocket，替代用例为 TestOfficialWebsocketExcluded。
 // 本文件核对 WebSocket 原执行语义：历史恢复、审计开关对照、内部重试和异步保存失败。
 package system
 

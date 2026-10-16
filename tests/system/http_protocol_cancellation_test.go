@@ -21,6 +21,9 @@ func TestHTTPProtocolsCancellation(t *testing.T) {
 			t.Run(p.name+"/"+mode, func(t *testing.T) {
 				received, canceled := make(chan []byte, 4), make(chan struct{}, 4)
 				upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if respondDiscovery(w, r) {
+						return
+					}
 					raw, err := io.ReadAll(r.Body)
 					if err != nil {
 						w.WriteHeader(400)
@@ -123,6 +126,9 @@ func TestHTTPProtocolsSSEDisconnect(t *testing.T) {
 		t.Run(p.name, func(t *testing.T) {
 			received, canceled := make(chan []byte, 4), make(chan struct{}, 4)
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if respondDiscovery(w, r) {
+					return
+				}
 				raw, err := io.ReadAll(r.Body)
 				if err != nil {
 					w.WriteHeader(400)

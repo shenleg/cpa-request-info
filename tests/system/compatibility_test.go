@@ -1,3 +1,6 @@
+//go:build legacy_patched
+
+// 历史私有 observer 扩展与 compatibility overlay 契约；当前官方能力见 TestOfficialKnownCallerDirectory，存储故障见 TestHTTPProtocolsStorageFailure。
 // 本文件通过替代宿主契约的隔离产物，验收兼容故障、快照保留及恢复；不添加生产故障 API。
 package system
 

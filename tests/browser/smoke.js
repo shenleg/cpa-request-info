@@ -24,8 +24,18 @@ module.exports = async (page) => {
   await frame.getByRole('textbox', {name:'临时管理 Key'}).fill(admin);
   await frame.getByRole('button', {name:'连接',exact:true}).click();
   await frame.getByRole('status').filter({hasText:'管理鉴权通过'}).waitFor();
+  const api=base+'/v0/management/plugins/request-input-audit';
+  const headers={Authorization:'Bearer '+admin};
+  const statusResponse=await page.request.get(api+'/status',{headers});
+  assert(statusResponse.status()===200,'HTTP 执行状态不可用');
+  const status=await statusResponse.json();
+  assert(status.available && status.capture_mode==='http_execution' && status.responses_websocket===false && JSON.stringify([...status.supported_protocols].sort())===JSON.stringify(['anthropic-messages','chat-completions','responses']),'HTTP 精简版能力声明错误');
+  const catalogResponse=await page.request.get(api+'/objects',{headers});
+  assert(catalogResponse.status()===200 && (await catalogResponse.json()).catalog==='observed','目录必须来自已观察对象而非宿主 Key 枚举');
+  const discovery=await page.request.post(api+'/records/search',{headers,data:{q:'synthetic HTTP discovery only'}});
+  assert(discovery.status()===200 && (await discovery.json()).total===0,'首次发现未监控对象不应保存正文，重启不能重采发现请求');
   const ids = await frame.locator('#objects option').evaluateAll(options => options.map(option => option.value));
-  assert(ids.length === 2, '应有两个无秘密合成对象');
+  assert(ids.length === 2, 'demo 应先用两个合成 Key 完成 HTTP 发现');
   await frame.locator('#open-objects').click();
   for (const [i,id] of ids.entries()) {
     await frame.locator('#objects').selectOption(id);
@@ -45,7 +55,7 @@ module.exports = async (page) => {
   let savedId='';
   const deadline=Date.now()+10000;
   while (!savedId && Date.now()<deadline) {
-    const response=await page.request.get(base+'/v0/management/plugins/request-input-audit/records',{headers:{Authorization:'Bearer '+admin}});
+    const response=await page.request.post(base+'/v0/management/plugins/request-input-audit/records/search',{headers:{Authorization:'Bearer '+admin},data:{q:focusMarker,limit:100}});
     assert(response.status()===200,'受保护结果查询失败');
     const list=await response.json();
     const record=list.records.find(r=>r.preview.startsWith(focusMarker));

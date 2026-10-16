@@ -3,7 +3,9 @@ package audit
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -95,6 +97,8 @@ type Collector struct {
 	directory   *os.File
 	active      *os.File
 	diagnostics *os.File
+	// callerScopeSeed 只在持锁初始化并同步成功后发布，不向宿主暴露或缓存 caller_scope。
+	callerScopeSeed []byte
 	// diagnosticWake 只通知单写入者合并保存固定诊断，不在模型请求中等待磁盘。
 	diagnosticWake       chan struct{}
 	capacityLastAt       string
@@ -133,7 +137,7 @@ type segment struct {
 
 // Open 打开独占审计目录并扫描已提交记录；dir 必须不经过符号链接。
 // budget 是缺少持久预算时的初始值，0 使用 1 GiB，合法范围 4 MiB 至 1 GiB；已保存设置优先。
-// 返回可关闭的采集器；参数、随机代际来源、目录或锁不可用返回固定错误，损坏数据则返回停采实例。
+// 返回可关闭的采集器；参数、随机代际来源、目录或锁不可用返回固定错误，身份或数据无效则返回停采实例。
 func Open(dir string, budget int64) (*Collector, error) {
 	if budget == 0 {
 		budget = defaultBudget
@@ -161,6 +165,43 @@ func Open(dir string, budget int64) (*Collector, error) {
 	}
 	go c.writeLoop()
 	return c, nil
+}
+
+// CaptureExecution 处理官方 Before 已收到的一次 HTTP 执行；id 为官方 RequestID，callerScope 为已认证 caller_scope 摘要。
+// protocol 为 chat-completions、responses 或 anthropic-messages；不接受 WebSocket。
+// body 仅在调用期间借用，返回私有种子派生的匿名 ObjectID；未监控时不提取正文，身份不可用返回空串。
+// 无返回错误或磁盘 I/O；无效输入、提取和入队失败只更新缺口，存储故障保持停采，不推断未收到的回调。
+func (c *Collector) CaptureExecution(id, callerScope, protocol string, body []byte) string {
+	if len(c.callerScopeSeed) == 0 {
+		return ""
+	}
+	if callerScope == "" {
+		c.ReportInputFailure()
+		return ""
+	}
+	mac := hmac.New(sha256.New, c.callerScopeSeed)
+	mac.Write([]byte("cpa-request-info:object-id:caller-scope:v1\x00"))
+	mac.Write([]byte(callerScope))
+	objectID := hex.EncodeToString(mac.Sum(nil))
+	event := Event{ID: id, ObjectID: objectID, ReceivedAt: auditNow().UTC().Format(time.RFC3339Nano), Protocol: protocol}
+	event.Snapshot = c.Prepare(event)
+	// Prepare 已记录无效元数据；停采或未监控都不借用正文，不再把 unavailable 快照误报为无效回调。
+	if event.Snapshot.Decision != "capture" {
+		return objectID
+	}
+	if protocol != "chat-completions" && protocol != "responses" && protocol != "anthropic-messages" {
+		c.gap("unsupported_protocol")
+		return objectID
+	}
+	event.Body = body
+	c.Observe(event)
+	return objectID
+}
+
+// ReportInputFailure 报告实际收到但无法构成有效事件的回调输入；无参数、返回值或异常。
+// 只增加 invalid_event 并异步保存诊断，不声称知道未收到的回调数量或内容。
+func (c *Collector) ReportInputFailure() {
+	c.gap("invalid_event")
 }
 
 // Observe 按 event 的接收快照同步提取三协议 HTTP 或 Responses WebSocket 本次允许输入并非阻塞入队，不复核当前配置。

@@ -6,23 +6,24 @@ import (
 	"fmt"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 )
 
-// TestResponsesHTTPStringBeforeRouting 验证路由失败前已观察字符串输入，列表与详情保留客户端请求模型和协议。
+// TestResponsesHTTPStringBeforeRouting 验证执行前已观察字符串输入，列表与详情保留客户端请求模型和协议。
 func TestResponsesHTTPStringBeforeRouting(t *testing.T) {
 	h := startHost(t, 1<<30, true, "")
 	h.monitorAll(t)
-	body := []byte(`{"model":"responses-missing-client-model","input":"RESPONSES-STRING-BEFORE-ROUTING","instructions":"FORBIDDEN_RESPONSES_INSTRUCTIONS","previous_response_id":"FORBIDDEN_PREVIOUS_RESPONSE_ID"}`)
+	body := []byte(`{"model":"responses-client-model","input":"RESPONSES-STRING-BEFORE-ROUTING","instructions":"FORBIDDEN_RESPONSES_INSTRUCTIONS","previous_response_id":"FORBIDDEN_PREVIOUS_RESPONSE_ID"}`)
 	code, _ := h.request(t, "POST", "/v1/responses", keyA, body)
-	if code != 400 {
-		t.Fatal("审计不应改变宿主模型路由失败")
+	if code != 200 {
+		t.Fatal("审计不应改变合成模型成功响应")
 	}
 	record := waitChatDetail(t, h, "RESPONSES-STRING-BEFORE-ROUTING")
-	if record.Text != "RESPONSES-STRING-BEFORE-ROUTING" || record.Model != "responses-missing-client-model" || record.Protocol != "responses" || record.Truncated || record.ExtractionIncomplete {
+	if record.Text != "RESPONSES-STRING-BEFORE-ROUTING" || record.Model != "responses-client-model" || record.Protocol != "responses" || record.Truncated || record.ExtractionIncomplete {
 		t.Fatal("Responses 字符串输入或客户端请求元数据不正确")
 	}
-	code, raw := h.request(t, "GET", api+"/records", adminKey, nil)
+	code, raw := h.search(t, adminKey, nil)
 	var list struct {
 		Records []savedRecord `json:"records"`
 	}
@@ -47,17 +48,17 @@ func TestResponsesHTTPTerminalMessage(t *testing.T) {
 		`{"type":"computer_call_output","output":{"type":"computer_screenshot","image_url":"FORBIDDEN_RESPONSES_SCREENSHOT"}}`,
 		`{"type":"reasoning","encrypted_content":"FORBIDDEN_RESPONSES_REASONING"}`,
 	} {
-		body := []byte(`{"model":"missing","previous_response_id":"FORBIDDEN_RESPONSES_PREVIOUS","input":[{"role":"user","content":"FORBIDDEN_RESPONSES_OLD_USER"},` + terminal + `]}`)
+		body := []byte(`{"model":"audit-test-model","previous_response_id":"FORBIDDEN_RESPONSES_PREVIOUS","input":[{"role":"user","content":"FORBIDDEN_RESPONSES_OLD_USER"},` + terminal + `]}`)
 		code, _ := h.request(t, "POST", "/v1/responses", keyA, body)
-		if code != 400 {
-			t.Fatal("审计不应改变结构化请求的原路由失败")
+		if code != 200 {
+			t.Fatal("审计不应改变结构化请求的成功响应")
 		}
 	}
 	for i := 0; i < 2; i++ {
-		body := []byte(`{"model":"missing","previous_response_id":"FORBIDDEN_RESPONSES_PREVIOUS","input":[{"role":"user","content":"FORBIDDEN_RESPONSES_CONSECUTIVE"},{"type":"message","role":"user","content":[{"type":"input_text","text":"RESPONSES-EXPLICIT-RESEND"}]}]}`)
+		body := []byte(`{"model":"audit-test-model","previous_response_id":"FORBIDDEN_RESPONSES_PREVIOUS","input":[{"role":"user","content":"FORBIDDEN_RESPONSES_CONSECUTIVE"},{"type":"message","role":"user","content":[{"type":"input_text","text":"RESPONSES-EXPLICIT-RESEND"}]}]}`)
 		h.request(t, "POST", "/v1/responses", keyA, body)
 		barrier := fmt.Sprintf("RESPONSES-TERMINAL-BARRIER-%d", i)
-		h.request(t, "POST", "/v1/responses", keyA, []byte(fmt.Sprintf(`{"model":"missing","input":%q}`, barrier)))
+		h.request(t, "POST", "/v1/responses", keyA, []byte(fmt.Sprintf(`{"model":"audit-test-model","input":%q}`, barrier)))
 		waitSnapshotRecord(t, h, barrier)
 	}
 	record := waitChatDetail(t, h, "RESPONSES-EXPLICIT-RESEND")
@@ -111,11 +112,11 @@ func TestResponsesHTTPContent(t *testing.T) {
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			savedBefore, _, before := snapshotCounters(t, h)
-			body := []byte(`{"model":"missing","input":` + tc.input + `}`)
+			body := []byte(`{"model":"audit-test-model","input":` + tc.input + `}`)
 			h.request(t, "POST", "/v1/responses", keyA, body)
 			// 本轮唯一提交实际落盘是 FIFO 屏障；不能用固定等待判断跳过。
 			barrier := fmt.Sprintf("RESPONSES-CONTENT-BARRIER-%d", i)
-			h.request(t, "POST", "/v1/responses", keyA, []byte(fmt.Sprintf(`{"model":"missing","input":%q}`, barrier)))
+			h.request(t, "POST", "/v1/responses", keyA, []byte(fmt.Sprintf(`{"model":"audit-test-model","input":%q}`, barrier)))
 			waitSnapshotRecord(t, h, barrier)
 			saved, queued, after := snapshotCounters(t, h)
 			wantSaved := savedBefore + 1
@@ -143,21 +144,28 @@ func TestResponsesHTTPContent(t *testing.T) {
 func TestResponsesHTTPRoutesAndAdmission(t *testing.T) {
 	h := startHost(t, 1<<30, true, "")
 	for _, path := range []string{"/v1/responses", "/v1/responses/compact", "/backend-api/codex/responses", "/backend-api/codex/responses/compact"} {
-		h.request(t, "POST", path, keyA, []byte(`{"model":"missing","input":"FORBIDDEN_RESPONSES_UNMONITORED"}`))
+		h.request(t, "POST", path, keyA, []byte(`{"model":"audit-test-model","input":"FORBIDDEN_RESPONSES_UNMONITORED"}`))
 	}
 	h.monitorAll(t)
 	_, _, before := snapshotCounters(t, h)
 	for i, path := range []string{"/v1/responses", "/v1/responses/compact", "/backend-api/codex/responses", "/backend-api/codex/responses/compact"} {
-		code, _ := h.request(t, "POST", path, "synthetic-invalid-client", []byte(`{"model":"missing","input":"FORBIDDEN_RESPONSES_UNAUTHENTICATED"}`))
+		code, _ := h.request(t, "POST", path, "synthetic-invalid-client", []byte(`{"model":"audit-test-model","input":"FORBIDDEN_RESPONSES_UNAUTHENTICATED"}`))
 		if code != 401 {
 			t.Fatal("Responses 鉴权行为被改变")
 		}
 		marker := fmt.Sprintf("RESPONSES-HTTP-ROUTE-%d", i)
-		// stream=true 的 compact 在协议分支就失败，也必须先观察允许输入。
-		body := []byte(fmt.Sprintf(`{"model":"missing","stream":true,"input":%q}`, marker))
+		// compact 的 stream=true 在 Before 之前失败，不能宣称已观察；标准 HTTP 路径正常执行。
+		body := []byte(fmt.Sprintf(`{"model":"audit-test-model","stream":true,"input":%q}`, marker))
 		code, _ = h.request(t, "POST", path, keyA, body)
-		if code != 400 {
-			t.Fatal("Responses 原宿主早期失败响应不一致")
+		if strings.HasSuffix(path, "/compact") {
+			if code != 400 {
+				t.Fatal("compact 流式请求没有保留宿主提前拒绝")
+			}
+			assertSnapshotSkipped(t, h, marker)
+			continue
+		}
+		if code != 200 {
+			t.Fatalf("标准 Responses HTTP 模型执行失败: path=%s HTTP=%d", path, code)
 		}
 		r := waitChatDetail(t, h, marker)
 		if r.Text != marker || r.Protocol != "responses" {
@@ -167,10 +175,10 @@ func TestResponsesHTTPRoutesAndAdmission(t *testing.T) {
 	for _, path := range []string{"/v1/responses", "/backend-api/codex/responses"} {
 		h.request(t, "GET", path, keyA, nil)
 	}
-	h.request(t, "POST", "/v1/responses", keyA, []byte(`{"model":"missing","input":"RESPONSES-ADMISSION-DRAIN"}`))
+	h.request(t, "POST", "/v1/responses", keyA, []byte(`{"model":"audit-test-model","input":"RESPONSES-ADMISSION-DRAIN"}`))
 	waitSnapshotRecord(t, h, "RESPONSES-ADMISSION-DRAIN")
 	saved, queued, after := snapshotCounters(t, h)
-	if saved != 5 || queued != 0 || !maps.Equal(before, after) {
+	if saved != 3 || queued != 0 || !maps.Equal(before, after) {
 		t.Fatal("未监控/鉴权失败/握手被采集或误报缺口")
 	}
 	code, raw := h.request(t, "GET", api+"/status", adminKey, nil)
@@ -179,39 +187,38 @@ func TestResponsesHTTPRoutesAndAdmission(t *testing.T) {
 		SupportedProtocols []string `json:"supported_protocols"`
 		ResponsesWebSocket bool     `json:"responses_websocket"`
 	}
-	if code != 200 || json.Unmarshal(raw, &status) != nil || !status.Available || !slices.Contains(status.SupportedProtocols, "responses") || !status.ResponsesWebSocket || !slices.Contains(status.SupportedProtocols, "responses-websocket") {
+	if code != 200 || json.Unmarshal(raw, &status) != nil || !status.Available || !slices.Contains(status.SupportedProtocols, "responses") || status.ResponsesWebSocket || slices.Contains(status.SupportedProtocols, "responses-websocket") {
 		t.Fatal("管理状态没有准确声明 Responses HTTP 支持范围")
 	}
 	assertChatPrivacy(t, h, "FORBIDDEN_RESPONSES_")
 }
 
-// TestResponsesHTTPMetadataAndAmbiguity 验证缺失/不可靠模型不阻止正文采集，重复协议字段只报告缺口而不兜底保存。
+// TestResponsesHTTPMetadataAndAmbiguity 验证缺失/不可靠模型不进入 Before，已执行请求的重复协议字段只报告缺口。
 func TestResponsesHTTPMetadataAndAmbiguity(t *testing.T) {
 	h := startHost(t, 1<<30, true, "")
 	h.monitorAll(t)
 	for i, field := range []string{"", `"model":null,`, `"model":123,`, `"model":{"name":"FORBIDDEN_RESPONSES_BAD_MODEL"},`} {
 		marker := fmt.Sprintf("RESPONSES-UNKNOWN-MODEL-%d", i)
 		h.request(t, "POST", "/v1/responses", keyA, []byte(fmt.Sprintf(`{%s"input":%q}`, field, marker)))
-		r := waitChatDetail(t, h, marker)
-		if r.Model != "" || r.Text != marker || r.Protocol != "responses" {
-			t.Fatal("Responses 无法确定模型时猜测或丢弃了输入")
-		}
+		assertSnapshotSkipped(t, h, marker)
 	}
 	_, _, before := snapshotCounters(t, h)
 	for _, body := range []string{
-		`{"model":"missing","input":"FORBIDDEN_RESPONSES_DUPLICATE_INPUT","input":"FORBIDDEN_RESPONSES_DUPLICATE_INPUT_2"}`,
-		`{"model":"missing","input":"FORBIDDEN_RESPONSES_DUPLICATE_MODEL","model":"missing2"}`,
-		`{"model":"missing","input":[`,
+		`{"model":"audit-test-model","input":"FORBIDDEN_RESPONSES_DUPLICATE_INPUT","input":"FORBIDDEN_RESPONSES_DUPLICATE_INPUT_2"}`,
+		`{"model":"audit-test-model","input":"FORBIDDEN_RESPONSES_DUPLICATE_MODEL","model":"audit-test-model"}`,
+		`{"model":"audit-test-model","input":[`,
 	} {
 		h.request(t, "POST", "/v1/responses", keyA, []byte(body))
 	}
-	h.request(t, "POST", "/v1/responses", keyA, []byte(`{"model":"missing","input":"RESPONSES-METADATA-DRAIN"}`))
+	h.request(t, "POST", "/v1/responses", keyA, []byte(`{"model":"audit-test-model","input":"RESPONSES-METADATA-DRAIN"}`))
 	waitSnapshotRecord(t, h, "RESPONSES-METADATA-DRAIN")
 	saved, queued, after := snapshotCounters(t, h)
 	wantGaps := maps.Clone(before)
-	wantGaps["invalid_json"] += 3
-	if saved != 5 || queued != 0 || !maps.Equal(wantGaps, after) {
-		t.Fatal("Responses 歧义/畸形协议被保存或缺口分类错误")
+	wantGaps["invalid_json"] += 2
+	// 已识别模型的畸形正文实际到达 Before，由 native 入参校验报告 invalid_event。
+	wantGaps["invalid_event"]++
+	if saved != 1 || queued != 0 || !maps.Equal(wantGaps, after) {
+		t.Fatalf("Responses 歧义/畸形协议被保存或缺口分类错误: saved=%d queued=%d gaps=%v want=%v", saved, queued, after, wantGaps)
 	}
 	assertChatPrivacy(t, h, "FORBIDDEN_RESPONSES_")
 }

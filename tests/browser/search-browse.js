@@ -32,12 +32,18 @@ module.exports = async (page, options) => {
     assert(response.status()===200,'搜索验收管理查询失败');
     return response.json();
   }
+  /** 以 JSON 提交 filter 查询已保存记录；返回 JSON，HTTP 失败抛错，不将关键词写入 URL。 */
+  async function search(filter) {
+    const response=await page.request.post(api+'/records/search',{headers,data:filter});
+    assert(response.status()===200,'搜索验收记录查询失败');
+    return response.json();
+  }
   const objects = (await read('/objects')).objects;
   for (const object of objects) {
     const response = await page.request.post(api+'/monitor',{headers,data:{object_id:object.id,name}});
     assert(response.status()===200,'搜索验收监控配置失败');
   }
-  /** 提交本轮文本；key/model 指定客户端身份和请求模型，content 是原消息，路由失败仍应可审计，无返回值。 */
+  /** 提交本轮文本；key/model 指定客户端身份和执行入口模型，content 是消息，宿主返回异常状态时抛错，无返回值。 */
   async function submit(key, model, content) {
     const response = await page.request.post(origin+'/v1/chat/completions',{headers:{Authorization:'Bearer '+key},data:{model,messages:[{role:'user',content}]}});
     assert(response.status()===200 || response.status()===400,'搜索验收模型提交失败');
@@ -48,15 +54,17 @@ module.exports = async (page, options) => {
   const text=prefix+'x'.repeat(65535-Buffer.byteLength(prefix));
   await submit(clientA,'audit-test-model',[{type:'text',text:text+'🙂FORBIDDEN_SEARCH_BROWSER_TAIL'},{type:'future',payload:'FORBIDDEN_SEARCH_BROWSER_UNKNOWN'}]);
   await submit(clientB,'audit-test-model',marker+'OTHER-OBJECT');
+  await submit(clientA,'audit-test-other-model',marker+'OTHER-MODEL');
   const hostileModel='<img src="https://invalid.example/search-model">';
-  await submit(clientA,hostileModel,marker+'OTHER-MODEL');
+  await submit(clientA,hostileModel,marker+'UNROUTED-MODEL');
   let saved;
   const deadline=Date.now()+10000;
   while (Date.now()<deadline) {
-    saved=await read('/records?limit=100&q='+encodeURIComponent(marker));
+    saved=await search({limit:100,q:marker});
     if (saved.total===25) break;
   }
-  assert(saved.total===25,'本轮搜索夹具未全部保存');
+  // 第二个可路由模型保留模型交集验证；未知模型在执行前被拒绝，不能记录其正文。
+  assert(saved.total===25 && !saved.records.some(record=>record.preview===marker+'UNROUTED-MODEL'),'本轮 HTTP 执行夹具未保存或误采路由失败正文');
   const target=saved.records.find(record=>record.preview.startsWith(marker+'ENTRY-22'));
   assert(target && target.truncated && target.extraction_incomplete,'搜索夹具双状态丢失');
   await frame.getByRole('button',{name:'刷新已保存记录',exact:true}).click();
@@ -65,7 +73,7 @@ module.exports = async (page, options) => {
   page.on('request',onRequest);
   /** 用当前输入应用筛选；返回公开查询结果并等待刷新完成，失败抛错，不保存数据。 */
   async function apply() {
-    const pending=page.waitForResponse(r=>r.url().startsWith(api+'/records?'));
+    const pending=page.waitForResponse(r=>r.url()===api+'/records/search'&&r.request().method()==='POST');
     await frame.getByRole('button',{name:'应用筛选',exact:true}).click();
     const response=await pending;
     assert(response.status()===200,'页面筛选查询失败');
@@ -83,7 +91,7 @@ module.exports = async (page, options) => {
     const localTime=ms=>page.evaluate(value=>{const date=new Date(value);return new Date(value-date.getTimezoneOffset()*60000).toISOString().slice(0,19);},ms);
     await frame.locator('#from-filter').fill(await localTime(started));
     await frame.locator('#to-filter').fill(await localTime(Date.now()+5000));
-    await frame.getByRole('textbox',{name:'客户端请求模型筛选',exact:true}).fill('audit-test-model');
+    await frame.getByRole('textbox',{name:'执行输入模型筛选',exact:true}).fill('audit-test-model');
     await frame.getByRole('textbox',{name:'正文关键词',exact:true}).fill(marker);
     let result=await apply();
     assert(result.total===23 && result.records.length===20,'四条件交集或第一页错误');
@@ -99,12 +107,13 @@ module.exports = async (page, options) => {
     assert(await frame.locator('#records b,#records img,#records script,#detail-meta b').count()===0,'名称或预览被解析为HTML');
     await frame.locator('#close-detail').click();
     await row.getByRole('cell',{name:'已截断 · 提取不完整',exact:true}).screenshot({path:options.screenshot});
-    const next=page.waitForResponse(r=>r.url().startsWith(api+'/records?')&&new URL(r.url()).searchParams.get('offset')==='20');
+    const next=page.waitForResponse(r=>r.url()===api+'/records/search'&&r.request().method()==='POST'&&r.request().postDataJSON().offset===20);
     await frame.getByRole('button',{name:'下一页',exact:true}).click();
     const nextResponse=await next;
-    const query=new URL(nextResponse.url()).searchParams;
+    const query=nextResponse.request().postDataJSON();
     result=await nextResponse.json();
-    assert(result.total===23 && result.records.length===3 && query.get('q')===marker && query.get('object_id')===target.object_id && query.get('model')==='audit-test-model' && query.has('from') && query.has('to'),'翻页丢失已应用条件');
+    assert(result.total===23 && result.records.length===3 && query.q===marker && query.object_id===target.object_id && query.model==='audit-test-model' && query.from && query.to && query.offset===20 && query.limit===20,'翻页丢失已应用 JSON 条件');
+    assert(new URL(nextResponse.url()).search==='', '搜索条件不得进入 URL');
     await frame.locator('#page').filter({hasText:'第 2 页；匹配 23 条'}).waitFor();
     await frame.getByRole('button',{name:'上一页',exact:true}).click();
     await frame.locator('#page').filter({hasText:'第 1 页；匹配 23 条'}).waitFor();
@@ -117,11 +126,11 @@ module.exports = async (page, options) => {
     result=await apply();
     assert(result.total===0,'未保存尾部被页面搜索命中');
     await frame.locator('#empty').waitFor();
-    const cleared=page.waitForResponse(r=>r.url().startsWith(api+'/records?')&&!new URL(r.url()).searchParams.has('q'));
+    const cleared=page.waitForResponse(r=>r.url()===api+'/records/search'&&r.request().method()==='POST'&&!r.request().postDataJSON().q);
     await frame.getByRole('button',{name:'清空筛选',exact:true}).click();
     assert((await cleared).status()===200,'清空筛选失败');
-    await frame.locator('#records tbody tr').filter({hasText:marker+'OTHER-MODEL'}).getByRole('cell',{name:hostileModel,exact:true}).waitFor();
-    assert(await frame.locator('#records img,#records script,#records style').count()===0,'客户端模型被解释为HTML');
+    await frame.locator('#records tbody tr').filter({hasText:marker+'OTHER-MODEL'}).getByRole('cell',{name:'audit-test-other-model',exact:true}).waitFor();
+    assert(await frame.locator('#records img,#records script,#records style').count()===0,'搜索结果被解释为HTML');
     assert(external.length===0,'搜索内容触发外部请求');
   } finally {page.off('request',onRequest);}
   const layout=await verifyLayout(page,{keyword:marker,recordId:target.id,text});

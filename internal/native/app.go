@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
-	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -25,34 +24,35 @@ import (
 //go:embed assets/index.html
 var assets embed.FS
 
-// HostCall 同步请求宿主只读契约；payload 不含认证 Key，返回已校验 envelope 的 JSON 结果。
-// 宿主不可用时返回无敏感上下文的错误，不能将其解释成成功采集。
+// HostCall 仅用于向宿主发送固定诊断日志；payload 不含身份或输入，返回宿主 JSON 结果。
+// 宿主调用失败返回错误，不影响模型请求。
 type HostCall func(method string, payload any) (json.RawMessage, error)
 
 // App 管理插件生命周期与管理路由，不持有原始模型请求或认证头。
 type App struct {
-	mu                    sync.Mutex
-	host                  HostCall
-	collector             *audit.Collector
-	dir                   string
-	available             bool
-	reason                string
-	configured            bool
-	budget                int64
-	loggedReason          string
-	pendingAlerts         audit.GapAlerts
-	pendingReason         string
-	pendingBridgeFailures uint64
-	// 模型回调只读已发布的小状态，不等待管理查询、能力探测或恢复扫描持有的锁。
+	mu            sync.Mutex
+	host          HostCall
+	collector     *audit.Collector
+	observed      *observedCatalog
+	dir           string
+	available     bool
+	reason        string
+	configured    bool
+	budget        int64
+	loggedReason  string
+	pendingAlerts audit.GapAlerts
+	pendingReason string
+	// 模型回调只读已发布的小状态，不等待管理查询或恢复扫描持有的锁。
 	admission atomic.Pointer[admissionState]
 }
 
 type admissionState struct {
 	collector *audit.Collector
+	observed  *observedCatalog
 	available bool
 }
 
-// New 创建默认未监控任何对象的插件；host 提供可信对象目录，返回实例，不执行 I/O。
+// New 创建默认未监控任何对象的插件；host 仅发送诊断日志，返回实例，不执行 I/O 或返回错误。
 func New(host HostCall) *App {
 	a := &App{host: host, reason: "not_initialized"}
 	a.publishLocked()
@@ -61,7 +61,7 @@ func New(host HostCall) *App {
 
 // publishLocked 发布不可变的准入状态；调用者持有管理锁，新旧快照都不保留输入。
 func (a *App) publishLocked() {
-	a.admission.Store(&admissionState{collector: a.collector, available: a.available})
+	a.admission.Store(&admissionState{collector: a.collector, observed: a.observed, available: a.available})
 }
 
 // Close 停止新采集并关闭当前写入者；宿主须先停止新回调，无返回值，失败只影响审计。
@@ -72,18 +72,9 @@ func (a *App) Close() {
 	a.configured = false
 	a.admission.Store(&admissionState{})
 	if a.collector != nil {
-		// 最后一次桥接失败可能没有后续管理查询；在写入 clean 标记前合并宿主最终累计。
-		caps, err := a.host("host.input_audit.capabilities", struct{}{})
-		var final struct {
-			BridgeFailures *uint64 `json:"bridge_failures"`
-		}
-		if err != nil || json.Unmarshal(caps, &final) != nil || final.BridgeFailures == nil {
-			a.collector.ReportBridgeUncertainty()
-		} else {
-			a.collector.ReportBridgeFailures(*final.BridgeFailures)
-		}
 		a.collector.Close()
 		a.collector = nil
+		a.observed = nil
 	}
 }
 
@@ -92,40 +83,24 @@ func (a *App) Handle(method string, raw []byte) (any, error) {
 	switch method {
 	case "plugin.register", "plugin.reconfigure":
 		a.configure(raw)
-		return map[string]any{"schema_version": 6, "metadata": map[string]any{"Name": "输入审计", "Version": "0.1.0", "Author": "cpa-request-info", "GitHubRepository": "https://github.com/shenleg/cpa-request-info"}, "capabilities": map[string]bool{"management_api": true, "input_audit_observer": true, "input_audit_snapshot": true}}, nil
+		return map[string]any{"schema_version": 6, "metadata": map[string]any{"Name": "输入审计", "Version": "0.2.0", "Author": "cpa-request-info", "GitHubRepository": "https://github.com/shenleg/cpa-request-info"}, "capabilities": map[string]bool{"management_api": true, "request_interceptor": true}}, nil
 	case "management.register":
 		type route struct{ Method, Path string }
 		type resource struct{ Path, Menu, Description string }
 		return struct {
 			Routes    []route    `json:"routes"`
 			Resources []resource `json:"resources"`
-		}{[]route{{"GET", "/plugins/request-input-audit/objects"}, {"POST", "/plugins/request-input-audit/monitor"}, {"POST", "/plugins/request-input-audit/remove"}, {"POST", "/plugins/request-input-audit/rename"}, {"POST", "/plugins/request-input-audit/pause"}, {"GET", "/plugins/request-input-audit/settings"}, {"POST", "/plugins/request-input-audit/settings"}, {"GET", "/plugins/request-input-audit/records"}, {"GET", "/plugins/request-input-audit/detail"}, {"GET", "/plugins/request-input-audit/status"}, {"POST", "/plugins/request-input-audit/gaps/acknowledge"}}, []resource{{"/index.html", "输入审计", "Chat Completions、Responses HTTP/WebSocket 与 Anthropic Messages 输入审计"}}}, nil
+		}{[]route{{"GET", "/plugins/request-input-audit/objects"}, {"POST", "/plugins/request-input-audit/monitor"}, {"POST", "/plugins/request-input-audit/remove"}, {"POST", "/plugins/request-input-audit/rename"}, {"POST", "/plugins/request-input-audit/pause"}, {"GET", "/plugins/request-input-audit/settings"}, {"POST", "/plugins/request-input-audit/settings"}, {"POST", "/plugins/request-input-audit/records/search"}, {"GET", "/plugins/request-input-audit/detail"}, {"GET", "/plugins/request-input-audit/status"}, {"POST", "/plugins/request-input-audit/gaps/acknowledge"}}, []resource{{"/index.html", "输入审计", "Chat Completions、Responses HTTP 与 Anthropic Messages 执行输入记录"}}}, nil
 	case "management.handle":
 		var req managementRequest
 		if err := json.Unmarshal(raw, &req); err != nil {
 			return nil, errors.New("invalid_management_request")
 		}
 		return a.management(req), nil
-	case "input_audit.prepare":
-		var event audit.Event
-		if err := json.Unmarshal(raw, &event); err != nil {
-			return nil, errors.New("invalid_preparation")
-		}
-		state := a.admission.Load()
-		if state.collector == nil || !state.available {
-			return audit.Snapshot{Version: 3, Decision: "unavailable"}, nil
-		}
-		return state.collector.Prepare(event), nil
-	case "input_audit.observe":
-		var event audit.Event
-		if err := json.Unmarshal(raw, &event); err != nil {
-			return nil, errors.New("invalid_observation")
-		}
-		c := a.admission.Load().collector
-		// 可用性只影响下一次准备；已绑定的快照由采集器核验代际，不因当前握手失效被追溯取消。
-		if c != nil {
-			c.Observe(event)
-		}
+	case "request.intercept_before":
+		return a.capture(raw)
+	case "request.intercept_after":
+		// 官方空修改结果不设置 Body、Headers 或 Terminate；执行结果不决定输入是否保存。
 		return struct{}{}, nil
 	case "plugin.quiesce", "plugin.shutdown":
 		a.Close()
@@ -133,41 +108,6 @@ func (a *App) Handle(method string, raw []byte) (any, error) {
 	default:
 		return nil, errors.New("unsupported_method")
 	}
-}
-
-// supportsInputAudit 要求三协议HTTP与Responses消息级接入齐备，拒绝接入不完整的宿主，避免静默漏采。
-func supportsInputAudit(protocols []string) bool {
-	return slices.Contains(protocols, "chat-completions") && slices.Contains(protocols, "responses") && slices.Contains(protocols, "anthropic-messages") && slices.Contains(protocols, "responses-websocket")
-}
-
-type inputAuditCapabilities struct {
-	ContractVersion int      `json:"contract_version"`
-	Protocols       []string `json:"protocols"`
-	Available       bool     `json:"available"`
-	StateDir        string   `json:"state_dir"`
-	BridgeFailures  uint64   `json:"bridge_failures"`
-}
-
-// capabilities 区分宿主缺少独立扩展与其他不可用状态；只返回固定原因，不传播宿主错误文本。
-func (a *App) capabilities() (inputAuditCapabilities, string) {
-	var live inputAuditCapabilities
-	caps, err := a.host("host.input_audit.capabilities", struct{}{})
-	if err != nil {
-		if err.Error() == "host_method_unsupported" {
-			return live, "observer_extension_missing"
-		}
-		return live, "observer_unavailable"
-	}
-	if json.Unmarshal(caps, &live) != nil {
-		return live, "observer_bridge_unavailable"
-	}
-	if live.ContractVersion != 3 || !supportsInputAudit(live.Protocols) {
-		return live, "observer_version_incompatible"
-	}
-	if !live.Available {
-		return live, "observer_bridge_unavailable"
-	}
-	return live, ""
 }
 
 func (a *App) configure(raw []byte) {
@@ -199,56 +139,38 @@ func (a *App) configure(raw []byte) {
 	if err != nil || cfg.Dir == "" {
 		return
 	}
-	// 换目录会结束原采集代际；同目录重载和暂时失去观察能力不关闭旧快照的写入者。
+	// 每个采集器独占自己的发现集合；旧回调晚到时只能登记到旧集合，不能污染新目录。
 	if a.collector != nil && a.dir != dir {
+		a.admission.Store(&admissionState{})
 		a.collector.Close()
 		a.collector = nil
+		a.observed = nil
 	}
 	a.dir, a.budget, a.configured = dir, cfg.Budget, true
 	a.refreshLocked()
 }
 
-// refreshLocked 在管理状态查询或重配置时重新核验宿主；可能执行磁盘 I/O，不能用于模型回调。
+// refreshLocked 在管理查询或重配置时尝试打开存储；可能执行磁盘 I/O，不能用于模型回调。
 func (a *App) refreshLocked() {
 	defer a.diagnoseLocked()
 	defer a.publishLocked()
 	if !a.configured {
 		return
 	}
-	live, reason := a.capabilities()
-	a.available = false
-	a.reason = reason
-	if a.collector != nil {
-		a.collector.ReportBridgeFailures(live.BridgeFailures)
-	}
-	if reason == "" && live.StateDir != a.dir {
-		reason = "configuration_invalid"
-	}
-	if reason != "" {
-		a.reason = reason
-		if a.collector != nil {
-			a.collector.ReportObserverState(reason)
-		} else {
-			a.pendingFaultLocked(reason)
-			a.pendingBridgeLocked(live.BridgeFailures)
-		}
-		return
-	}
 	if a.collector == nil {
 		c, err := audit.Open(a.dir, a.budget)
 		if err != nil {
+			a.available = false
 			a.reason = "storage_unavailable"
 			a.pendingFaultLocked(a.reason)
-			a.pendingBridgeLocked(live.BridgeFailures)
 			return
 		}
 		a.collector = c
+		a.observed = &observedCatalog{ids: make(map[string]struct{})}
 		a.importPendingLocked()
 	}
-	a.collector.ReportBridgeFailures(live.BridgeFailures)
-	a.reason = reason
-	a.collector.ReportObserverState(reason)
-	a.available = reason == ""
+	a.reason = ""
+	a.available = true
 }
 
 // diagnoseLocked 在故障状态变化时尽力通知宿主固定原因；不附带底层错误、身份、路径或正文。
@@ -276,18 +198,33 @@ type managementRequest struct {
 }
 
 func (a *App) management(req managementRequest) any {
-	if strings.HasSuffix(req.Path, "/index.html") {
+	path := strings.TrimPrefix(req.Path, "/v0/management")
+	allowed := map[string]string{
+		"/objects": "GET", "/monitor": "POST", "/remove": "POST", "/rename": "POST", "/pause": "POST",
+		"/settings": "GET,POST", "/records/search": "POST", "/detail": "GET", "/status": "GET", "/gaps/acknowledge": "POST",
+	}
+	if strings.HasSuffix(path, "/index.html") {
+		if req.Method != "GET" {
+			return responseJSON(405, map[string]string{"error": "method_not_allowed"})
+		}
 		html, err := assets.ReadFile("assets/index.html")
 		if err != nil {
 			return responseJSON(500, map[string]string{"error": "asset_unavailable"})
 		}
 		return response(200, "text/html; charset=utf-8", html)
 	}
+	methods, exists := allowed[strings.TrimPrefix(path, "/plugins/request-input-audit")]
+	if !strings.HasPrefix(path, "/plugins/request-input-audit/") || !exists {
+		return responseJSON(404, map[string]string{"error": "not_found"})
+	}
+	if req.Method != methods && !(methods == "GET,POST" && (req.Method == "GET" || req.Method == "POST")) {
+		return responseJSON(405, map[string]string{"error": "method_not_allowed"})
+	}
 	a.mu.Lock()
 	if strings.HasSuffix(req.Path, "/status") {
 		a.refreshLocked()
 	}
-	c, available, reason := a.collector, a.available, a.reason
+	c, observed, available, reason := a.collector, a.observed, a.available, a.reason
 	pending := a.pendingAlerts
 	pending.Items = append([]audit.GapSummary{}, pending.Items...)
 	if c == nil && strings.HasSuffix(req.Path, "/gaps/acknowledge") {
@@ -318,10 +255,10 @@ func (a *App) management(req managementRequest) any {
 			snapshot := c.Status()
 			state = snapshot
 		}
-		return responseJSON(200, map[string]any{"available": available, "reason": reason, "supported": "chat-completions-responses-anthropic-http-responses-websocket-last-user-content", "supported_protocols": []string{"chat-completions", "responses", "anthropic-messages", "responses-websocket"}, "responses_websocket": true, "retention": "receive_time_expiry_periodic_cleanup", "state": state})
+		return responseJSON(200, map[string]any{"available": available, "reason": reason, "capture_mode": "http_execution", "supported_protocols": []string{"chat-completions", "responses", "anthropic-messages"}, "responses_websocket": false, "coverage": "intercept_before_only_excludes_pre_route_failures_and_websocket", "time_source": "intercept_before", "model_source": "execution_body_may_be_rewritten", "catalog": "observed", "retention": "before_time_expiry_periodic_cleanup", "state": state})
 	}
 	if strings.HasSuffix(req.Path, "/objects") {
-		catalog, catalogErr := a.catalog()
+		catalog, full := observedObjects(observed)
 		known := map[string]audit.Object{}
 		history := map[string]bool{}
 		if c != nil {
@@ -332,29 +269,27 @@ func (a *App) management(req managementRequest) any {
 				return responseJSON(503, map[string]string{"error": "storage_unavailable"})
 			}
 		}
-		// 目录失效不妨碍已知历史查询，但不能把缓存对象当作当前可认证Key。
+		// 已选对象从配置恢复；Valid 只表示可以选择该匿名对象，不推断宿主 Key 当前有效性。
 		union := make(map[string]object, len(known)+len(catalog))
 		for id, meta := range known {
-			union[id] = object{ID: id, Name: meta.Name, Monitored: meta.Monitored, HasHistory: history[id]}
+			union[id] = object{ID: id, Name: meta.Name, Monitored: meta.Monitored, Valid: true, HasHistory: history[id]}
 		}
 		for id := range history {
 			if _, exists := union[id]; !exists {
 				union[id] = object{ID: id, HasHistory: true}
 			}
 		}
-		if catalogErr == nil {
-			for _, current := range catalog {
-				entry := union[current.ID]
-				entry.ID, entry.Valid = current.ID, true
-				union[current.ID] = entry
-			}
+		for id := range catalog {
+			entry := union[id]
+			entry.ID, entry.Valid = id, true
+			union[id] = entry
 		}
 		objects := make([]object, 0, len(union))
 		for _, entry := range union {
 			objects = append(objects, entry)
 		}
 		sort.Slice(objects, func(i, j int) bool { return objects[i].ID < objects[j].ID })
-		return responseJSON(200, map[string]any{"objects": objects, "available": available && catalogErr == nil})
+		return responseJSON(200, map[string]any{"objects": objects, "available": available, "catalog": "observed", "catalog_full": full})
 	}
 	if c == nil {
 		return responseJSON(503, map[string]string{"error": reason})
@@ -411,16 +346,9 @@ func (a *App) management(req managementRequest) any {
 		if json.Unmarshal(req.Body, &selection) != nil {
 			return responseJSON(400, map[string]string{"error": "invalid_monitor"})
 		}
-		objects, err := a.catalog()
-		if err != nil {
-			return responseJSON(503, map[string]string{"error": "observer_unavailable"})
-		}
-		found := false
-		for _, obj := range objects {
-			if obj.ID == selection.ObjectID {
-				found = true
-			}
-		}
+		objects, _ := observedObjects(observed)
+		_, persisted := c.Objects()[selection.ObjectID]
+		found := objects[selection.ObjectID] || persisted
 		if !found || c.Monitor(selection.ObjectID, selection.Name) != nil {
 			return responseJSON(400, map[string]string{"error": "monitor_rejected"})
 		}
@@ -454,21 +382,11 @@ func (a *App) management(req managementRequest) any {
 		}
 		return responseJSON(200, map[string]bool{"saved": true})
 	}
-	if strings.HasSuffix(req.Path, "/records") {
-		for _, name := range []string{"offset", "limit", "object_id", "from", "to", "model", "q"} {
-			if len(req.Query[name]) > 1 {
-				return responseJSON(400, map[string]string{"error": "invalid_query"})
-			}
+	if strings.HasSuffix(req.Path, "/records/search") {
+		if len(req.Query) != 0 {
+			return responseJSON(400, map[string]string{"error": "invalid_query"})
 		}
-		offset, err := queryNumber(req.Query, "offset", 0, 0, 10000000)
-		if err != nil {
-			return responseJSON(400, map[string]string{"error": "invalid_pagination"})
-		}
-		limit, err := queryNumber(req.Query, "limit", 20, 1, 100)
-		if err != nil {
-			return responseJSON(400, map[string]string{"error": "invalid_pagination"})
-		}
-		filter, err := recordQuery(req.Query)
+		offset, limit, filter, err := searchQuery(req.Body)
 		if err != nil {
 			return responseJSON(400, map[string]string{"error": err.Error()})
 		}
@@ -492,7 +410,7 @@ func (a *App) management(req managementRequest) any {
 	}
 	if strings.HasSuffix(req.Path, "/detail") {
 		id := queryValue(req.Query, "id")
-		if len(id) > 128 || id == "" {
+		if len(req.Query) != 1 || len(req.Query["id"]) != 1 || !validExecutionID(id) {
 			return responseJSON(400, map[string]string{"error": "invalid_id"})
 		}
 		r, err := c.Detail(id)
@@ -571,19 +489,54 @@ type object struct {
 	HasHistory bool   `json:"has_history"`
 }
 
-func (a *App) catalog() ([]object, error) {
-	raw, err := a.host("host.input_audit.catalog", struct{}{})
+// observedObjects 允许尚未打开存储的管理状态返回空目录，不制造宿主 Key 全量目录。
+func observedObjects(observed *observedCatalog) (map[string]bool, bool) {
+	if observed == nil {
+		return map[string]bool{}, false
+	}
+	return observed.snapshot()
+}
+
+// searchQuery 只从 POST JSON 读取搜索条件；拒绝未知、重复、null、类型和范围错误，不回显搜索值。
+func searchQuery(raw []byte) (int, int, audit.Query, error) {
+	invalid := errors.New("invalid_query")
+	// 关键词最多64KiB；JSON逐字符转义最多六倍，再留出模型和日期字段的空间。
+	if len(raw) > 512<<10 {
+		return 0, 0, audit.Query{}, invalid
+	}
+	fields, err := jsonObject(raw)
 	if err != nil {
-		return nil, err
+		return 0, 0, audit.Query{}, invalid
 	}
-	var catalog struct {
-		Available bool     `json:"available"`
-		Objects   []object `json:"objects"`
+	query := make(map[string][]string, len(fields))
+	for name, value := range fields {
+		switch name {
+		case "offset", "limit":
+			var number *int
+			if json.Unmarshal(value, &number) != nil || number == nil {
+				return 0, 0, audit.Query{}, errors.New("invalid_pagination")
+			}
+			query[name] = []string{strconv.Itoa(*number)}
+		case "object_id", "from", "to", "model", "q":
+			var text *string
+			if json.Unmarshal(value, &text) != nil || text == nil {
+				return 0, 0, audit.Query{}, invalid
+			}
+			query[name] = []string{*text}
+		default:
+			return 0, 0, audit.Query{}, invalid
+		}
 	}
-	if json.Unmarshal(raw, &catalog) != nil || !catalog.Available {
-		return nil, errors.New("observer_unavailable")
+	offset, err := queryNumber(query, "offset", 0, 0, 10000000)
+	if err != nil {
+		return 0, 0, audit.Query{}, err
 	}
-	return catalog.Objects, nil
+	limit, err := queryNumber(query, "limit", 20, 1, 100)
+	if err != nil {
+		return 0, 0, audit.Query{}, err
+	}
+	filter, err := recordQuery(query)
+	return offset, limit, filter, err
 }
 
 // recordQuery 在管理 HTTP 边界解析已保存记录的交集条件；错误只含固定原因，不回显不可信查询值。

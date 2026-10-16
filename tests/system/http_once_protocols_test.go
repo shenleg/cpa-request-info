@@ -88,12 +88,12 @@ func assertMatrixPrivacy(t *testing.T, h *instance, markers ...string) {
 	t.Helper()
 	forbidden := append([]string{keyA, keyB, adminKey, "synthetic-upstream-only", "FORBIDDEN_MATRIX_", "FORBIDDEN_HTTP_ONCE_REPLY"}, markers...)
 	assertChatPrivacy(t, h, forbidden...)
-	paths := []string{"/objects", "/settings", "/status", "/records?limit=100"}
+	paths := []string{"/objects", "/settings", "/status", "/records/search"}
 	for _, record := range snapshotRecords(t, h) {
 		paths = append(paths, "/detail?id="+record.ID)
 	}
 	for _, path := range paths {
-		code, raw := h.request(t, "GET", api+path, adminKey, nil)
+		code, raw := managementRead(t, h, path, adminKey)
 		if code != 200 {
 			t.Fatal("隐私检查管理输出不可用")
 		}
@@ -125,6 +125,9 @@ func TestHTTPProtocolsBeforeReply(t *testing.T) {
 					received := make(chan []byte, 4)
 					releases := make(chan (<-chan struct{}), 4)
 					upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						if respondDiscovery(w, r) {
+							return
+						}
 						raw, err := io.ReadAll(r.Body)
 						if err != nil {
 							w.WriteHeader(400)

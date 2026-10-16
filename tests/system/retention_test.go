@@ -286,7 +286,7 @@ func TestRetentionRepeatedIncreaseAtSameInstant(t *testing.T) {
 	}
 }
 
-// TestRetentionNeverExtendsHistory 验证调长不延长旧提交，慢体从接收计时，缩短再调长及重启不能复活历史。
+// TestRetentionNeverExtendsHistory 验证调长不延长已执行的旧提交，缩短再调长及重启不能复活历史。
 func TestRetentionNeverExtendsHistory(t *testing.T) {
 	received := time.Date(2030, 4, 1, 0, 0, 0, 0, time.UTC)
 	clock := newRetentionClock(t, received)
@@ -296,7 +296,6 @@ func TestRetentionNeverExtendsHistory(t *testing.T) {
 	h.monitorAll(t)
 	marker := fmt.Sprintf("RETENTION-LIFETIME-%d", time.Now().UnixNano())
 	old := searchSubmit(t, h, keyA, "audit-test-model", marker+"-OLD")
-	complete := beginSnapshotSubmission(t, h, snapshotInput(t, marker+"-SLOW"))
 	retentionClock(t, clock, received.Add(time.Hour), 0)
 	snapshotMutation(t, h, "/settings", map[string]int{"retention_days": 30})
 	retentionClock(t, clock, received.Add(6*24*time.Hour), 0)
@@ -305,12 +304,6 @@ func TestRetentionNeverExtendsHistory(t *testing.T) {
 	code, _ := h.request(t, "GET", api+"/detail?id="+old.ID, adminKey, nil)
 	if code != 404 {
 		t.Fatal("调长延长了已有历史的七天寿命")
-	}
-	complete()
-	// 等待本轮慢体确已持久化，再判断不可查，防止把尚未保存误认为已到期。
-	waitRetentionOutput(t, h, func(raw []byte) bool { return bytes.Contains(raw, []byte(marker+"-SLOW")) })
-	if page := searchRecords(t, h, url.Values{"q": {marker + "-SLOW"}}); page.Total != 0 {
-		t.Fatal("慢体从完成或落盘重新取得保留期限")
 	}
 	if page := searchRecords(t, h, nil); page.Total != 1 || page.Records[0].ID != later.ID {
 		t.Fatal("新提交没有采用30天，或旧记录被延长")

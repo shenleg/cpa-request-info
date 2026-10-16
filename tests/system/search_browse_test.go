@@ -22,10 +22,10 @@ type searchPage struct {
 	Total int `json:"total"`
 }
 
-// searchRecords 使用公开查询参数读取一页；返回记录及匹配总数，HTTP或解码失败终止测试。
+// searchRecords 使用公开 JSON 查询读取一页；返回记录及匹配总数，HTTP或解码失败终止测试。
 func searchRecords(t *testing.T, h *instance, query url.Values) searchPage {
 	t.Helper()
-	code, raw := h.request(t, "GET", api+"/records?"+query.Encode(), adminKey, nil)
+	code, raw := h.searchValues(t, adminKey, query)
 	var page searchPage
 	if code != 200 || json.Unmarshal(raw, &page) != nil {
 		t.Fatalf("公开搜索不可用: status=%d", code)
@@ -132,8 +132,8 @@ func TestSearchSavedTextOnly(t *testing.T) {
 		}
 	}
 	for _, key := range []string{"", keyA, keyB, r.ObjectID} {
-		for _, path := range []string{"/records?q=MiXeD&model=search-literal-model", "/detail?id=" + r.ID, "/objects", "/status", "/settings"} {
-			code, _ := h.request(t, "GET", api+path, key, nil)
+		for _, path := range []string{"/records/search", "/detail?id=" + r.ID, "/objects", "/status", "/settings"} {
+			code, _ := managementRead(t, h, path, key)
 			if code != 401 && code != 403 {
 				t.Fatal("非管理身份可读搜索或审计数据")
 			}
@@ -146,9 +146,12 @@ func TestSearchSavedTextOnly(t *testing.T) {
 	assertChatPrivacy(t, h, "FORBIDDEN_SEARCH_")
 }
 
-// TestSearchProtocols 验证四种已支持提交共用搜索、请求模型和时间条件，不误匹配实际上游模型。
+// TestSearchProtocols 验证三种 HTTP 提交共用搜索、请求模型和时间条件，不误匹配实际上游模型。
 func TestSearchProtocols(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if respondDiscovery(w, r) {
+			return
+		}
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"id":"synthetic-search","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
@@ -164,23 +167,21 @@ func TestSearchProtocols(t *testing.T) {
 		h.request(t, "POST", fixture.path, keyA, []byte(fixture.body))
 		waitChatDetail(t, h, fixture.marker)
 	}
-	conn := dialAuditWebsocket(t, h, "/v1/responses", keyA)
-	sendAuditFrame(t, conn, `{"type":"response.create","generate":false,"model":"responses-client-model","input":[{"role":"user","content":"SEARCH-PROTOCOL-WEBSOCKET"}]}`)
-	last := waitChatDetail(t, h, "SEARCH-PROTOCOL-WEBSOCKET")
+	last := waitChatDetail(t, h, "SEARCH-PROTOCOL-MESSAGES")
 	page := searchRecords(t, h, url.Values{"q": {"search-protocol-"}, "object_id": {first.ObjectID}, "model": {"responses-client-model"}, "from": {first.ReceivedAt.Format(time.RFC3339Nano)}, "to": {last.ReceivedAt.Format(time.RFC3339Nano)}})
 	protocols := make(map[string]bool)
 	for _, record := range page.Records {
 		protocols[record.Protocol] = true
 	}
-	if page.Total != 4 || len(page.Records) != 4 || !reflect.DeepEqual(protocols, map[string]bool{"chat-completions": true, "responses": true, "anthropic-messages": true, "responses-websocket": true}) {
-		t.Fatal("四协议未共享组合查询")
+	if page.Total != 3 || len(page.Records) != 3 || !reflect.DeepEqual(protocols, map[string]bool{"chat-completions": true, "responses": true, "anthropic-messages": true}) {
+		t.Fatal("三种 HTTP 协议未共享组合查询")
 	}
 	if page := searchRecords(t, h, url.Values{"model": {"audit-test-model"}}); page.Total != 0 {
 		t.Fatal("搜索错误采用上游实际模型")
 	}
 	for round := 0; round < 2; round++ {
 		marker := fmt.Sprintf("SEARCH-REPEAT-%d", round)
-		r := searchSubmit(t, h, keyB, "client-repeat", marker)
+		r := searchSubmit(t, h, keyB, "responses-client-model", marker)
 		page := searchRecords(t, h, url.Values{"q": {marker}})
 		if page.Total != 1 || page.Records[0].ID != r.ID {
 			t.Fatal("本轮搜索误用历史结果")
@@ -193,6 +194,15 @@ func TestSearchValidation(t *testing.T) {
 	h := startHostWithManagementAuth(t, 1<<30, true, "", true)
 	h.monitorAll(t)
 	searchSubmit(t, h, keyA, strings.Repeat("m", 1024), "SEARCH-VALIDATION-BOUNDARY")
+	for _, body := range []string{
+		`null`, `[]`, `{`, `{"q":"synthetic-search","q":"other"}`, `{"limit":1,"limit":2}`,
+		`{"offset":1.5}`, `{"limit":"1"}`, `{"Q":"synthetic-search"}`, `{"unknown":true}`, `{} {}`,
+	} {
+		code, _ := h.request(t, "POST", api+"/records/search", adminKey, []byte(body))
+		if code != http.StatusBadRequest {
+			t.Fatalf("非法 JSON 查询应固定返回400，HTTP=%d", code)
+		}
+	}
 	for _, query := range []string{
 		"q=SEARCH-VALIDATION&q=other", "model=x&model=y", "object_id=&object_id=", "from=2000-01-01T00:00:00Z&from=2001-01-01T00:00:00Z",
 		"to=2000-01-01T00:00:00Z&to=2001-01-01T00:00:00Z", "offset=0&offset=1", "limit=1&limit=2",
@@ -200,7 +210,7 @@ func TestSearchValidation(t *testing.T) {
 		"object_id=invalid", "offset=-1", "offset=10000001", "offset=99999999999999999999", "limit=0", "limit=101", "limit=NaN",
 		"model=" + strings.Repeat("m", 1025), "q=" + strings.Repeat("x", 65537),
 	} {
-		code, raw := h.request(t, "GET", api+"/records?"+query, adminKey, nil)
+		code, raw := h.searchValues(t, adminKey, mustSearchValues(t, query))
 		var result map[string]string
 		if code != 400 || json.Unmarshal(raw, &result) != nil || len(result) != 1 {
 			t.Errorf("非法查询未返回固定400: status=%d", code)

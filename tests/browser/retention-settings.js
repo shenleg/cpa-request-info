@@ -69,9 +69,9 @@ module.exports = async (page, options = {}) => {
   try {
     const text = await frame.locator('#content').textContent();
     const notice = await frame.locator('#notice').textContent();
-    assert(text.includes('1–30') && text.includes('接收') && text.includes('调长') && text.includes('不延长') && text.includes('每分钟'), '页面未说明保留期范围、起算或清理语义');
+    assert(text.includes('1–30') && text.includes('Before 回调所见时刻起算') && text.includes('调长') && text.includes('不延长') && text.includes('每分钟'), '页面未说明执行回调保留期范围、起算或清理语义');
     assert(text.includes('磁盘') && text.includes('空闲页') && text.includes('快照') && text.includes('备份') && text.includes('安全擦除'), '页面未说明逻辑到期和安全擦除的区别');
-    assert(notice.includes('应用层不加密') && notice.includes('完整故障恢复') && notice.includes('不适用于生产审计'), '页面丢失加密或生产/故障恢复限制');
+    assert(notice.includes('应用层不加密') && notice.includes('未收到回调的数量未知') && notice.includes('不保证零丢失') && notice.includes('不适用于生产审计'), '页面丢失加密、执行覆盖或生产/故障恢复限制');
     await save(14,1024);
     await settings(14,1024);
     const beforeCancel = posts.length;

@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // settingsLimit 读取公开上限配置；返回字节数，HTTP、JSON 或字段集合不符时终止测试。
@@ -57,36 +56,6 @@ func TestSettingsStrictJSONAndAuthorization(t *testing.T) {
 		code, _ := h.request(t, "POST", api+"/settings", adminKey, []byte(input))
 		if code != http.StatusOK {
 			t.Fatalf("合法边界值应接受，HTTP=%d", code)
-		}
-	}
-}
-
-// TestSettingsSnapshotKeepsAcceptedLimit 验证慢体提交冻结旧上限，后续提交使用新上限且上游收到完整文本。
-func TestSettingsSnapshotKeepsAcceptedLimit(t *testing.T) {
-	upstream, received := snapshotUpstream()
-	defer upstream.Close()
-	h := startHost(t, 1<<30, true, upstream.URL)
-	h.monitorAll(t)
-	for round := 1; round <= 2; round++ {
-		snapshotMutation(t, h, "/settings", map[string]int{"max_text_bytes": 128})
-		marker := fmt.Sprintf("SETTINGS-SNAPSHOT-%d-%d", round, time.Now().UnixNano())
-		complete := beginSnapshotSubmission(t, h, snapshotInput(t, marker+"-BEFORE"))
-		snapshotMutation(t, h, "/settings", map[string]int{"max_text_bytes": 7})
-		complete()
-		before := waitSnapshotRecord(t, h, marker+"-BEFORE")
-		if before.Truncated {
-			t.Fatal("配置变更追溯截断已接收副本")
-		}
-		code, _ := h.request(t, "POST", "/v1/chat/completions", keyA, snapshotInput(t, marker+"-AFTER"))
-		if code != http.StatusOK {
-			t.Fatal("新上限改变实际模型调用")
-		}
-		verifySnapshotUpstream(t, received, marker+"-BEFORE", marker+"-AFTER")
-		list := h.waitRecords(t, round*2)
-		code, raw := h.request(t, "GET", api+"/detail?id="+list[0].ID, adminKey, nil)
-		var detail savedRecord
-		if code != http.StatusOK || json.Unmarshal(raw, &detail) != nil || detail.Text != "SETTING" || !detail.Truncated {
-			t.Fatal("下一提交未采用7字节上限")
 		}
 	}
 }
@@ -206,11 +175,11 @@ func TestSettingsPersistenceFailureDoesNotPublish(t *testing.T) {
 	}
 }
 
-// TestSettingsPageControls 验证公开静态页面提供明确上限控件及当前WebSocket支持说明，不内嵌审计数据。
+// TestSettingsPageControls 验证公开静态页面提供明确上限控件及当前 HTTP 执行支持说明，不内嵌审计数据。
 func TestSettingsPageControls(t *testing.T) {
 	h := startHost(t, 1<<30, true, "")
 	code, raw := h.request(t, "GET", "/v0/resource/plugins/request-input-audit/index.html", "", nil)
-	for _, want := range []string{`id="max-text-bytes" type="number" min="1" max="65536"`, `id="save-settings"`, "Responses WebSocket", "后续提交"} {
+	for _, want := range []string{`id="max-text-bytes" type="number" min="1" max="65536"`, `id="save-settings"`, "HTTP 执行", "后续提交"} {
 		if code != http.StatusOK || !strings.Contains(string(raw), want) {
 			t.Fatalf("管理页面缺少上限控件或支持说明，目标=%q HTTP=%d", want, code)
 		}

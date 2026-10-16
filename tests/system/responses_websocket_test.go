@@ -1,17 +1,15 @@
-// 本文件通过真实 WebSocket 提交和受保护管理查询验证消息级审计，不访问 handler 私有状态。
+// 本文件提供真实 WebSocket 连接、帧和本地 SSE 上游辅助；当前零采集由 TestOfficialWebsocketExcluded 验证。
 package system
 
 import (
 	"encoding/json"
-	"fmt"
+	"github.com/gorilla/websocket"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 // dialAuditWebsocket 在宿主正式入口按 key 建立真实连接；返回客户端，升级失败终止测试，清理只关闭连接。
@@ -72,6 +70,9 @@ func readAuditEvents(t *testing.T, conn *websocket.Conn) [][]byte {
 func auditWebsocketUpstream() (*httptest.Server, <-chan []byte) {
 	received := make(chan []byte, 64)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if respondDiscovery(w, r) {
+			return
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "synthetic read failure", 400)
@@ -82,45 +83,4 @@ func auditWebsocketUpstream() (*httptest.Server, <-chan []byte) {
 		_, _ = io.WriteString(w, "data: {\"id\":\"synthetic-ws-reply\",\"created\":1,\"object\":\"chat.completion.chunk\",\"model\":\"audit-test-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"ok\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"synthetic-ws-reply\",\"created\":1,\"object\":\"chat.completion.chunk\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 	}))
 	return server, received
-}
-
-// TestResponsesWebsocketSubmissions 验证两个正式入口同连接的重复提交独立记录，握手不形成输入记录。
-func TestResponsesWebsocketSubmissions(t *testing.T) {
-	upstream, received := auditWebsocketUpstream()
-	defer upstream.Close()
-	h := startHostWithConfiguration(t, 1<<30, true, upstream.URL+"/v1", true, "")
-	h.monitorAll(t)
-	for route, path := range []string{"/v1/responses", "/backend-api/codex/responses"} {
-		conn := dialAuditWebsocket(t, h, path, keyA)
-		marker := fmt.Sprintf("WS-SUBMISSION-%d", route)
-		var ids []string
-		for repeat := 0; repeat < 2; repeat++ {
-			sendAuditFrame(t, conn, fmt.Sprintf(`{"type":"response.create","model":"responses-client-model","input":[{"role":"user","content":%q}],"event_id":"FORBIDDEN_WS_CLIENT_ID","session_id":"FORBIDDEN_WS_SESSION","api_key":%q}`, marker, keyB))
-			frames := readAuditEvents(t, conn)
-			if !strings.Contains(string(frames[len(frames)-1]), "response.completed") {
-				t.Fatal("宿主原有 WebSocket 模型提交未完成")
-			}
-			select {
-			case <-received:
-			case <-time.After(3 * time.Second):
-				t.Fatal("可控上游未收到本轮 WebSocket 请求")
-			}
-			records := h.waitRecords(t, route*2+repeat+1)
-			record := records[0]
-			code, raw := h.request(t, "GET", api+"/detail?id="+record.ID, adminKey, nil)
-			if code != 200 || json.Unmarshal(raw, &record) != nil || record.Text != marker || record.Protocol != "responses-websocket" || record.Model != "responses-client-model" {
-				t.Fatal("WebSocket 本次显式提交未作为独立原协议记录保存")
-			}
-			ids = append(ids, record.ID)
-		}
-		if ids[0] == ids[1] {
-			t.Fatal("重复客户端提交复用了宿主提交标识")
-		}
-		_ = conn.Close()
-	}
-	saved, queued, gaps := snapshotCounters(t, h)
-	if saved != 4 || queued != 0 || gaps["invalid_json"] != 0 {
-		t.Fatal("握手/重复执行改变消息级记录数")
-	}
-	assertChatPrivacy(t, h, "FORBIDDEN_WS_")
 }

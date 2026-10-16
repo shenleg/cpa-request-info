@@ -18,6 +18,12 @@ module.exports = async (page, options = {}) => {
     assert(response.status()===200,'故障场景公开查询失败');
     return response.json();
   }
+  /** 以 JSON 提交 filter 查询已保存记录；返回 JSON，HTTP 失败抛错，不将关键词写入 URL。 */
+  async function search(filter) {
+    const response=await page.request.post(api+'/records/search',{headers,data:filter});
+    assert(response.status()===200,'故障场景记录查询失败');
+    return response.json();
+  }
   const catalog = await read('/objects');
   for (const object of catalog.objects.filter(object=>object.valid)) {
     const response = await page.request.post(api+'/monitor',{headers,data:{object_id:object.id,name:'故障验收合成对象'}});
@@ -35,7 +41,7 @@ module.exports = async (page, options = {}) => {
   const deadline=Date.now()+10000;
   let saved=false;
   while(Date.now()<deadline) {
-    if((await read('/records?q='+runId)).total===1){saved=true;break;}
+    if((await search({q:runId})).total===1){saved=true;break;}
   }
   assert(saved,'本轮故障种子未落盘');
   await page.goto(origin+'/management.html');
@@ -51,7 +57,7 @@ module.exports = async (page, options = {}) => {
   try {
     // 首次 /objects 真实读取失败，旧页面会停在登录区，健康状态从未显示。
     assert((await page.request.get(api+'/objects',{headers})).status()===503,'对象查询没有发生真实存储故障');
-    assert((await page.request.get(api+'/records',{headers})).status()!==200,'列表查询没有发生真实存储故障');
+    assert((await page.request.post(api+'/records/search',{headers,data:{q:runId}})).status()!==200,'列表查询没有发生真实存储故障');
     await frame.getByRole('textbox',{name:'临时管理 Key'}).fill(admin);
     await frame.getByRole('button',{name:'连接',exact:true}).click();
     await frame.locator('#content').waitFor({state:'visible'});
@@ -80,7 +86,7 @@ module.exports = async (page, options = {}) => {
     await frame.locator('#open-diagnostics').click();
     await frame.getByRole('button',{name:'确认当前提醒已阅',exact:true}).click();await idle();
     await frame.locator('#gap-unread').filter({hasText:'当前缺口提醒均已阅'}).waitFor();
-    assert((await frame.locator('#gap-history').textContent()).includes('unsupported_content') && (await read('/records?q='+runId)).total===1,'已阅确认删除历史或输入');
+    assert((await frame.locator('#gap-history').textContent()).includes('unsupported_content') && (await search({q:runId})).total===1,'已阅确认删除历史或输入');
     assert((await frame.locator('#recovery-state').textContent()).includes('丢失数量：未知'),'已阅确认改变重启完整性结论');
     await frame.locator('#close-management').click();
     await options.restart();

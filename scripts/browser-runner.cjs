@@ -38,7 +38,7 @@ async function startDemo(options) {
     const outcome=await Promise.race([exited,new Promise(resolve=>{timer=setTimeout(()=>resolve(null),8000);})]);
     clearTimeout(timer);
     if (outcome===null) {
-      // demo 是新进程组的组长；兜底只终止本轮组，连同尚未回收的宿主，不能扫描其他进程。
+      // demo 是新进程组的组长；超时只终止本轮组及尚未回收的宿主，不能扫描其他进程。
       try {process.kill(-child.pid,'SIGKILL');} catch {child.kill('SIGKILL');}
       await exited;removeSignals();return false;
     }
@@ -68,7 +68,7 @@ async function startDemo(options) {
     });
     /** 切换本实例已保存段的权限；只操纵合成目录，不伪造公开响应，文件系统失败直接抛错。 */
     async function storageFault(enabled, startup=false) {
-      const directory=path.join(ready.directory,'audit');
+      const directory=path.join(ready.directory,'audit-http-execution');
       if(startup){await fs.chmod(path.join(directory,'.audit.lock'),enabled?0o400:0o600);return;}
       const names=(await fs.readdir(directory)).filter(name=>/^records-\d{6}\.jsonl$/.test(name));
       if (!names.length) throw new Error('fault_seed_missing');

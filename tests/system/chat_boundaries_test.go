@@ -22,10 +22,10 @@ func TestChatTerminalMessage(t *testing.T) {
 	h.monitorAll(t)
 	_, _, before := snapshotCounters(t, h)
 	for _, role := range []string{"assistant", "tool", "function", "system", "developer"} {
-		body := fmt.Sprintf(`{"model":"missing","messages":[{"role":"user","content":"FORBIDDEN_TERMINAL_HISTORY"},{"role":%q,"content":"FORBIDDEN_TERMINAL_CONTENT","tool_calls":[{"function":{"arguments":"FORBIDDEN_TERMINAL_TOOL"}}]}]}`, role)
+		body := fmt.Sprintf(`{"model":"audit-test-model","messages":[{"role":"user","content":"FORBIDDEN_TERMINAL_HISTORY"},{"role":%q,"content":"FORBIDDEN_TERMINAL_CONTENT","tool_calls":[{"function":{"arguments":"FORBIDDEN_TERMINAL_TOOL"}}]}]}`, role)
 		h.request(t, "POST", "/v1/chat/completions", keyA, []byte(body))
 	}
-	body := []byte(`{"model":"missing","messages":[{"role":"user","content":"FORBIDDEN_CONSECUTIVE_USER"},{"role":"user","content":"CHAT-LAST-USER-ONLY"}]}`)
+	body := []byte(`{"model":"audit-test-model","messages":[{"role":"user","content":"FORBIDDEN_CONSECUTIVE_USER"},{"role":"user","content":"CHAT-LAST-USER-ONLY"}]}`)
 	h.request(t, "POST", "/v1/chat/completions", keyA, body)
 	waitSnapshotRecord(t, h, "CHAT-LAST-USER-ONLY")
 	saved, queued, after := snapshotCounters(t, h)
@@ -97,10 +97,10 @@ func TestChatOrderedContent(t *testing.T) {
 		{`[{"type":"text","text":"CHAT-LITERAL-https://example.invalid/picture.png data:image/png;base64,U1lOVEhFVElD synthetic-text-secret"}]`, "CHAT-LITERAL-https://example.invalid/picture.png data:image/png;base64,U1lOVEhFVElD synthetic-text-secret"},
 	}
 	for _, tc := range cases {
-		body := []byte(`{"model":"missing","messages":[{"role":"system","content":"FORBIDDEN_MIXED_SYSTEM"},{"role":"developer","content":"FORBIDDEN_MIXED_DEVELOPER"},{"role":"user","content":"FORBIDDEN_MIXED_HISTORY"},{"role":"assistant","content":"FORBIDDEN_MIXED_REPLY"},{"role":"user","tool_calls":[{"arguments":"FORBIDDEN_MESSAGE_TOOL"}],"content":` + tc.content + `}]}`)
+		body := []byte(`{"model":"audit-test-model","messages":[{"role":"system","content":"FORBIDDEN_MIXED_SYSTEM"},{"role":"developer","content":"FORBIDDEN_MIXED_DEVELOPER"},{"role":"user","content":"FORBIDDEN_MIXED_HISTORY"},{"role":"assistant","content":"FORBIDDEN_MIXED_REPLY"},{"role":"user","tool_calls":[{"arguments":"FORBIDDEN_MESSAGE_TOOL"}],"content":` + tc.content + `}]}`)
 		code, _ := h.request(t, "POST", "/v1/chat/completions", keyA, body)
-		if code != 400 {
-			t.Fatal("审计不应改变原宿主路由失败")
+		if code != 200 {
+			t.Fatal("审计不应改变合成模型调用")
 		}
 		waitSnapshotRecord(t, h, tc.want)
 	}
@@ -117,7 +117,7 @@ func waitChatDetail(t *testing.T, h *instance, prefix string) savedRecord {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		code, raw := h.request(t, "GET", api+"/records?limit=100", adminKey, nil)
+		code, raw := h.search(t, adminKey, map[string]any{"limit": 100})
 		var list struct {
 			Records []struct {
 				savedRecord
@@ -181,14 +181,14 @@ func TestChatUnknownContent(t *testing.T) {
 			if tc.content != "" {
 				field = `,"content":` + tc.content
 			}
-			body := []byte(`{"model":"missing","messages":[{"role":"user"` + field + `}]}`)
+			body := []byte(`{"model":"audit-test-model","messages":[{"role":"user"` + field + `}]}`)
 			code, _ := h.request(t, "POST", "/v1/chat/completions", keyA, body)
-			if code != 400 {
-				t.Fatal("审计改变了原模型路由响应")
+			if code != 200 {
+				t.Fatal("审计改变了合成模型响应")
 			}
 			// 后续唯一提交的实际落盘作为 FIFO 屏障，不能用固定 sleep 判断之前没有记录。
 			barrier := fmt.Sprintf("CHAT-UNKNOWN-BARRIER-%d", i)
-			h.request(t, "POST", "/v1/chat/completions", keyA, []byte(fmt.Sprintf(`{"model":"missing","messages":[{"role":"user","content":%q}]}`, barrier)))
+			h.request(t, "POST", "/v1/chat/completions", keyA, []byte(fmt.Sprintf(`{"model":"audit-test-model","messages":[{"role":"user","content":%q}]}`, barrier)))
 			waitSnapshotRecord(t, h, barrier)
 			saved, queued, gaps := snapshotCounters(t, h)
 			wantSaved := savedBefore + 1
@@ -226,6 +226,9 @@ func TestChatUnknownContent(t *testing.T) {
 func TestChatUTF8PrefixAndFailOpen(t *testing.T) {
 	received := make(chan []byte, 32)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if respondDiscovery(w, r) {
+			return
+		}
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "synthetic read failure", 400)

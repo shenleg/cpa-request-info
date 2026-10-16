@@ -61,7 +61,11 @@ func startHostWithConfiguration(t *testing.T, budget int64, plugin bool, upstrea
 // 其余参数同 startHostWithConfiguration；返回真实入口，配置或启动失败终止测试，不污染其他测试的插件目录。
 func startHostWithPluginDirectory(t *testing.T, budget int64, plugin bool, upstream string, environmentAuth bool, extraConfig, pluginDirectory, pluginConfig string, stateDir ...string) *instance {
 	t.Helper()
-	return startHostWithRuntime(t, budget, plugin, upstream, environmentAuth, extraConfig, pluginDirectory, pluginConfig, "", "", stateDir...)
+	h := startHostWithRuntime(t, budget, plugin, upstream, environmentAuth, extraConfig, pluginDirectory, pluginConfig, "", "", stateDir...)
+	if plugin && pluginDirectory == "" {
+		h.discoverCallers(t)
+	}
+	return h
 }
 
 // startRetentionHost 用独立时钟验收宿主和插件启动合成实例；clockPath 是原子更新的文件时钟路径。
@@ -79,7 +83,9 @@ func startRetentionHost(t *testing.T, budget int64, upstream, clockPath string, 
 		}
 	}
 	out := filepath.Join(root, ".build/retention-test")
-	return startHostWithRuntime(t, budget, true, upstream, false, "", filepath.Join(out, "plugins"), "", filepath.Join(out, "bin/cliproxyapi"), clockPath, stateDir...)
+	h := startHostWithRuntime(t, budget, true, upstream, false, "", filepath.Join(out, "plugins"), "", filepath.Join(out, "bin/cliproxyapi"), clockPath, stateDir...)
+	h.discoverCallers(t)
+	return h
 }
 
 // startHostWithRuntime 启动指定产物，hostOverride/clockPath 仅供隔离验收使用；其余参数同原启动器。
@@ -166,6 +172,10 @@ plugins:
 `, upstream)
 	}
 	config += extraConfig
+	// 独立探针和旧 compatibility 产物保留原始配置，正式产物只使用本地真实模型发现调用者。
+	if hostOverride == "" || clockPath != "" {
+		config = configureDiscovery(t, config, upstream == "" && !strings.Contains(extraConfig, "openai-compatibility:") && !strings.Contains(extraConfig, "claude-api-key:"))
+	}
 	configPath := filepath.Join(dir, "config.yaml")
 	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		t.Fatal(err)
@@ -267,6 +277,7 @@ type savedRecord struct {
 // monitorAll 通过受保护目录选择全部合成对象并命名，返回 ID；管理操作失败终止测试。
 func (h *instance) monitorAll(t *testing.T) []string {
 	t.Helper()
+	h.discoverCallers(t)
 	code, raw := h.request(t, "GET", api+"/objects", adminKey, nil)
 	if code != 200 {
 		t.Fatalf("对象目录: %d", code)
@@ -282,9 +293,9 @@ func (h *instance) monitorAll(t *testing.T) []string {
 	ids := make([]string, 0, len(catalog.Objects))
 	for i, o := range catalog.Objects {
 		body, _ := json.Marshal(map[string]string{"object_id": o.ID, "name": fmt.Sprintf("合成对象%d", i)})
-		status, resp := h.request(t, "POST", api+"/monitor", adminKey, body)
+		status, _ := h.request(t, "POST", api+"/monitor", adminKey, body)
 		if status != 200 {
-			t.Fatalf("监控选择预期200，实际%d: %s", status, resp)
+			t.Fatalf("监控选择预期200，实际%d", status)
 		}
 		ids = append(ids, o.ID)
 	}
@@ -296,7 +307,7 @@ func (h *instance) waitRecords(t *testing.T, count int) []savedRecord {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		status, raw := h.request(t, "GET", api+"/records", adminKey, nil)
+		status, raw := h.search(t, adminKey, nil)
 		if status != 200 {
 			t.Fatalf("记录列表: %d", status)
 		}
@@ -316,14 +327,14 @@ func (h *instance) waitRecords(t *testing.T, count int) []savedRecord {
 	}
 }
 
-// TestSavedLatestInput 验证选择命名后从真实路由前失败提交保存末尾纯文本，列表与单条详情一致。
+// TestSavedLatestInput 验证选择命名后的真实模型执行只保存末尾纯文本，列表与单条详情一致。
 func TestSavedLatestInput(t *testing.T) {
 	h := startHost(t, 1<<30, true, "")
 	ids := h.monitorAll(t)
-	body := []byte(`{"model":"not-a-real-model","messages":[{"role":"system","content":"FORBIDDEN_SYSTEM"},{"role":"user","content":"FORBIDDEN_HISTORY"},{"role":"assistant","content":"FORBIDDEN_REPLY"},{"role":"user","content":"末尾新文本"}]}`)
+	body := []byte(`{"model":"audit-test-model","messages":[{"role":"system","content":"FORBIDDEN_SYSTEM"},{"role":"user","content":"FORBIDDEN_HISTORY"},{"role":"assistant","content":"FORBIDDEN_REPLY"},{"role":"user","content":"末尾新文本"}]}`)
 	status, _ := h.request(t, "POST", "/v1/chat/completions", keyA, body)
-	if status != 400 {
-		t.Fatalf("应保留宿主原模型路由错误400，实际%d", status)
+	if status != 200 {
+		t.Fatalf("合成模型应成功200，实际%d", status)
 	}
 	list := h.waitRecords(t, 1)
 	if len(list) != 1 {
@@ -337,8 +348,8 @@ func TestSavedLatestInput(t *testing.T) {
 	if err := json.Unmarshal(raw, &record); err != nil {
 		t.Fatal(err)
 	}
-	if record.Text != "末尾新文本" || record.Model != "not-a-real-model" || record.Protocol != "chat-completions" || record.ReceivedAt.IsZero() || record.Truncated {
-		t.Fatalf("正文或白名单元数据不符合规范: %+v", record)
+	if record.Text != "末尾新文本" || record.Model != "audit-test-model" || record.Protocol != "chat-completions" || record.ReceivedAt.IsZero() || record.Truncated {
+		t.Fatal("正文或白名单元数据不符合规范")
 	}
 	found := false
 	for _, id := range ids {
@@ -351,20 +362,19 @@ func TestSavedLatestInput(t *testing.T) {
 	}
 }
 
-// TestMissingModelStillRecorded 验证缺失模型的可提取已认证提交在路由前失败时仍记录，模型显示未知而不是猜测。
-func TestMissingModelStillRecorded(t *testing.T) {
+// TestMissingModelNotObserved 验证缺失模型在官方 Before 之前被拒绝，不保存输入或虚构未知模型记录。
+func TestMissingModelNotObserved(t *testing.T) {
 	h := startHost(t, 1<<30, true, "")
 	h.monitorAll(t)
-	status, _ := h.request(t, "POST", "/v1/chat/completions", keyA, []byte(`{"messages":[{"role":"user","content":"无模型也属于新提交"}]}`))
-	if status != 400 {
-		t.Fatalf("缺失模型应保持宿主错误，实际%d", status)
+	_, _, gaps := snapshotCounters(t, h)
+	for round := 0; round < 2; round++ {
+		code, _ := h.request(t, "POST", "/v1/chat/completions", keyA, []byte(`{"messages":[{"role":"user","content":"FORBIDDEN_MISSING_MODEL"}]}`))
+		if code != 400 {
+			t.Fatal("缺失模型没有保留宿主错误")
+		}
+		assertHTTPOnceState(t, h, 0, gaps)
 	}
-	list := h.waitRecords(t, 1)
-	code, raw := h.request(t, "GET", api+"/detail?id="+list[0].ID, adminKey, nil)
-	var record savedRecord
-	if code != 200 || json.Unmarshal(raw, &record) != nil || record.Text != "无模型也属于新提交" || record.Model != "" {
-		t.Fatal("缺失模型没有保存为未知")
-	}
+	assertChatPrivacy(t, h, "FORBIDDEN_MISSING_MODEL")
 }
 
 // TestTailsAndUnsupported 验证工具续跑不回找、未知块不兜底、身份分离及禁存内容不进入新增数据或诊断。
@@ -372,23 +382,23 @@ func TestTailsAndUnsupported(t *testing.T) {
 	h := startHost(t, 1<<30, true, "")
 	h.monitorAll(t)
 	for _, key := range []string{keyA, keyB} {
-		h.request(t, "POST", "/v1/chat/completions", key, []byte(`{"model":"missing","messages":[{"role":"user","content":"独立合成提交"}]}`))
+		h.request(t, "POST", "/v1/chat/completions", key, []byte(`{"model":"audit-test-model","messages":[{"role":"user","content":"独立合成提交"}]}`))
 	}
 	list := h.waitRecords(t, 2)
 	if len(list) != 2 || list[0].ObjectID == list[1].ObjectID || list[0].ID == list[1].ID {
 		t.Fatal("两个Key应独立关联，两次提交不得去重")
 	}
 	for _, body := range []string{
-		`{"model":"missing","messages":[{"role":"user","content":"FORBIDDEN_OLD_USER"},{"role":"tool","content":"FORBIDDEN_TOOL_RESULT"}]}`,
-		`{"model":"missing","messages":[{"role":"user","content":"FORBIDDEN_OLD_USER"},{"role":"assistant","content":"FORBIDDEN_ASSISTANT"}]}`,
-		`{"model":"missing","messages":[{"role":"user","content":[{"type":"unknown","payload":"FORBIDDEN_NON_TEXT"}]}]}`,
-		`{"model":"missing","messages":[{"role":"user","content":""}]}`,
-		`{"model":"missing","messages":[`,
+		`{"model":"audit-test-model","messages":[{"role":"user","content":"FORBIDDEN_OLD_USER"},{"role":"tool","content":"FORBIDDEN_TOOL_RESULT"}]}`,
+		`{"model":"audit-test-model","messages":[{"role":"user","content":"FORBIDDEN_OLD_USER"},{"role":"assistant","content":"FORBIDDEN_ASSISTANT"}]}`,
+		`{"model":"audit-test-model","messages":[{"role":"user","content":[{"type":"unknown","payload":"FORBIDDEN_NON_TEXT"}]}]}`,
+		`{"model":"audit-test-model","messages":[{"role":"user","content":""}]}`,
+		`{"model":"audit-test-model","messages":[`,
 	} {
 		h.request(t, "POST", "/v1/chat/completions", keyA, []byte(body))
 	}
-	h.request(t, "POST", "/v1/chat/completions", "synthetic-invalid-client", []byte(`{"model":"missing","messages":[{"role":"user","content":"FORBIDDEN_UNAUTHENTICATED"}]}`))
-	code, raw := h.request(t, "GET", api+"/records", adminKey, nil)
+	h.request(t, "POST", "/v1/chat/completions", "synthetic-invalid-client", []byte(`{"model":"audit-test-model","messages":[{"role":"user","content":"FORBIDDEN_UNAUTHENTICATED"}]}`))
+	code, raw := h.search(t, adminKey, nil)
 	var records struct {
 		Records []savedRecord `json:"records"`
 	}
@@ -401,8 +411,8 @@ func TestTailsAndUnsupported(t *testing.T) {
 			Gaps map[string]uint64 `json:"gaps"`
 		} `json:"state"`
 	}
-	if json.Unmarshal(raw, &state) != nil || state.State.Gaps["unsupported_content"] == 0 || state.State.Gaps["invalid_json"] == 0 {
-		t.Fatal("未支持内容或解析失败被伪装为完整/正常跳过")
+	if json.Unmarshal(raw, &state) != nil || state.State.Gaps["unsupported_content"] == 0 || state.State.Gaps["invalid_event"] == 0 {
+		t.Fatal("未知内容或实际收到的畸形回调没有报告采集缺口")
 	}
 	forbidden := []string{keyA, keyB, adminKey, "FORBIDDEN_OLD_USER", "FORBIDDEN_TOOL_RESULT", "FORBIDDEN_ASSISTANT", "FORBIDDEN_NON_TEXT", "FORBIDDEN_UNAUTHENTICATED"}
 	if err := filepath.WalkDir(filepath.Join(h.dir, "audit"), func(path string, entry os.DirEntry, err error) error {
@@ -451,6 +461,9 @@ func TestTailsAndUnsupported(t *testing.T) {
 func TestUpstreamUnchangedAndTextLimit(t *testing.T) {
 	received := make(chan []byte, 16)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if respondDiscovery(w, r) {
+			return
+		}
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "synthetic read failure", 400)
@@ -474,9 +487,9 @@ func TestUpstreamUnchangedAndTextLimit(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, h := range []*instance{off, audited} {
-			code, raw := h.request(t, "POST", "/v1/chat/completions", keyA, body)
+			code, _ := h.request(t, "POST", "/v1/chat/completions", keyA, body)
 			if code != 200 {
-				t.Fatalf("可控模型请求预期200，实际%d: %s", code, raw)
+				t.Fatalf("可控模型请求预期200，实际%d", code)
 			}
 		}
 		var plain, observed []byte
@@ -532,12 +545,12 @@ func TestUpstreamUnchangedAndTextLimit(t *testing.T) {
 func TestBudgetStopsWithoutEvicting(t *testing.T) {
 	h := startHost(t, 4<<20, true, "")
 	h.monitorAll(t)
-	body, _ := json.Marshal(map[string]any{"model": "missing", "messages": []map[string]string{{"role": "user", "content": strings.Repeat("x", 65536)}}})
+	body, _ := json.Marshal(map[string]any{"model": "audit-test-model", "messages": []map[string]string{{"role": "user", "content": strings.Repeat("x", 65536)}}})
 	paused := false
 	for i := 0; i < 128; i++ {
 		code, _ := h.request(t, "POST", "/v1/chat/completions", keyA, body)
-		if code != 400 {
-			t.Fatalf("满额不应改变模型路由返回: %d", code)
+		if code != 200 {
+			t.Fatalf("满额不应改变合成模型成功响应: %d", code)
 		}
 		_, raw := h.request(t, "GET", api+"/status", adminKey, nil)
 		var state struct {
@@ -560,7 +573,7 @@ func TestBudgetStopsWithoutEvicting(t *testing.T) {
 	if !paused {
 		t.Fatal("超过合法预算仍未停止采集")
 	}
-	_, raw := h.request(t, "GET", api+"/records?limit=100", adminKey, nil)
+	_, raw := h.search(t, adminKey, map[string]any{"limit": 100})
 	var before struct {
 		Records []savedRecord `json:"records"`
 		Total   int           `json:"total"`
@@ -570,11 +583,11 @@ func TestBudgetStopsWithoutEvicting(t *testing.T) {
 	}
 	for i := 0; i < 3; i++ {
 		code, _ := h.request(t, "POST", "/v1/chat/completions", keyA, body)
-		if code != 400 {
-			t.Fatal("容量停采改变宿主模型调用")
+		if code != 200 {
+			t.Fatal("容量停采改变合成模型调用")
 		}
 	}
-	_, raw = h.request(t, "GET", api+"/records?limit=100", adminKey, nil)
+	_, raw = h.search(t, adminKey, map[string]any{"limit": 100})
 	var after struct {
 		Records []savedRecord `json:"records"`
 		Total   int           `json:"total"`
@@ -606,6 +619,9 @@ func TestBudgetStopsWithoutEvicting(t *testing.T) {
 // TestStorageFaultFailOpen 验证外部文件系统故障使采集停下并可见，但不拒绝实际可控模型请求。
 func TestStorageFaultFailOpen(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if respondDiscovery(w, r) {
+			return
+		}
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"id":"synthetic","object":"chat.completion","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
@@ -650,7 +666,7 @@ func TestStorageFaultFailOpen(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	_, raw := h.request(t, "GET", api+"/records", adminKey, nil)
+	_, raw := h.search(t, adminKey, nil)
 	var list struct {
 		Total int `json:"total"`
 	}
@@ -678,32 +694,27 @@ func TestMonitorRequiresName(t *testing.T) {
 	}
 }
 
-// TestIdentityUnavailableIsVisible 验证外部破坏身份目录权限后停止采集并显示不可用，但原模型路由错误保持不变。
+// TestIdentityUnavailableIsVisible 验证专用目录权限故障使采集暂停并公开原因，但仍放行真实模型调用。
 func TestIdentityUnavailableIsVisible(t *testing.T) {
 	h := startHost(t, 1<<30, true, "")
 	h.monitorAll(t)
-	if err := os.Chmod(filepath.Join(h.dir, "audit"), 0500); err != nil {
+	if err := os.Chmod(h.stateDir, 0500); err != nil {
 		t.Fatal(err)
 	}
-	code, _ := h.request(t, "POST", "/v1/chat/completions", keyA, []byte(`{"model":"missing","messages":[{"role":"user","content":"权限故障合成提交"}]}`))
-	if code != 400 {
-		t.Fatal("身份故障改变了模型响应")
+	code, _ := h.request(t, "POST", "/v1/chat/completions", keyA, snapshotInput(t, "权限故障合成提交"))
+	if code != 200 {
+		t.Fatal("身份目录故障改变模型响应")
 	}
-	_, raw := h.request(t, "GET", api+"/status", adminKey, nil)
-	var status struct {
-		Available bool   `json:"available"`
-		Reason    string `json:"reason"`
-	}
-	if json.Unmarshal(raw, &status) != nil || status.Available || status.Reason == "" {
-		t.Fatal("观察身份不可用仍显示采集正常")
-	}
+	waitBudgetState(t, h, func(state budgetState) bool {
+		return state.State == "paused" && state.Reason == "storage_error" && state.Queued == 0
+	})
 }
 
 // TestStableIdentityAcrossRestart 验证宿主正常重启不轮换身份，已保存记录仍关联原对象。
 func TestStableIdentityAcrossRestart(t *testing.T) {
 	h := startHost(t, 1<<30, true, "")
 	ids := h.monitorAll(t)
-	h.request(t, "POST", "/v1/chat/completions", keyA, []byte(`{"model":"missing","messages":[{"role":"user","content":"重启前合成提交"}]}`))
+	h.request(t, "POST", "/v1/chat/completions", keyA, []byte(`{"model":"audit-test-model","messages":[{"role":"user","content":"重启前合成提交"}]}`))
 	before := h.waitRecords(t, 1)[0]
 	stateDir := filepath.Join(h.dir, "audit")
 	h.stop()
@@ -734,13 +745,13 @@ func TestProtocolFieldAmbiguityDoesNotLeak(t *testing.T) {
 	h := startHost(t, 1<<30, true, "")
 	h.monitorAll(t)
 	for _, body := range []string{
-		`{"model":"missing","messages":[{"role":"tool","Role":"user","content":"FORBIDDEN_CASE_ALIAS_TOOL"}]}`,
-		`{"model":"missing","messages":[{"role":"tool","role":"user","content":"FORBIDDEN_DUPLICATE_ROLE_TOOL"}]}`,
-		`{"model":"missing","Messages":[{"role":"user","content":"FORBIDDEN_UPPERCASE_HISTORY"}],"messages":[{"role":"tool","content":"FORBIDDEN_TOOL"}]}`,
+		`{"model":"audit-test-model","messages":[{"role":"tool","Role":"user","content":"FORBIDDEN_CASE_ALIAS_TOOL"}]}`,
+		`{"model":"audit-test-model","messages":[{"role":"tool","role":"user","content":"FORBIDDEN_DUPLICATE_ROLE_TOOL"}]}`,
+		`{"model":"audit-test-model","Messages":[{"role":"user","content":"FORBIDDEN_UPPERCASE_HISTORY"}],"messages":[{"role":"tool","content":"FORBIDDEN_TOOL"}]}`,
 	} {
 		h.request(t, "POST", "/v1/chat/completions", keyA, []byte(body))
 	}
-	_, raw := h.request(t, "GET", api+"/records", adminKey, nil)
+	_, raw := h.search(t, adminKey, nil)
 	var list struct {
 		Total int `json:"total"`
 	}
@@ -754,7 +765,7 @@ func TestDefaultAndAuthorization(t *testing.T) {
 	h := startHost(t, 1<<30, true, "")
 	status, raw := h.request(t, "GET", api+"/objects", adminKey, nil)
 	if status != 200 {
-		t.Fatalf("管理员对象目录预期200，实际%d: %s", status, raw)
+		t.Fatalf("管理员对象目录预期200，实际%d", status)
 	}
 	var catalog struct {
 		Objects []struct {
@@ -776,8 +787,8 @@ func TestDefaultAndAuthorization(t *testing.T) {
 			t.Fatal("默认名单不为空或对象标识为空")
 		}
 	}
-	h.request(t, "POST", "/v1/chat/completions", keyA, []byte(`{"model":"missing","messages":[{"role":"user","content":"默认未监控，不得保存"}]}`))
-	_, emptyRaw := h.request(t, "GET", api+"/records", adminKey, nil)
+	h.request(t, "POST", "/v1/chat/completions", keyA, []byte(`{"model":"audit-test-model","messages":[{"role":"user","content":"默认未监控，不得保存"}]}`))
+	_, emptyRaw := h.search(t, adminKey, nil)
 	var empty struct {
 		Total int `json:"total"`
 	}
@@ -785,8 +796,8 @@ func TestDefaultAndAuthorization(t *testing.T) {
 		t.Fatal("默认空名单仍保存了输入")
 	}
 	for _, key := range []string{"", keyA, catalog.Objects[0].ID} {
-		for _, path := range []string{"/objects", "/records", "/status", "/detail?id=not-real"} {
-			code, _ := h.request(t, "GET", api+path, key, nil)
+		for _, path := range []string{"/objects", "/records/search", "/status", "/detail?id=not-real"} {
+			code, _ := managementRead(t, h, path, key)
 			if code != 401 && code != 403 {
 				t.Fatalf("非管理凭据可读取%s: %d", path, code)
 			}

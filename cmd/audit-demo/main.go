@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -68,7 +69,7 @@ func run(jsonOutput, restartHost bool) (result error) {
 			http.Error(w, "synthetic read failure", 400)
 			return
 		}
-		// WebSocket 的真实模型执行转换为 Chat stream；非流式场景仍使用原 JSON 回复。
+		// 同一合成上游支持 HTTP/SSE，也供宿主完成 WebSocket 不采集负例的真实模型执行。
 		if request.Stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = io.WriteString(w, "data: {\"id\":\"synthetic-reply\",\"created\":1,\"object\":\"chat.completion.chunk\",\"model\":\"audit-test-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"合成上游回复\"},\"finish_reason\":null}]}\n\ndata: {\"id\":\"synthetic-reply\",\"created\":1,\"object\":\"chat.completion.chunk\",\"model\":\"audit-test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
@@ -116,7 +117,9 @@ openai-compatibility:
     models:
       - name: audit-test-model
         alias: audit-test-model
-`, port, filepath.Join(dir, "auths"), filepath.Join(root, ".build/plugins"), filepath.Join(dir, "audit"), "http://"+up.Addr().String()+"/v1")
+      - name: audit-test-other-model
+        alias: audit-test-other-model
+`, port, filepath.Join(dir, "auths"), filepath.Join(root, ".build/plugins"), filepath.Join(dir, "audit-http-execution"), "http://"+up.Addr().String()+"/v1")
 	configPath := filepath.Join(dir, "config.yaml")
 	if err = os.WriteFile(configPath, []byte(config), 0600); err != nil {
 		return err
@@ -130,6 +133,7 @@ openai-compatibility:
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(stop)
+	discovered := false
 	for {
 		cmd := exec.Command(filepath.Join(root, ".build/bin/cliproxyapi"), "--config", configPath, "--local-model")
 		cmd.Dir = dir
@@ -189,17 +193,41 @@ openai-compatibility:
 				resp, errGet := client.Do(req)
 				if errGet == nil {
 					var state struct {
-						Available bool `json:"available"`
+						Available          bool     `json:"available"`
+						CaptureMode        string   `json:"capture_mode"`
+						SupportedProtocols []string `json:"supported_protocols"`
+						ResponsesWebSocket bool     `json:"responses_websocket"`
 					}
 					errDecode := json.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&state)
 					errClose := resp.Body.Close()
-					ready = resp.StatusCode == http.StatusOK && errDecode == nil && errClose == nil && (state.Available || restartHost)
+					ready = resp.StatusCode == http.StatusOK && errDecode == nil && errClose == nil && state.CaptureMode == "http_execution" && len(state.SupportedProtocols) == 3 && !state.ResponsesWebSocket && (state.Available || restartHost)
 				}
 			}
 		}
 		// 故障实例可能多次重启；每次 ready 后停止本轮探测，不在等待浏览器操作时继续计时。
 		deadline.Stop()
 		poll.Stop()
+		// 只在首次启动发现未监控对象，不命名、不启用；重启不能重采发现正文或覆盖浏览器配置。
+		if !discovered {
+			for _, key := range []string{"synthetic-client-audit-a-only", "synthetic-client-audit-b-only"} {
+				req, errRequest := http.NewRequest(http.MethodPost, base+"/v1/chat/completions", bytes.NewBufferString(`{"model":"audit-test-model","messages":[{"role":"user","content":"synthetic HTTP discovery only"}]}`))
+				if errRequest != nil {
+					return fmt.Errorf("无法构造合成发现请求")
+				}
+				req.Header.Set("Authorization", "Bearer "+key)
+				req.Header.Set("Content-Type", "application/json")
+				resp, errSubmit := client.Do(req)
+				if errSubmit != nil {
+					return fmt.Errorf("合成 HTTP 对象发现失败")
+				}
+				_, errRead := io.Copy(io.Discard, resp.Body)
+				errClose := resp.Body.Close()
+				if resp.StatusCode != http.StatusOK || errRead != nil || errClose != nil {
+					return fmt.Errorf("合成 HTTP 对象发现未完成模型执行")
+				}
+			}
+			discovered = true
+		}
 		client.CloseIdleConnections()
 		if jsonOutput {
 			if errEncode := json.NewEncoder(os.Stdout).Encode(map[string]any{"event": "ready", "url": base + "/management.html", "pid": cmd.Process.Pid, "directory": dir}); errEncode != nil {

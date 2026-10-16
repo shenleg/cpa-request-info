@@ -1,3 +1,6 @@
+//go:build legacy_patched
+
+// 历史私有原帧内容与配置契约；当前明确排除所有 WebSocket，替代用例为 TestOfficialWebsocketExcluded。
 // 本文件在真实 WebSocket 接收边界验证末尾输入、配置逐提交生效及禁存字段，不检查私有提取器。
 package system
 

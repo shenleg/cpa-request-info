@@ -1,4 +1,4 @@
-// 本文件用本地 Anthropic 上游验收原协议、业务改写前观察、UTF-8 前缀和不等待模型回复的边界。
+// 本文件用本地 Anthropic 上游验收原协议、官方 Before 观察、UTF-8 前缀和不等待模型回复的边界。
 package system
 
 import (
@@ -34,10 +34,13 @@ func startAnthropicHost(t *testing.T, plugin bool, upstream string) *instance {
 	return startHostWithConfiguration(t, 1<<30, plugin, "", false, config)
 }
 
-// TestAnthropicMessagesUTF8AndFailOpen 验证原生上游完整收到消息，审计开关不改请求/响应，记录保留改写前模型和 UTF-8 安全前缀。
+// TestAnthropicMessagesUTF8AndFailOpen 验证原生上游完整收到消息，审计开关不改请求/响应，记录使用 DD 改写后的当前模型和 UTF-8 安全前缀。
 func TestAnthropicMessagesUTF8AndFailOpen(t *testing.T) {
 	received := make(chan []byte, 16)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if respondDiscovery(w, r) {
+			return
+		}
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "synthetic read failure", 400)
@@ -120,7 +123,7 @@ func TestAnthropicMessagesUTF8AndFailOpen(t *testing.T) {
 				}
 			}
 			r := waitChatDetail(t, h, marker)
-			if r.Text != ascii+tc.wantSuffix || r.Protocol != "anthropic-messages" || r.Model != clientModel || r.Truncated != tc.truncated || r.ExtractionIncomplete != tc.incomplete {
+			if r.Text != ascii+tc.wantSuffix || r.Protocol != "anthropic-messages" || r.Model != "anthropic-client-model" || r.Truncated != tc.truncated || r.ExtractionIncomplete != tc.incomplete {
 				t.Fatal("Anthropic 原协议、请求模型或 UTF-8 状态与独立预期不符")
 			}
 			if tc.incomplete {
@@ -153,22 +156,25 @@ func TestAnthropicMessagesUTF8AndFailOpen(t *testing.T) {
 			}
 		}
 	}
-	h.request(t, "POST", "/v1/messages", keyA, []byte(`{"model":"missing","messages":[{"role":"user","content":"ANTHROPIC-UTF8-DRAIN"}]}`))
+	h.request(t, "POST", "/v1/messages", keyA, []byte(`{"model":"anthropic-client-model","messages":[{"role":"user","content":"ANTHROPIC-UTF8-DRAIN"}]}`))
 	waitSnapshotRecord(t, h, "ANTHROPIC-UTF8-DRAIN")
 	assertChatPrivacy(t, h, "FORBIDDEN_ANTHROPIC_")
 	h.stop()
 	restarted := startHost(t, 1<<30, true, "", filepath.Join(h.dir, "audit"))
 	code, raw := restarted.request(t, "GET", api+"/detail?id="+combinedID, adminKey, nil)
 	var r savedRecord
-	if code != 200 || json.Unmarshal(raw, &r) != nil || r.Protocol != "anthropic-messages" || !r.Truncated || !r.ExtractionIncomplete || r.Model != clientModel {
+	if code != 200 || json.Unmarshal(raw, &r) != nil || r.Protocol != "anthropic-messages" || !r.Truncated || !r.ExtractionIncomplete || r.Model != "anthropic-client-model" {
 		t.Fatal("正常重启丢失 Anthropic 协议或双状态")
 	}
 }
 
-// TestAnthropicMessagesSSE 验证流式提交沿用业务改写前观察，审计不改变上游请求或 SSE 事件流。
+// TestAnthropicMessagesSSE 验证流式提交沿用官方 Before 观察，审计不改变上游请求或 SSE 事件流。
 func TestAnthropicMessagesSSE(t *testing.T) {
 	received := make(chan []byte, 2)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if respondDiscovery(w, r) {
+			return
+		}
 		raw, err := io.ReadAll(r.Body)
 		if err != nil {
 			http.Error(w, "synthetic read failure", 400)
@@ -214,6 +220,9 @@ func TestAnthropicMessagesBeforeFailedReply(t *testing.T) {
 	var once sync.Once
 	unblock := func() { once.Do(func() { close(release) }) }
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if respondDiscovery(w, r) {
+			return
+		}
 		if _, err := io.Copy(io.Discard, r.Body); err != nil {
 			http.Error(w, "synthetic read failure", 400)
 			return

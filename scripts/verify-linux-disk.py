@@ -177,13 +177,16 @@ openai-compatibility:
             except urllib.error.URLError:
                 return None
         wait_for(ready, "宿主未就绪")
+        payload = {"model": "audit-test-model", "messages": [{"role": "user", "content": TEXT}]}
+        # 原版接口只发现实际执行的对象；首次请求未监控，不能把发现流量算成已保存记录。
+        assert request(address, "/v1/chat/completions", "POST", payload, CLIENT)[0] == 200
+        assert request(address, API + "/records/search", "POST", {})[1]["total"] == 0
         code, catalog = request(address, API + "/objects")
         assert code == 200 and len(catalog["objects"]) == 1
         object_id = catalog["objects"][0]["id"]
         assert request(address, API + "/monitor", "POST", {"object_id": object_id, "name": "Linux合成磁盘验收"})[0] == 200
-        payload = {"model": "audit-test-model", "messages": [{"role": "user", "content": TEXT}]}
         assert request(address, "/v1/chat/completions", "POST", payload, CLIENT)[0] == 200
-        prior = wait_for(lambda: request(address, API + "/records")[1]["records"], "首条输入未同步保存")[0]
+        prior = wait_for(lambda: request(address, API + "/records/search", "POST", {})[1]["records"], "首条输入未同步保存")[0]
         prior_outputs = {entry.name: entry.read_bytes() for entry in (mount / "audit").glob("records-*.jsonl")}
         assert prior_outputs
         written = 0
@@ -217,7 +220,7 @@ openai-compatibility:
             process = start_host()
             wait_for(ready, "只读环境下宿主未启动")
         assert request(address, "/v1/chat/completions", "POST", payload, CLIENT)[0] == 200
-        assert received == [True, True], "故障改变或遗漏了实际模型输入"
+        assert received == [True, True, True], "发现/故障场景改变或遗漏了实际模型输入"
         def failed():
             """等待本轮采集拒绝或故障可见；返回公开状态，不以模型请求结束推断审计落盘。"""
             code, state = request(address, API + "/status")
@@ -275,7 +278,7 @@ openai-compatibility:
             wait_for(ready, "恢复可写后的正常重启未完成")
             restarted_fault = gap_item(public_status(address)["state"]["gap_alerts"], "storage_unavailable")
             assert restarted_fault["history_retained"] is True and restarted_fault["active"] is False, "正常重启丢失已持久化的只读历史或误报活动故障"
-        code, records = request(address, API + "/records")
+        code, records = request(address, API + "/records/search", "POST", {})
         assert code == 200 and records["total"] == 1 and records["records"][0]["id"] == prior["id"], "故障保存了新输入或损坏旧历史"
         code, detail = request(address, API + "/detail?id=" + prior["id"])
         assert code == 200 and detail["text"] == TEXT[:65536], "故障改变了旧输入正文"
@@ -293,10 +296,10 @@ openai-compatibility:
         assert request(address, API + "/detail?id=" + prior["id"])[1]["text"] == TEXT[:65536]
         # 恢复后再发同一模型输入，区分故障期fail-open与修复后模型/采集真正可用。
         assert request(address, "/v1/chat/completions", "POST", payload, CLIENT)[0] == 200
-        assert received == [True, True, True], "修复与重启改变或遗漏了实际模型输入"
+        assert received == [True, True, True, True], "发现/修复与重启改变或遗漏了实际模型输入"
         def repaired_saved():
             """等待修复后的第三次模型提交保存；返回记录列表，公开查询失败或失败副本被保存时终止验收。"""
-            code, current = request(address, API + "/records")
+            code, current = request(address, API + "/records/search", "POST", {})
             assert code == 200, "修复后记录查询失败"
             assert current["total"] <= 2, "故障期失败副本被冒充已保存"
             return current if current["total"] == 2 else None
@@ -307,10 +310,10 @@ openai-compatibility:
         else:
             # ENOSPC可能已写入部分尾行；释放空间不等于修复损坏，禁止夹具要求应用静默截断历史。
             assert args.mode == "enospc" and repaired_state["state"]["reason"] == "storage_error", "恢复后未给出真实停采原因"
-            code, records = request(address, API + "/records")
+            code, records = request(address, API + "/records/search", "POST", {})
             assert code == 200 and records["total"] == 1, "损坏尾部使失败副本冒充保存或损坏旧输入"
             capture_resumed = False
-        result = {"runtime_fault_visible": runtime_fault_visible, "recovery_loss_signal": recovered_gap, "result": "passed", "mode": args.mode, "errno": failure_errno, "volume_bytes": fs.f_blocks * fs.f_frsize, "external_fill_bytes": written, "host_uid": user.pw_uid, "model_statuses": [200, 200, 200], "upstream_received": len(received), "upstream_invalid": sum(not entry for entry in received), "saved_records": records["total"], "old_detail_preserved": True, "capture_available": state["available"], "reason": inner.get("reason") or state.get("reason"), "private_mount_namespace": True, "readonly_scope": "restart" if args.mode == "readonly" else None, "old_detail_query_after_writable_restart": args.mode == "readonly"}
+        result = {"runtime_fault_visible": runtime_fault_visible, "recovery_loss_signal": recovered_gap, "result": "passed", "mode": args.mode, "errno": failure_errno, "volume_bytes": fs.f_blocks * fs.f_frsize, "external_fill_bytes": written, "host_uid": user.pw_uid, "model_statuses": [200, 200, 200, 200], "discovery_requests": 1, "discovery_saved": False, "upstream_received": len(received), "upstream_invalid": sum(not entry for entry in received), "saved_records": records["total"], "old_detail_preserved": True, "capture_available": state["available"], "reason": inner.get("reason") or state.get("reason"), "private_mount_namespace": True, "readonly_scope": "restart" if args.mode == "readonly" else None, "old_detail_query_after_writable_restart": args.mode == "readonly"}
         # 新增证据仅为布尔摘要；不附公开响应全文、模型输入、认证材料或宿主日志。
         result.update({"gap_alerts_visible": True, "gap_fault_active_before_ack": True, "gap_fault_active_after_ack": True, "gap_ack_contract_valid": True, "gap_ack_succeeded": ack_code == 200, "gap_recovery_history_or_uncertainty_visible": recovered_gap, "model_input_unchanged_after_repair": True, "capture_resumed_after_repair": capture_resumed, "partial_tail_not_silently_repaired": not capture_resumed})
         if args.mode == "enospc":

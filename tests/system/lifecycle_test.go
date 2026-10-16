@@ -32,7 +32,7 @@ func lifecycleWrite(t *testing.T, h *instance, path string, payload any) {
 // lifecycleSubmit 发出末尾为 marker 的合成请求；key 选择客户端身份，返回模型状态，网络错误终止测试。
 func lifecycleSubmit(t *testing.T, h *instance, key, marker string) int {
 	t.Helper()
-	body, err := json.Marshal(map[string]any{"model": "not-a-real-model", "messages": []map[string]string{{"role": "user", "content": marker}}})
+	body, err := json.Marshal(map[string]any{"model": "audit-test-model", "messages": []map[string]string{{"role": "user", "content": marker}}})
 	if err != nil {
 		t.Fatal("合成提交编码失败")
 	}
@@ -43,7 +43,7 @@ func lifecycleSubmit(t *testing.T, h *instance, key, marker string) int {
 // lifecycleRecords 读取公开分页结果；objectID 可为空，返回匹配记录和总数，接口异常终止测试。
 func lifecycleRecords(t *testing.T, h *instance, objectID string) ([]savedRecord, int) {
 	t.Helper()
-	code, raw := h.request(t, "GET", api+"/records?limit=100&object_id="+url.QueryEscape(objectID), adminKey, nil)
+	code, raw := h.search(t, adminKey, map[string]any{"limit": 100, "object_id": objectID})
 	var list struct {
 		Records []savedRecord `json:"records"`
 		Total   int           `json:"total"`
@@ -150,51 +150,37 @@ func lifecycleKeys(t *testing.T, h *instance, keys []string) {
 	}
 }
 
-// TestIdentityUnavailableKeepsHistoryWithoutGuessing 验证身份seed不可用时不猜测Key归属，既有名称和历史仍可读取。
+// TestIdentityUnavailableKeepsHistoryWithoutGuessing 验证已加载种子的外部权限故障导致停采，已保存历史与名称仍可读。
 func TestIdentityUnavailableKeepsHistoryWithoutGuessing(t *testing.T) {
 	h := startHost(t, 1<<30, true, "")
 	h.monitorAll(t)
-	marker := fmt.Sprintf("LIFECYCLE-UNAVAILABLE-%d-", time.Now().UnixNano())
+	marker := fmt.Sprintf("LIFECYCLE-SEED-FAULT-%d-", time.Now().UnixNano())
 	modelCode := lifecycleSubmit(t, h, keyA, marker+"before")
 	before := lifecycleSaved(t, h, marker+"before")
-	seedPath := filepath.Join(h.dir, "audit", "identity.seed")
-	if _, err := os.Stat(seedPath); err != nil {
-		t.Fatal("合成seed不存在")
-	}
+	seedPath := filepath.Join(h.stateDir, "caller-scope-v1.seed")
 	if err := os.Chmod(seedPath, 0644); err != nil {
-		t.Fatal("合成seed权限故障设置失败")
+		t.Fatal("合成种子权限故障设置失败")
 	}
-	code, raw := h.request(t, "GET", api+"/objects", adminKey, nil)
-	var catalog struct {
-		Available bool              `json:"available"`
-		Objects   []lifecycleObject `json:"objects"`
+	if lifecycleSubmit(t, h, keyB, marker+"must-not-save") != modelCode {
+		t.Fatal("种子权限故障改变模型调用")
 	}
-	if code != 200 || json.Unmarshal(raw, &catalog) != nil || catalog.Available {
-		t.Fatal("身份不可用未明确展示或历史入口不可用")
-	}
-	found := false
-	for _, object := range catalog.Objects {
-		if object.ID == before.ObjectID {
-			found = object.Name == before.Name && object.HasHistory && !object.Valid
-		}
-	}
-	if !found {
-		t.Fatal("无法可靠映射时丢失旧对象历史或把它误当有效Key")
-	}
-	if lifecycleSubmit(t, h, keyB, marker+"must-not-map") != modelCode {
-		t.Fatal("身份故障改变模型调用")
-	}
+	waitBudgetState(t, h, func(state budgetState) bool {
+		return state.State == "paused" && state.Reason == "storage_error" && state.Queued == 0
+	})
 	if _, total := lifecycleRecords(t, h, ""); total != 1 {
-		t.Fatal("身份不可用时猜测为其他对象")
+		t.Fatal("种子权限故障后仍保存新记录")
 	}
-	if old := lifecycleSaved(t, h, marker+"before"); old.ID != before.ID {
-		t.Fatal("身份故障删除旧历史")
+	if old := lifecycleSaved(t, h, marker+"before"); old.ID != before.ID || old.ObjectID != before.ObjectID || old.Name != before.Name {
+		t.Fatal("种子故障改变了已保存历史关联")
 	}
 }
 
 // TestLifecyclePrivacyWhitelist 验证生命周期新增持久配置、诊断和管理输出不含原Key/特征片段，输入记录白名单不扩大。
 func TestLifecyclePrivacyWhitelist(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if respondDiscovery(w, r) {
+			return
+		}
 		_, _ = io.Copy(io.Discard, r.Body)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"id":"synthetic-privacy","choices":[{"index":0,"message":{"role":"assistant","content":"ok"}}]}`)
@@ -215,8 +201,8 @@ func TestLifecyclePrivacyWhitelist(t *testing.T) {
 	stateDir := filepath.Join(h.dir, "audit")
 	h = startHost(t, 1<<30, true, upstream.URL, stateDir)
 	forbidden := []string{keyA, keyB, adminKey, "synthetic-upstream-only", "client-audit-a-only", "client-audit-b-only", "upstream-only"}
-	for _, path := range []string{"/objects", "/status", "/records", "/detail?id=" + before.ID} {
-		code, raw := h.request(t, "GET", api+path, adminKey, nil)
+	for _, path := range []string{"/objects", "/status", "/records/search", "/detail?id=" + before.ID} {
+		code, raw := managementRead(t, h, path, adminKey)
 		if code != 200 {
 			t.Fatal("生命周期隐私查询不可用")
 		}
@@ -282,6 +268,7 @@ func TestLifecycleStableIdentityAcrossHostChanges(t *testing.T) {
 	b := lifecycleSaved(t, h, marker+"b0")
 	const keyC = "synthetic-client-audit-c-lifecycle-only"
 	lifecycleKeys(t, h, []string{keyB, keyC, keyA, keyA})
+	lifecycleSubmit(t, h, keyC, marker+"discover-c")
 	objects := lifecycleObjects(t, h)
 	if len(objects) != 3 {
 		t.Fatal("相同值 Key 产生重复审计对象或插入没有生效")
@@ -433,8 +420,8 @@ func TestAmbiguousObjectConfigurationStopsCapture(t *testing.T) {
 	}
 	lifecycleSubmit(t, h, keyA, fmt.Sprintf("LIFECYCLE-INVALID-CONFIG-%d", time.Now().UnixNano()))
 	log, err := os.ReadFile(filepath.Join(h.dir, "host.log"))
-	if err != nil || !bytes.Contains(log, []byte("input audit preparation unavailable")) {
-		t.Fatal("未知配置被误解释为预期未监控跳过")
+	if err != nil || bytes.Contains(log, []byte("LIFECYCLE-INVALID-CONFIG")) {
+		t.Fatal("损坏配置的诊断泄漏了输入")
 	}
 	body, _ := json.Marshal(map[string]string{"object_id": ids[0], "name": "不应覆盖旧配置"})
 	code, _ := h.request(t, "POST", api+"/monitor", adminKey, body)
@@ -444,38 +431,6 @@ func TestAmbiguousObjectConfigurationStopsCapture(t *testing.T) {
 	after, err := os.ReadFile(configPath)
 	if err != nil || string(after) != string(data) {
 		t.Fatal("失败的配置更新改写了原文件")
-	}
-}
-
-// TestInvalidKeyKeepsHistoricalCatalog 验证 Key 退出宿主名单后仍有历史筛选和改名入口，不能重新启用无效 Key。
-func TestInvalidKeyKeepsHistoricalCatalog(t *testing.T) {
-	h := startHost(t, 1<<30, true, "")
-	h.monitorAll(t)
-	marker := fmt.Sprintf("LIFECYCLE-CATALOG-%d", time.Now().UnixNano())
-	lifecycleSubmit(t, h, keyA, marker)
-	record := lifecycleSaved(t, h, marker)
-	lifecycleWrite(t, h, "/remove", map[string]string{"object_id": record.ObjectID})
-	lifecycleKeys(t, h, []string{keyB})
-	found := false
-	for _, object := range lifecycleObjects(t, h) {
-		if object.ID == record.ObjectID {
-			found = true
-			if object.Valid || object.Monitored || !object.HasHistory || object.Name != record.Name {
-				t.Fatal("旧对象目录没有区分无效 Key、停用和历史")
-			}
-		}
-	}
-	if !found {
-		t.Fatal("Key 失效后旧对象从历史目录消失")
-	}
-	lifecycleWrite(t, h, "/rename", map[string]string{"object_id": record.ObjectID, "name": "失效 Key 历史名称"})
-	body, _ := json.Marshal(map[string]string{"object_id": record.ObjectID, "name": "不应重新启用"})
-	code, _ := h.request(t, "POST", api+"/monitor", adminKey, body)
-	if code != 400 {
-		t.Fatal("无效客户端 Key 被重新启用")
-	}
-	if records, total := lifecycleRecords(t, h, record.ObjectID); total != 1 || len(records) != 1 || records[0].Name != "失效 Key 历史名称" {
-		t.Fatal("旧对象无法筛选历史或显示当前名称")
 	}
 }
 
@@ -498,7 +453,7 @@ func TestObjectFilterAndRenameKeepIndependentHistory(t *testing.T) {
 	lifecycleSaved(t, h, marker+"a2")
 	lifecycleSubmit(t, h, keyB, marker+"b2")
 	lifecycleSaved(t, h, marker+"b2")
-	code, raw := h.request(t, "GET", api+"/records?limit=1&offset=1&object_id="+a.ObjectID, adminKey, nil)
+	code, raw := h.search(t, adminKey, map[string]any{"limit": 1, "offset": 1, "object_id": a.ObjectID})
 	var list struct {
 		Records []savedRecord `json:"records"`
 		Total   int           `json:"total"`

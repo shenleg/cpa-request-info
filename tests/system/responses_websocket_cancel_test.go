@@ -1,3 +1,6 @@
+//go:build legacy_patched
+
+// 历史私有原帧接收与取消契约；当前明确排除所有 WebSocket，替代用例为 TestOfficialWebsocketExcluded。
 // 本文件以真实上游屏障验证帧接收时快照、客户端取消/断开和已接收输入不依赖模型完成。
 package system
 
@@ -5,14 +8,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/gorilla/websocket"
 	"io"
 	"maps"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
-
-	"github.com/gorilla/websocket"
 )
 
 // TestResponsesWebsocketIncompleteFrame 验证完整JSON前缀若没有WebSocket消息终帧，只报告读取缺口而不保存正文。

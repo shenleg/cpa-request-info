@@ -55,27 +55,6 @@ func (a *App) pendingFaultLocked(reason string) {
 	a.pendingAlerts.Items = append(a.pendingAlerts.Items, audit.GapSummary{Reason: reason, FirstObservedAt: &at, LastObservedAt: at, CountAccuracy: "unknown", CountUnit: "unknown", Active: true, HistoryRetained: true, Unread: true})
 }
 
-// pendingBridgeLocked 将没有采集器期间的宿主累计转换成有界增量；发现时刻不冒充损失时段。
-func (a *App) pendingBridgeLocked(total uint64) {
-	if total <= a.pendingBridgeFailures {
-		return
-	}
-	a.pendingBridgeFailures = total
-	at := time.Now().UTC().Format(time.RFC3339Nano)
-	a.pendingAlerts.Revision++
-	a.pendingAlerts.Unread = true
-	for i := range a.pendingAlerts.Items {
-		item := &a.pendingAlerts.Items[i]
-		if item.Reason != "observer_unavailable" {
-			continue
-		}
-		// 尚不能读取实际保留策略，不能把全运行期累计当作保留期内精确次数。
-		item.AffectedCount, item.CountAccuracy, item.LastObservedAt, item.Unread = nil, "unknown", at, true
-		return
-	}
-	a.pendingAlerts.Items = append(a.pendingAlerts.Items, audit.GapSummary{Reason: "observer_unavailable", FirstObservedAt: &at, LastObservedAt: at, AffectedCount: nil, CountAccuracy: "unknown", CountUnit: "bridge_failures", HistoryRetained: true, Unread: true})
-}
-
 // importPendingLocked 仅在成功取得采集器时移交运行证据；确认不能让不可写期间变成完整历史。
 func (a *App) importPendingLocked() {
 	for _, item := range a.pendingAlerts.Items {
@@ -88,7 +67,6 @@ func (a *App) importPendingLocked() {
 		}
 		a.collector.ReportPastFault(item.Reason, first, item.LastObservedAt, !item.Unread)
 	}
-	a.collector.RestoreBridgeBaseline(a.pendingBridgeFailures)
 	a.pendingAlerts = audit.GapAlerts{}
 	a.pendingReason = ""
 }

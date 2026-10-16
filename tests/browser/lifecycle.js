@@ -36,6 +36,12 @@ module.exports = async (page, options = {}) => {
     assert(response.status()===200,'生命周期受保护查询失败');
     return response.json();
   }
+  /** 通过 POST 查询 filter 指定的已保存记录；返回 JSON，鉴权或读取失败抛错，不把关键词放进 URL。 */
+  async function search(filter) {
+    const response=await page.request.post(api+'/records/search',{headers:{Authorization:'Bearer '+admin},data:filter});
+    assert(response.status()===200,'生命周期记录查询失败');
+    return response.json();
+  }
   /** 执行页面写操作并等待成功提示；button 为控件、path 为公开路由、message 为完成状态，失败抛错。 */
   async function action(button,path,message) {
     const saved = page.waitForResponse(response=>response.url().endsWith('/request-input-audit'+path)&&response.request().method()==='POST');
@@ -52,7 +58,7 @@ module.exports = async (page, options = {}) => {
   async function saved(suffix) {
     const deadline=Date.now()+savedDeadlineMs;
     while(Date.now()<deadline) {
-      const list=await read('/records?limit=100');
+      const list=await search({q:marker,limit:100});
       const record=list.records.find(record=>record.preview===marker+suffix);
       if(record) {
         const detail=await read('/detail?id='+encodeURIComponent(record.id));
@@ -74,7 +80,7 @@ module.exports = async (page, options = {}) => {
   /** 核对本轮输入确实跳过且缺口没有变化；suffix 为提交标记、before 为基准状态，失败抛错，无返回。 */
   async function skipped(suffix,before) {
     const after=await drained();
-    const list=await read('/records?limit=100');
+    const list=await search({q:marker,limit:100});
     assert(after.saved===before.saved&&!list.records.some(record=>record.preview===marker+suffix),'主动暂停或移除仍产生新副本');
     assert(JSON.stringify(after.gaps)===JSON.stringify(before.gaps),'预期跳过被错误计为缺口');
   }
@@ -122,7 +128,7 @@ module.exports = async (page, options = {}) => {
   const removedState=await drained();
   await submit(clientKeys[0],'removed-skip');
   await skipped('removed-skip',removedState);
-  const removedHistory=await read('/records?limit=100&object_id='+encodeURIComponent(before.object_id));
+  const removedHistory=await search({object_id:before.object_id,q:marker,limit:100});
   assert(removedHistory.records.some(record=>record.id===before.id)&&removedHistory.records.every(record=>record.object_id===before.object_id),'移除对象的历史入口或筛选失效');
   await frame.locator('#open-objects').click();
   await action('选择并命名','/monitor','监控配置已保存');

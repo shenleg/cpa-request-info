@@ -115,6 +115,9 @@ func TestQueueFullPreservesUpstreamAndDrains(t *testing.T) {
 	upstreamSeen := make([]bool, maxRequests)
 	var upstreamCount, upstreamInvalid int
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if respondDiscovery(w, r) {
+			return
+		}
 		// 上游只保留合成期望的摘要和接收计数；正文仅在本次校验时借用，不写日志或记录真实输入。
 		raw, err := io.ReadAll(io.LimitReader(r.Body, 128<<10))
 		var payload struct {
@@ -183,7 +186,7 @@ func TestQueueFullPreservesUpstreamAndDrains(t *testing.T) {
 			peakQueued = snapshot.State.Queued
 		}
 		if snapshot.State.Queued > 0 && !queueNotSaved {
-			code, raw, err := queuePressureHTTP(adminClient, h, "GET", api+"/records?limit=1", adminKey, nil)
+			code, raw, err := queuePressureHTTP(adminClient, h, "POST", api+"/records/search", adminKey, []byte(`{"limit":1}`))
 			var list struct {
 				Total int64 `json:"total"`
 			}
@@ -297,7 +300,7 @@ func TestQueueFullPreservesUpstreamAndDrains(t *testing.T) {
 	seenIDs := make(map[string]bool)
 	seenInputs := make(map[int]bool)
 	for offset := 0; int64(offset) < final.State.Saved; {
-		code, raw, err := queuePressureHTTP(adminClient, h, "GET", fmt.Sprintf("%s/records?offset=%d&limit=100", api, offset), adminKey, nil)
+		code, raw, err := queuePressureHTTP(adminClient, h, "POST", api+"/records/search", adminKey, []byte(fmt.Sprintf(`{"offset":%d,"limit":100}`, offset)))
 		var list struct {
 			Total   int64         `json:"total"`
 			Records []savedRecord `json:"records"`
