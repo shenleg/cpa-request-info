@@ -294,7 +294,11 @@ func (c *Collector) Observe(event Event) {
 			return
 		}
 		if event.Protocol == "anthropic-messages" {
-			text, truncated, incomplete = anthropicContent(last["content"], event.Snapshot.MaxTextBytes)
+			var skip bool
+			text, truncated, incomplete, skip = anthropicUserContent(messages, event.Snapshot.MaxTextBytes)
+			if skip {
+				return
+			}
 		} else {
 			text, truncated, incomplete = chatContent(last["content"], event.Snapshot.MaxTextBytes)
 		}

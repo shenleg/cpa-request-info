@@ -134,5 +134,61 @@ module.exports = async (page, options) => {
     assert(external.length===0,'搜索内容触发外部请求');
   } finally {page.off('request',onRequest);}
   const layout=await verifyLayout(page,{keyword:marker,recordId:target.id,text});
-  return {intersection:true,pagination:true,filterReset:true,singleDetail:true,contentFlags:true,plainText:true,externalRequests:0,layout};
+  // 独立标记在原25条分页和布局验收后提交，避免新增样本改变已约定计数。
+  const clientMarker='BROWSER-CLIENT-FILTER-'+Date.now()+'-';
+  const real=clientMarker+'REAL 正常正文';
+  const skill='Base directory for this skill: /synthetic/path\n\n'+clientMarker+'AUX-SKILL\nFollow this workflow.';
+  const reminder='<system-reminder>\n'+clientMarker+'AUX-REMINDER\n</system-reminder>';
+  const tool={type:'tool_result',tool_use_id:'synthetic-browser-tool',content:clientMarker+'AUX-TOOL'};
+  /** 经真实 Messages 路由提交末尾 content；失败抛固定错误，成功无返回值，不把样本写入 URL。 */
+  async function submitAnthropic(content) {
+    const response=await page.request.post(origin+'/v1/messages',{
+      headers:{Authorization:'Bearer '+clientA},
+      data:{model:'audit-test-model',max_tokens:32,messages:[{role:'user',content:clientMarker+'AUX-HISTORY'},{role:'user',content}]}
+    });
+    assert(response.status()===200,'客户端过滤浏览器 Messages 提交失败');
+  }
+  for (const content of [
+    '[SUGGESTION MODE: Suggest what the user might naturally type next into Claude Code.]\n\nFIRST: Look at the user\'s recent messages and original request.\n\nYour job is to predict what THEY would type - not what you think they should do.\n\n'+clientMarker+'AUX-SUGGESTION\nFormat: 2-12 words, match the user\'s style. Or nothing.\n\nReply with ONLY the suggestion, no quotes or explanation.',
+    'Describe your most recent action in 3-5 words using present tense (-ing). Name the file or function, not the branch. Do not use tools.\n\nGood: Updating parser.go tests\nBad (past tense): Updated parser.go tests\n\n'+clientMarker+'AUX-ACTION',
+    '<session>\n'+clientMarker+'AUX-SESSION\n</session>\n\nWrite the title in Chinese. Keep technical terms and code identifiers in their original form.',
+    '<transcript>\n{"user":"'+clientMarker+'AUX-TRANSCRIPT"}{"Agent":"'+clientMarker+'AUX-AGENT"}\n</transcript>\n附加说明：判断工具调用权限。',
+    [tool,{type:'text',text:skill}],
+    [{type:'text',text:reminder}]
+  ]) await submitAnthropic(content);
+  await submitAnthropic([
+    tool,{type:'text',text:skill},{type:'text',text:reminder},
+    {type:'text',text:'<ide_opened_file>\nThe user opened /synthetic/'+clientMarker+'AUX-IDE.go in the IDE.\n</ide_opened_file>'},
+    {type:'text',text:real}
+  ]);
+  // 最后正常正文的保存是同队列FIFO屏障，不用固定等待推断辅助请求已跳过。
+  let filtered;
+  const clientDeadline=Date.now()+10000;
+  while (Date.now()<clientDeadline) {
+    filtered=await search({q:real,limit:100});
+    if (filtered.total===1) break;
+  }
+  assert(filtered.total===1,'客户端过滤的本轮正常正文未保存');
+  filtered=await search({q:clientMarker,limit:100});
+  assert(filtered.total===1 && filtered.records.length===1 && filtered.records[0].protocol==='anthropic-messages' && !filtered.records[0].truncated && !filtered.records[0].extraction_incomplete,'辅助请求被保存或正常正文状态错误');
+  const filteredDetail=await read('/detail?id='+encodeURIComponent(filtered.records[0].id));
+  assert(filteredDetail.text===real,'过滤后的 API 详情含客户端附加内容');
+  assert((await search({q:clientMarker+'AUX-'})).total===0,'客户端辅助内容仍可经 API 检索');
+  const resetClientFilters=page.waitForResponse(r=>r.url()===api+'/records/search'&&r.request().method()==='POST'&&!r.request().postDataJSON().q);
+  await frame.getByRole('button',{name:'清空筛选',exact:true}).click();
+  assert((await resetClientFilters).status()===200,'客户端过滤页面清空条件失败');
+  await frame.getByRole('textbox',{name:'正文关键词',exact:true}).fill(clientMarker);
+  let clientResult=await apply();
+  assert(clientResult.total===1 && clientResult.records[0].id===filtered.records[0].id,'页面搜索未仅显示正常正文');
+  const clientRow=frame.locator('#records tbody tr').filter({hasText:real});
+  await clientRow.getByRole('cell',{name:'Anthropic Messages',exact:true}).waitFor();
+  await clientRow.getByRole('button',{name:'查看',exact:true}).click();
+  await page.waitForFunction(expected=>document.querySelector('iframe[title="输入审计"]').contentDocument.querySelector('#detail').textContent===expected,real);
+  assert(await frame.locator('#detail').textContent()===real,'页面详情未精确保留正常正文');
+  await frame.locator('#close-detail').click();
+  await frame.getByRole('textbox',{name:'正文关键词',exact:true}).fill(clientMarker+'AUX-');
+  clientResult=await apply();
+  assert(clientResult.total===0,'页面仍能搜索客户端辅助关键词');
+  await frame.locator('#empty').waitFor();
+  return {intersection:true,pagination:true,filterReset:true,singleDetail:true,contentFlags:true,plainText:true,clientInputFiltering:true,externalRequests:0,layout};
 };
