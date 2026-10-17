@@ -369,7 +369,8 @@ func eachRecord(file io.Reader, limit int64, visit func(Record, int64) error) er
 		// 原始字段只用于区分旧记录缺省与新字段的 null/空值；未知字段仍由严格解码拒绝。
 		var stored struct {
 			Record
-			Purpose json.RawMessage `json:"purpose"`
+			Purpose          json.RawMessage `json:"purpose"`
+			RequestReasoning json.RawMessage `json:"request_reasoning"`
 		}
 		decoder := json.NewDecoder(bytes.NewReader(line))
 		decoder.DisallowUnknownFields()
@@ -379,6 +380,13 @@ func eachRecord(file io.Reader, limit int64, visit func(Record, int64) error) er
 		record := stored.Record
 		if stored.Purpose != nil {
 			if json.Unmarshal(stored.Purpose, &record.Purpose) != nil || (record.Purpose != PurposeMain && record.Purpose != PurposeTurn && record.Purpose != PurposeUnknown) {
+				return errors.New("invalid_record")
+			}
+		}
+		if stored.RequestReasoning != nil {
+			var err error
+			record.RequestReasoning, err = storedReasoning(stored.RequestReasoning)
+			if err != nil {
 				return errors.New("invalid_record")
 			}
 		}

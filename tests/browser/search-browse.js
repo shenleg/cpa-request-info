@@ -43,16 +43,16 @@ module.exports = async (page, options) => {
     const response = await page.request.post(api+'/monitor',{headers,data:{object_id:object.id,name}});
     assert(response.status()===200,'搜索验收监控配置失败');
   }
-  /** 提交本轮文本；key/model 指定身份与模型，content 是消息，purposeHeaders 是合成用途头；异常状态抛错，无返回值。 */
-  async function submit(key, model, content, purposeHeaders={}) {
-    const response = await page.request.post(origin+'/v1/chat/completions',{headers:{Authorization:'Bearer '+key,...purposeHeaders},data:{model,messages:[{role:'user',content}]}});
+  /** 提交本轮文本；key/model 指定身份与模型，content 是消息，purposeHeaders/reasoning 是合成请求设置；异常状态抛错，无返回值。 */
+  async function submit(key, model, content, purposeHeaders={}, reasoning={}) {
+    const response = await page.request.post(origin+'/v1/chat/completions',{headers:{Authorization:'Bearer '+key,...purposeHeaders},data:{model,messages:[{role:'user',content}],...reasoning}});
     assert(response.status()===200 || response.status()===400,'搜索验收模型提交失败');
   }
   const clientA='synthetic-client-audit-a-only', clientB='synthetic-client-audit-b-only';
   // 复用原分页样本验证用途，不增加场景或改变25条计数；这些是合成 HTTP 头，不是实际客户端发送证据。
   for (let i=0;i<22;i++) {
     const purposeHeaders=i===0 ? {'x-claude-code-request-class':'main'} : i===1 ? {'x-codex-turn-metadata':'{"request_kind":"turn"}'} : {};
-    await submit(clientA,'audit-test-model',marker+'ENTRY-'+String(i).padStart(2,'0'),purposeHeaders);
+    await submit(clientA,'audit-test-model',marker+'ENTRY-'+String(i).padStart(2,'0'),purposeHeaders,i===0?{reasoning_effort:'high'}:{});
   }
   const prefix=marker+'ENTRY-22 '+hostile;
   const text=prefix+'x'.repeat(65535-Buffer.byteLength(prefix));
@@ -74,13 +74,17 @@ module.exports = async (page, options) => {
   const targetDetail=await read('/detail?id='+encodeURIComponent(target.id));
   assert(targetDetail.id===target.id && targetDetail.purpose===target.purpose,'未知用途列表与详情不一致');
   await frame.getByRole('button',{name:'刷新已保存记录',exact:true}).click();
+  await page.waitForFunction(()=>!document.querySelector('iframe[title="输入审计"]').contentDocument.querySelector('#refresh').disabled);
+  const availableModels=(await read('/models')).models;
+  assert(availableModels.includes('audit-test-model') && availableModels.includes('audit-test-other-model') && JSON.stringify(availableModels)===JSON.stringify([...new Set(availableModels)].sort()),'模型集合不是全部已保存模型的排序去重结果');
+  assert(JSON.stringify(await frame.locator('#model-filter option').evaluateAll(options=>options.map(option=>option.value)))===JSON.stringify(['',...availableModels]),'模型下拉选项没有保留原始模型名与全部模型空值');
   const external=[];
   const onRequest=request=>{if(new URL(request.url()).origin!==origin)external.push(true);};
   page.on('request',onRequest);
-  /** 用当前输入应用筛选；返回公开查询结果并等待刷新完成，失败抛错，不保存数据。 */
-  async function apply() {
+  /** 点击 selector 查询（默认应用筛选）；返回公开结果并等待刷新完成，失败抛错，不保存数据。 */
+  async function apply(selector='#apply-filters') {
     const pending=page.waitForResponse(r=>r.url()===api+'/records/search'&&r.request().method()==='POST');
-    await frame.getByRole('button',{name:'应用筛选',exact:true}).click();
+    await frame.locator(selector).click();
     const response=await pending;
     assert(response.status()===200,'页面筛选查询失败');
     await frame.getByRole('button',{name:'应用筛选',exact:true}).waitFor({state:'visible'});
@@ -97,7 +101,10 @@ module.exports = async (page, options) => {
     const record=result.records[0];
     const detail=await read('/detail?id='+encodeURIComponent(record.id));
     assert(detail.id===record.id && detail.purpose===purpose,'用途详情与列表不一致');
+    const expectedReasoning=purpose==='main'?{effort:'high'}:{};
+    assert(JSON.stringify(record.request_reasoning)===JSON.stringify(expectedReasoning) && JSON.stringify(detail.request_reasoning)===JSON.stringify(expectedReasoning),'请求思考字段列表与详情不一致');
     const purposeRow=frame.locator('#records tbody tr').filter({hasText:record.preview});
+    await purposeRow.locator('.reasoning').filter({hasText:purpose==='main'?'effort=high':'未指定'}).waitFor();
     await purposeRow.locator('.flags .badge').filter({hasText:label}).waitFor();
     await purposeRow.getByRole('button',{name:'查看',exact:true}).click();
     await frame.locator('#detail-meta').filter({hasText:label}).waitFor();
@@ -110,10 +117,27 @@ module.exports = async (page, options) => {
     const localTime=ms=>page.evaluate(value=>{const date=new Date(value);return new Date(value-date.getTimezoneOffset()*60000).toISOString().slice(0,19);},ms);
     await frame.locator('#from-filter').fill(await localTime(started));
     await frame.locator('#to-filter').fill(await localTime(Date.now()+5000));
-    await frame.getByRole('textbox',{name:'执行输入模型筛选',exact:true}).fill('audit-test-model');
+    await frame.getByRole('combobox',{name:'执行输入模型筛选',exact:true}).selectOption('audit-test-model');
     await frame.getByRole('textbox',{name:'正文关键词',exact:true}).fill(marker);
     let result=await apply();
     assert(result.total===23 && result.records.length===20,'四条件交集或第一页错误');
+    assert(JSON.stringify(await frame.locator('#model-filter option').evaluateAll(options=>options.map(option=>option.value)))===JSON.stringify(['',...availableModels]),'模型选项随关键词、分页或对象条件缩减');
+    await frame.getByRole('combobox',{name:'执行输入模型筛选',exact:true}).selectOption('audit-test-other-model');
+    result=await apply('#refresh');
+    assert(result.total===23 && await frame.locator('#model-filter').inputValue()==='audit-test-other-model','刷新丢失模型草稿或把草稿当作已应用条件');
+    let modelMode='missing';
+    /** 模拟模型过期与加载失败；route 为模型请求，无返回值，处理失败抛错，不改变记录查询。 */
+    const modelOptions=route=>route.fulfill({status:modelMode==='failure'?503:200,json:modelMode==='failure'?{error:'synthetic_models_failure'}:{models:availableModels.filter(model=>model!=='audit-test-model')}});
+    await page.route(api+'/models',modelOptions);
+    try {
+      result=await apply('#refresh');
+      assert(result.total===23 && await frame.locator('#model-filter').inputValue()==='audit-test-other-model','已应用模型消失时被悄悄改为全部或覆盖草稿');
+      await frame.locator('#model-filter option[value="audit-test-model"]').filter({hasText:'当前无记录'}).waitFor({state:'attached'});
+      modelMode='failure';result=await apply('#refresh');
+      await frame.locator('#models-state').filter({hasText:'模型加载失败'}).filter({hasText:'当前模型集合未知'}).waitFor();
+      assert(result.total===23 && await frame.locator('#model-filter').inputValue()==='audit-test-other-model','模型加载失败时丢失已应用条件或草稿');
+    } finally {await page.unroute(api+'/models',modelOptions);}
+    await frame.getByRole('combobox',{name:'执行输入模型筛选',exact:true}).selectOption('audit-test-model');
     await frame.locator('#page').filter({hasText:'第 1 页；匹配 23 条'}).waitFor();
     const row=frame.locator('#records tbody tr').filter({hasText:marker+'ENTRY-22'});
     await row.locator('.flags .badge').filter({hasText:'已截断'}).waitFor();

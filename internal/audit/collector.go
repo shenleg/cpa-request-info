@@ -24,8 +24,8 @@ const (
 	maxLine              = 512 << 10
 	segmentSize    int64 = 1 << 20
 	maxQueuedBytes int64 = 8 << 20
-	// 64 位平台的七个字符串头、bool 对齐和队列字节计数共128字节。
-	queuedRecordOverhead = 128
+	// 64 位平台的记录及队列计数136字节，另计思考对象40字节及可选预算8字节。
+	queuedRecordOverhead = 184
 	// 配置最多 1024 个对象、单份不足 512 KiB；预留两份原子替换峰值及目录/锁块空间。
 	auxiliaryReserve int64 = 1 << 20
 )
@@ -45,16 +45,18 @@ type Event struct {
 
 // Record 是唯一允许持久化及查询的输入白名单；名称由管理层从已知对象目录关联。
 // Purpose 只保存 main、turn、unknown；旧记录缺省时为空，不推断或补写历史用途。
+// RequestReasoning 只描述 Before 请求声明；新空对象为未指定，旧 nil 为未记录。
 type Record struct {
-	ID                   string         `json:"id"`
-	ObjectID             string         `json:"object_id"`
-	ReceivedAt           string         `json:"received_at"`
-	Protocol             string         `json:"protocol"`
-	Purpose              RequestPurpose `json:"purpose,omitempty"`
-	Model                string         `json:"model"`
-	Text                 string         `json:"text"`
-	Truncated            bool           `json:"truncated"`
-	ExtractionIncomplete bool           `json:"extraction_incomplete,omitempty"`
+	ID                   string            `json:"id"`
+	ObjectID             string            `json:"object_id"`
+	ReceivedAt           string            `json:"received_at"`
+	Protocol             string            `json:"protocol"`
+	Purpose              RequestPurpose    `json:"purpose,omitempty"`
+	Model                string            `json:"model"`
+	RequestReasoning     *RequestReasoning `json:"request_reasoning,omitempty"`
+	Text                 string            `json:"text"`
+	Truncated            bool              `json:"truncated"`
+	ExtractionIncomplete bool              `json:"extraction_incomplete,omitempty"`
 }
 
 // Recovery 描述启动发现的不确定损失；发现时刻不是损失时段，未知数量与边界始终以 null 输出。
@@ -330,9 +332,14 @@ func (c *Collector) Observe(event Event) {
 		c.gap("metadata_too_large")
 		return
 	}
+	reasoning, err := requestReasoning(event.Protocol, request)
+	if err != nil {
+		c.gap(err.Error())
+		return
+	}
 	// Clone 切断与解析出的巨大字符串/原正文的关系，队列只保留受限白名单副本。
-	record := Record{ID: strings.Clone(event.ID), ObjectID: strings.Clone(event.ObjectID), ReceivedAt: strings.Clone(event.ReceivedAt), Protocol: strings.Clone(event.Protocol), Purpose: event.Purpose, Model: strings.Clone(model), Text: strings.Clone(text), Truncated: truncated, ExtractionIncomplete: incomplete}
-	size := int64(len(record.ID) + len(record.ObjectID) + len(record.ReceivedAt) + len(record.Protocol) + len(record.Purpose) + len(record.Model) + len(record.Text) + queuedRecordOverhead)
+	record := Record{ID: strings.Clone(event.ID), ObjectID: strings.Clone(event.ObjectID), ReceivedAt: strings.Clone(event.ReceivedAt), Protocol: strings.Clone(event.Protocol), Purpose: event.Purpose, Model: strings.Clone(model), RequestReasoning: reasoning, Text: strings.Clone(text), Truncated: truncated, ExtractionIncomplete: incomplete}
+	size := int64(len(record.ID) + len(record.ObjectID) + len(record.ReceivedAt) + len(record.Protocol) + len(record.Purpose) + len(record.Model) + len(record.Text) + len(reasoning.Effort) + len(reasoning.Type) + queuedRecordOverhead)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed || c.status.State != "active" {

@@ -12,10 +12,10 @@ func TestRequestPurposeQueueBytes(t *testing.T) {
 		purpose RequestPurpose
 		bytes   int64
 	}{
-		// 固定夹具有99字节字符串载荷和128字节结构开销；用途另加4或7字节。
-		{PurposeMain, 231},
-		{PurposeTurn, 231},
-		{PurposeUnknown, 234},
+		// 固定夹具有99字节字符串载荷和184字节结构/思考对象开销；用途另加4或7字节。
+		{PurposeMain, 287},
+		{PurposeTurn, 287},
+		{PurposeUnknown, 290},
 	} {
 		t.Run(string(tc.purpose), func(t *testing.T) {
 			c := &Collector{

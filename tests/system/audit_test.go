@@ -263,16 +263,17 @@ func (h *instance) request(t *testing.T, method, path, key string, body []byte) 
 }
 
 type savedRecord struct {
-	ID                   string    `json:"id"`
-	ObjectID             string    `json:"object_id"`
-	Text                 string    `json:"text"`
-	Model                string    `json:"model"`
-	Name                 string    `json:"name"`
-	Protocol             string    `json:"protocol"`
-	Purpose              string    `json:"purpose"`
-	ReceivedAt           time.Time `json:"received_at"`
-	Truncated            bool      `json:"truncated"`
-	ExtractionIncomplete bool      `json:"extraction_incomplete"`
+	ID                   string          `json:"id"`
+	ObjectID             string          `json:"object_id"`
+	Text                 string          `json:"text"`
+	Model                string          `json:"model"`
+	Name                 string          `json:"name"`
+	Protocol             string          `json:"protocol"`
+	Purpose              string          `json:"purpose"`
+	RequestReasoning     json.RawMessage `json:"request_reasoning"`
+	ReceivedAt           time.Time       `json:"received_at"`
+	Truncated            bool            `json:"truncated"`
+	ExtractionIncomplete bool            `json:"extraction_incomplete"`
 }
 
 // monitorAll 通过受保护目录选择全部合成对象并命名，返回 ID；管理操作失败终止测试。

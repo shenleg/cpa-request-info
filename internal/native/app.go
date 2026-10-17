@@ -90,7 +90,7 @@ func (a *App) Handle(method string, raw []byte) (any, error) {
 		return struct {
 			Routes    []route    `json:"routes"`
 			Resources []resource `json:"resources"`
-		}{[]route{{"GET", "/plugins/request-input-audit/objects"}, {"POST", "/plugins/request-input-audit/monitor"}, {"POST", "/plugins/request-input-audit/remove"}, {"POST", "/plugins/request-input-audit/rename"}, {"POST", "/plugins/request-input-audit/pause"}, {"GET", "/plugins/request-input-audit/settings"}, {"POST", "/plugins/request-input-audit/settings"}, {"POST", "/plugins/request-input-audit/records/search"}, {"GET", "/plugins/request-input-audit/detail"}, {"GET", "/plugins/request-input-audit/status"}, {"POST", "/plugins/request-input-audit/gaps/acknowledge"}}, []resource{{"/index.html", "输入审计", "Chat Completions、Responses HTTP 与 Anthropic Messages 执行输入记录"}}}, nil
+		}{[]route{{"GET", "/plugins/request-input-audit/objects"}, {"GET", "/plugins/request-input-audit/models"}, {"POST", "/plugins/request-input-audit/monitor"}, {"POST", "/plugins/request-input-audit/remove"}, {"POST", "/plugins/request-input-audit/rename"}, {"POST", "/plugins/request-input-audit/pause"}, {"GET", "/plugins/request-input-audit/settings"}, {"POST", "/plugins/request-input-audit/settings"}, {"POST", "/plugins/request-input-audit/records/search"}, {"GET", "/plugins/request-input-audit/detail"}, {"GET", "/plugins/request-input-audit/status"}, {"POST", "/plugins/request-input-audit/gaps/acknowledge"}}, []resource{{"/index.html", "输入审计", "Chat Completions、Responses HTTP 与 Anthropic Messages 执行输入记录"}}}, nil
 	case "management.handle":
 		var req managementRequest
 		if err := json.Unmarshal(raw, &req); err != nil {
@@ -200,7 +200,7 @@ type managementRequest struct {
 func (a *App) management(req managementRequest) any {
 	path := strings.TrimPrefix(req.Path, "/v0/management")
 	allowed := map[string]string{
-		"/objects": "GET", "/monitor": "POST", "/remove": "POST", "/rename": "POST", "/pause": "POST",
+		"/objects": "GET", "/models": "GET", "/monitor": "POST", "/remove": "POST", "/rename": "POST", "/pause": "POST",
 		"/settings": "GET,POST", "/records/search": "POST", "/detail": "GET", "/status": "GET", "/gaps/acknowledge": "POST",
 	}
 	if strings.HasSuffix(path, "/index.html") {
@@ -382,6 +382,16 @@ func (a *App) management(req managementRequest) any {
 		}
 		return responseJSON(200, map[string]bool{"saved": true})
 	}
+	if strings.HasSuffix(req.Path, "/models") {
+		if len(req.Query) != 0 {
+			return responseJSON(400, map[string]string{"error": "invalid_query"})
+		}
+		models, err := c.Models()
+		if err != nil {
+			return responseJSON(503, map[string]string{"error": "storage_unavailable"})
+		}
+		return responseJSON(200, map[string]any{"models": models})
+	}
 	if strings.HasSuffix(req.Path, "/records/search") {
 		if len(req.Query) != 0 {
 			return responseJSON(400, map[string]string{"error": "invalid_query"})
@@ -404,7 +414,7 @@ func (a *App) management(req managementRequest) any {
 					preview = preview[:len(preview)-1]
 				}
 			}
-			items = append(items, map[string]any{"id": r.ID, "object_id": r.ObjectID, "name": names[r.ObjectID], "received_at": r.ReceivedAt, "protocol": r.Protocol, "model": r.Model, "purpose": r.Purpose, "truncated": r.Truncated, "extraction_incomplete": r.ExtractionIncomplete, "preview": preview})
+			items = append(items, map[string]any{"id": r.ID, "object_id": r.ObjectID, "name": names[r.ObjectID], "received_at": r.ReceivedAt, "protocol": r.Protocol, "model": r.Model, "request_reasoning": r.RequestReasoning, "purpose": r.Purpose, "truncated": r.Truncated, "extraction_incomplete": r.ExtractionIncomplete, "preview": preview})
 		}
 		return responseJSON(200, map[string]any{"records": items, "total": total, "offset": offset, "limit": limit})
 	}
@@ -417,7 +427,7 @@ func (a *App) management(req managementRequest) any {
 		if err != nil {
 			return responseJSON(404, map[string]string{"error": "not_found"})
 		}
-		return responseJSON(200, map[string]any{"id": r.ID, "object_id": r.ObjectID, "name": c.Monitors()[r.ObjectID], "received_at": r.ReceivedAt, "protocol": r.Protocol, "model": r.Model, "purpose": r.Purpose, "truncated": r.Truncated, "extraction_incomplete": r.ExtractionIncomplete, "text": r.Text})
+		return responseJSON(200, map[string]any{"id": r.ID, "object_id": r.ObjectID, "name": c.Monitors()[r.ObjectID], "received_at": r.ReceivedAt, "protocol": r.Protocol, "model": r.Model, "request_reasoning": r.RequestReasoning, "purpose": r.Purpose, "truncated": r.Truncated, "extraction_incomplete": r.ExtractionIncomplete, "text": r.Text})
 	}
 	return responseJSON(404, map[string]string{"error": "not_found"})
 }

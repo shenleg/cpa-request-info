@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// TestEmbeddedContentSecurityPolicy 验证用途标签等内联改动同步更新 CSP，不以 unsafe-inline 放宽页面执行权限。
+// TestEmbeddedContentSecurityPolicy 验证详情操作及筛选等内联改动同步更新 CSP，不以 unsafe-inline 放宽页面执行权限。
 func TestEmbeddedContentSecurityPolicy(t *testing.T) {
 	page, err := assets.ReadFile("assets/index.html")
 	if err != nil {

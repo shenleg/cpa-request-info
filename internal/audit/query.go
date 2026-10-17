@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -16,7 +17,7 @@ type recordLocation struct {
 	length       int64
 }
 
-// Query 指定已保存记录的交集条件；空字符串及 nil 时间表示不限制，时间包含两端，Model 精确匹配客户端请求名。
+// Query 指定已保存记录的交集条件；空字符串及 nil 时间表示不限制，时间包含两端，Model 精确匹配 Before 正文中的执行输入模型。
 // Keyword 只匹配已保存正文的字面子串，ASCII 英文字母忽略大小写，不解释搜索语法。
 type Query struct {
 	ObjectID string
@@ -144,6 +145,35 @@ func (c *Collector) HistoryObjects() (map[string]bool, error) {
 			return nil, errors.New("storage_error")
 		}
 	}
+	return result, nil
+}
+
+// Models 返回全部已同步且未到期历史中的非空模型名，去重并按原字符串排序；不受分页或筛选影响。
+// 无参数，不读取队列或修改详情位置缓存；关闭或存储读取失败返回固定错误。
+func (c *Collector) Models() ([]string, error) {
+	c.ioMu.Lock()
+	defer c.ioMu.Unlock()
+	if c.root == nil {
+		return nil, errors.New("collector_closed")
+	}
+	now := auditNow()
+	models := make(map[string]bool)
+	for _, seg := range c.segments {
+		if err := c.readSegment(seg, func(record Record, _ int64) error {
+			if record.Model != "" && !c.expired(record, now) {
+				models[record.Model] = true
+			}
+			return nil
+		}); err != nil {
+			c.pause("storage_error")
+			return nil, errors.New("storage_error")
+		}
+	}
+	result := make([]string, 0, len(models))
+	for model := range models {
+		result = append(result, model)
+	}
+	sort.Strings(result)
 	return result, nil
 }
 

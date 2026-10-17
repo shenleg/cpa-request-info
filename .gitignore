@@ -26,6 +26,8 @@ audit-loop-browser.png
 
 # 一次性布局原型保留在本机及 archive/cpamp-ui-prototype 分支，不进入主分支。
 .scratch/cpamp-style-audit-ui/request-monitor.prototype.html
+# 本次页面预览复用正式页面，模拟数据原型只保留本地，不进入 main。
+.scratch/record-metadata-and-actions/preview.prototype.cjs
 *.dylib
 *.so
 *.dll

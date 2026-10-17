@@ -132,7 +132,7 @@ func TestSearchSavedTextOnly(t *testing.T) {
 		}
 	}
 	for _, key := range []string{"", keyA, keyB, r.ObjectID} {
-		for _, path := range []string{"/records/search", "/detail?id=" + r.ID, "/objects", "/status", "/settings"} {
+		for _, path := range []string{"/records/search", "/detail?id=" + r.ID, "/objects", "/models", "/status", "/settings"} {
 			code, _ := managementRead(t, h, path, key)
 			if code != 401 && code != 403 {
 				t.Fatal("非管理身份可读搜索或审计数据")

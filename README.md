@@ -4,6 +4,8 @@
 
 基础规范为 [HTTP 执行输入 spec](.scratch/official-http-input/spec.md) 和 [ADR-0004](docs/adr/0004-official-http-execution.md)。请求用途过滤增量见[规范](.scratch/request-purpose-filter/spec.md)与[本轮双平台验收](docs/verification/request-purpose-filter-2026-10-17.md)，不以旧版本报告替代。安装步骤见[本地交付说明](docs/local-delivery.md)。
 
+思考设置、模型下拉和详情复制的增量规范见[记录增强 spec](.scratch/record-metadata-and-actions/spec.md)，本轮实际验证结果见[验收记录](docs/verification/record-metadata-and-actions-2026-10-17.md)。
+
 ## 支持条件与记录含义
 
 - 固定官方 commit `bf9341629ef2300ac9d846a2e80fe2756f63a671`，C ABI `1` / RPC schema `6`。正式能力仅为官方 `RequestInterceptor` 和 `Management`，不依赖私有宿主补丁，不承诺未来版本或其他 fork 兼容。
@@ -42,9 +44,11 @@
 - 只截断审计副本，不改模型输入。`truncated` 与 `extraction_incomplete` 独立展示，可以同时为 true。
 - **普通文本里的秘密、Key、URL、Base64 不自动脱敏；应用层明文保存。** 纯文本展示不代表正文不敏感。
 
-记录字段限于 `id`、`object_id`、`received_at`、`protocol`、`model`、`purpose`、`text`、`truncated` 和可选的 `extraction_incomplete`。`purpose=main/turn/unknown` 分别显示“主会话调用 / 对话轮次 / 用途未知”；旧记录缺该字段显示“未记录用途”。主会话与对话轮次均不是人工原文认证；不保存原用途头或子代理 ID。名称保存在对象配置中，不逐条复制。
+记录字段限于 `id`、`object_id`、`received_at`、`protocol`、`model`、`purpose`、`request_reasoning`、`text`、`truncated` 和可选的 `extraction_incomplete`。`purpose=main/turn/unknown` 分别显示“主会话调用 / 对话轮次 / 用途未知”；旧记录缺该字段显示“未记录用途”。主会话与对话轮次均不是人工原文认证；不保存原用途头或子代理 ID。名称保存在对象配置中，不逐条复制。
 
-**用途字段的降级限制：** 新插件可读取原有记录，但旧插件的严格解码器会拒绝带 `purpose` 的新记录。不能把写入新记录后的 state-dir 直接交给旧插件降级运行；本项目不自动迁移、删除或改写数据。
+`request_reasoning` 只保存 Before 可见的请求声明：Chat 的 `reasoning_effort`、Responses 的 `reasoning.effort`、Messages 的 `output_config.effort` 与 `thinking.type` / `thinking.budget_tokens`，对应 `effort`、`type`、`budget_tokens`。等级、模式和预算独立展示，不互相换算；预算为0与未指定不同。新记录的空对象显示“未指定”，旧记录缺字段显示“未记录”。**这些是请求值，不保证是 CPA 后缀、协议转换或配置覆盖后的最终上游强度**。不保存完整思考配置对象，不从模型名推断。
+
+**新增字段的降级限制：** 新插件可读取原有记录，但旧插件的严格解码器会拒绝其不认识的 `purpose` 或 `request_reasoning`。不能把写入新记录后的 state-dir 直接交给旧插件降级运行；本项目不自动迁移、删除或改写数据。
 
 ## 存储与管理
 
@@ -67,6 +71,7 @@
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
 | GET | `/objects` | 有界已观察对象与持久对象，不是全量 Key 配置目录 |
+| GET | `/models` | 全部已同步且未到期历史的非空执行输入模型，去重排序，不受筛选或分页影响 |
 | POST | `/monitor`、`/rename` | `{"object_id":"64hex","name":"名称"}`；选择启用或仅改名，名称最多256 UTF-8字节 |
 | POST | `/remove` | `{"object_id":"64hex"}`；停止后续采集，保留历史 |
 | POST | `/pause` | `{"paused":true}` 或 `false`；主动暂停/恢复 |
@@ -77,6 +82,8 @@
 | POST | `/gaps/acknowledge` | 确认页面实际展示的 `generation` / `revision`；不解除故障或删除历史，并发变化返回409 |
 
 搜索 JSON 使用顶层字段，例如 `{"object_id":"64hex","model":"执行入口模型名","q":"正文关键词","offset":0,"limit":20}`，可另加 `from` / `to`（RFC3339Nano，包含端点）。筛选取交集后计数、分页；`offset` 为0–10000000，`limit` 为1–100、默认20。`model` 精确匹配 Before 正文中的名称；`q` 只搜索已保存全文的字面子串，仅 ASCII 英文忽略大小写，不解释正则、不 trim、不搜索截断尾部或附件。模型最多1024 UTF-8字节，关键词最多65536字节。
+
+管理页的执行输入模型下拉选项来自 `/models`，不是当前页或宿主模型配置；选择后仍按原名称精确匹配。详情的“复制纯文本”仅复制已保存正文，保留原换行和空白，不包含元数据或截断尾部。复制仅在详情成功加载后可用；普通 HTTP 页面在 Clipboard API 缺失时使用选区复制，浏览器拒绝或复制失败会明确提示手动复制，不改变已保存内容。
 
 **不要使用旧 GET `/records?...&q=...`，不要把关键词放进 URL。** POST 搜索避免关键词出现在官方 URL 访问日志中；仍须确保部署中的代理、请求正文日志或调试工具不另存搜索词，不能宣称整个宿主日志已脱敏。
 

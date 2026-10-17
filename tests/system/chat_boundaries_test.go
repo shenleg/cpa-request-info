@@ -64,7 +64,7 @@ func assertChatPrivacy(t *testing.T, h *instance, markers ...string) {
 				}
 				for key := range fields {
 					switch key {
-					case "id", "object_id", "received_at", "protocol", "purpose", "model", "text", "truncated", "extraction_incomplete":
+					case "id", "object_id", "received_at", "protocol", "purpose", "model", "request_reasoning", "text", "truncated", "extraction_incomplete":
 					default:
 						t.Fatal("持久化输入记录含白名单之外的字段")
 					}
