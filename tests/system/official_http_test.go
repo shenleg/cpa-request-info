@@ -158,7 +158,7 @@ func TestOfficialBeforeUsesCurrentConfiguration(t *testing.T) {
 
 // TestOfficialLegacyIdentityRejected 验证旧 seed 或没有新 marker 的已有目录被拒绝且不被改写，每种目录同实例两轮调用。
 func TestOfficialLegacyIdentityRejected(t *testing.T) {
-	for _, kind := range []string{"old-seed", "unmarked-data"} {
+	for _, kind := range []string{"old-seed", "jsonl-seed", "unmarked-data"} {
 		t.Run(kind, func(t *testing.T) {
 			root, err := filepath.Abs("../../.test-data")
 			if err != nil {
@@ -171,6 +171,9 @@ func TestOfficialLegacyIdentityRejected(t *testing.T) {
 			name, original := "monitors.json", []byte(`{}`)
 			if kind == "old-seed" {
 				name, original = "identity.seed", bytes.Repeat([]byte{0x31}, 32)
+			}
+			if kind == "jsonl-seed" {
+				name, original = "caller-scope-v1.seed", []byte("cpa-request-info:caller-scope-seed:v1\n"+strings.Repeat("1", 64)+"\n")
 			}
 			path := filepath.Join(dir, name)
 			if err := os.WriteFile(path, original, 0600); err != nil {
@@ -194,7 +197,7 @@ func TestOfficialLegacyIdentityRejected(t *testing.T) {
 			if err != nil || !bytes.Equal(after, original) {
 				t.Fatal("拒绝旧 namespace 时改写了原数据")
 			}
-			if _, err := os.Stat(filepath.Join(dir, "caller-scope-v1.seed")); !os.IsNotExist(err) {
+			if _, err := os.Stat(filepath.Join(dir, "caller-scope-v1-sqlite-v1.seed")); !os.IsNotExist(err) {
 				t.Fatal("拒绝旧目录时仍创建了新身份 marker")
 			}
 		})

@@ -1,4 +1,4 @@
-// 本文件经真实合成宿主验证思考声明、模型目录、管理鉴权和新旧记录的公开 JSON，不自动删除测试文件。
+// 本文件经真实合成宿主验证思考声明、模型目录、管理鉴权和 SQLite 空声明的公开 JSON。
 package system
 
 import (
@@ -9,8 +9,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"reflect"
 	"testing"
 	"time"
@@ -266,8 +264,8 @@ func TestHTTPModelsLogicalExpiry(t *testing.T) {
 	}
 }
 
-// TestHTTPRecordReasoningLegacyNull 验证旧无字段记录的列表和详情显式返回 null，新缺声明返回空对象且重启不改写旧行。
-func TestHTTPRecordReasoningLegacyNull(t *testing.T) {
+// TestHTTPRecordReasoningSQLiteNull 验证有效 SQLite 的未记录声明返回 null，新空声明返回空对象，重启保留两者内容。
+func TestHTTPRecordReasoningSQLiteNull(t *testing.T) {
 	h := startHostWithManagementAuth(t, 1<<30, true, "", true)
 	h.monitorAll(t)
 	marker := fmt.Sprintf("REASONING-NEW-EMPTY-%d", time.Now().UnixNano())
@@ -281,21 +279,28 @@ func TestHTTPRecordReasoningLegacyNull(t *testing.T) {
 	newRecord := waitSnapshotRecord(t, h, marker)
 	assertMetadataRecord(t, h, marker, `{}`)
 	h.stop()
-	legacyMarker := fmt.Sprintf("REASONING-LEGACY-%d", time.Now().UnixNano())
-	legacy := []byte(fmt.Sprintf("{ \"text\":%q, \"id\":\"metadata-legacy\", \"object_id\":%q, \"received_at\":%q, \"protocol\":\"responses\", \"model\":\"legacy-model\", \"truncated\":false }\n", legacyMarker, newRecord.ObjectID, time.Now().UTC().Format(time.RFC3339Nano)))
-	path := filepath.Join(h.stateDir, "records-000002.jsonl")
-	if err := os.WriteFile(path, legacy, 0600); err != nil {
+	nullMarker := fmt.Sprintf("REASONING-SQLITE-NULL-%d", time.Now().UnixNano())
+	received := time.Now().UTC()
+	// SQL NULL 属于当前 schema 的有效值；这里不导入或支持旧 JSONL 文件。
+	db := openRecordDatabase(t, h.stateDir, true)
+	_, err = db.Exec(`INSERT INTO records(id,object_id,received_at,received_sec,received_ns,protocol,purpose,model,request_reasoning,text,truncated,extraction_incomplete) VALUES(?,?,?,?,?,?,?,?,NULL,?,0,0)`,
+		"metadata-sqlite-null", newRecord.ObjectID, received.Format(time.RFC3339Nano), received.Unix(), received.Nanosecond(), "responses", "", "sqlite-null-model", nullMarker)
+	if err != nil {
+		db.Close()
+		t.Fatal("SQLite 空声明夹具写入失败", err)
+	}
+	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+	original := retentionOutput(t, h.stateDir)
 	h = startHostWithManagementAuth(t, 1<<30, true, "", true, h.stateDir)
 	assertMetadataRecord(t, h, marker, `{}`)
-	assertMetadataRecord(t, h, legacyMarker, `null`)
-	if got := metadataModels(t, h); !reflect.DeepEqual(got, []string{"audit-test-model", "legacy-model"}) {
-		t.Fatalf("新旧模型目录不符：%q", got)
+	assertMetadataRecord(t, h, nullMarker, `null`)
+	if got := metadataModels(t, h); !reflect.DeepEqual(got, []string{"audit-test-model", "sqlite-null-model"}) {
+		t.Fatalf("SQLite 模型目录不符：%q", got)
 	}
 	h.stop()
-	after, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(after, legacy) {
-		t.Fatalf("读取改写了旧记录：err=%v", err)
+	if !bytes.Equal(original, retentionOutput(t, h.stateDir)) {
+		t.Fatal("重启或读取修改了 SQLite 记录内容")
 	}
 }

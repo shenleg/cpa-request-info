@@ -13,7 +13,7 @@ import (
 func TestPagedDetailsRemainBounded(t *testing.T) {
 	h := startHostWithManagementAuth(t, 1<<30, true, "", true)
 	h.monitorAll(t)
-	// 256条跨越多个分段，100条页面位于较早历史；仅短列表不能暴露重复全扫描的成本。
+	// 256条形成约16MiB的 SQLite 正文，100条页面位于较早历史；仅短列表不能暴露重复全扫描的成本。
 	const records = 256
 	for i := 0; i < records; i++ {
 		// 19字节序号前缀加65500字节正文，低于64KiB且接近压力用例大小。

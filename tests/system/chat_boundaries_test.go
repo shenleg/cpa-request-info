@@ -185,6 +185,8 @@ func TestChatFollowSystemPrompt(t *testing.T) {
 func assertChatPrivacy(t *testing.T, h *instance, markers ...string) {
 	t.Helper()
 	forbidden := append([]string{keyA, keyB, adminKey, "synthetic-upstream-only"}, markers...)
+	// 空输入/未监控场景允许零条记录，但缺库或 SQLite 白名单错误必须失败，不能靠 JSON 解码失败跳过。
+	assertRecordSchema(t, h.stateDir, 0)
 	// check 只按 markers 检查禁存字节；raw 为合成输出，失败终止测试，无返回值。
 	check := func(raw []byte) {
 		t.Helper()
@@ -194,6 +196,8 @@ func assertChatPrivacy(t *testing.T, h *instance, markers ...string) {
 			}
 		}
 	}
+	// 逻辑记录检查可识别跨 SQLite 页面保存的文本；原始目录扫描继续覆盖 journal 与残留内容。
+	check(retentionOutput(t, h.stateDir))
 	if err := filepath.WalkDir(h.stateDir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil || entry.IsDir() {
 			return err
@@ -201,20 +205,6 @@ func assertChatPrivacy(t *testing.T, h *instance, markers ...string) {
 		raw, err := os.ReadFile(path)
 		if err == nil {
 			check(raw)
-			// 检查对外记录白名单，不依赖文件名、表名或私有存储查询。
-			for _, line := range bytes.Split(raw, []byte{'\n'}) {
-				var fields map[string]json.RawMessage
-				if json.Unmarshal(line, &fields) != nil || fields["text"] == nil {
-					continue
-				}
-				for key := range fields {
-					switch key {
-					case "id", "object_id", "received_at", "protocol", "purpose", "model", "request_reasoning", "text", "truncated", "extraction_incomplete":
-					default:
-						t.Fatal("持久化输入记录含白名单之外的字段")
-					}
-				}
-			}
 		}
 		return err
 	}); err != nil {

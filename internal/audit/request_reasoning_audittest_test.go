@@ -25,7 +25,7 @@ func TestModelsAndReasoningLogicalExpiry(t *testing.T) {
 	c.CaptureExecution("new-shared-model", "models-expiry-scope", "anthropic-messages", audit.PurposeUnknown, []byte(`{"model":"shared","messages":[{"role":"user","content":"new shared"}],"output_config":{"effort":"medium"},"thinking":{"type":"enabled","budget_tokens":0}}`))
 	c.CaptureExecution("new-unique-model", "models-expiry-scope", "responses", audit.PurposeUnknown, []byte(`{"model":"new-only","input":"new unique"}`))
 	waitSaved(t, c, 4)
-	original := readAuditFile(t, dir, "records-000001.jsonl")
+	original := readAuditFile(t, dir, "records.sqlite")
 	setCaptureClock(t, clockDir, "models-before-expiry.json", start.Add(7*24*time.Hour-time.Nanosecond))
 	assertModels(t, c, []string{"expired-only", "new-only", "shared"})
 	if _, _, err := c.List(0, 10, audit.Query{}); err != nil {
@@ -36,7 +36,7 @@ func TestModelsAndReasoningLogicalExpiry(t *testing.T) {
 	if _, err := c.Detail("old-unique-model"); err == nil || err.Error() != "not_found" {
 		t.Fatalf("到期的思考记录仍可读：%v", err)
 	}
-	if !bytes.Equal(original, readAuditFile(t, dir, "records-000001.jsonl")) {
+	if !bytes.Equal(original, readAuditFile(t, dir, "records.sqlite")) {
 		t.Fatal("只推进查询时钟却触发物理清理，未验证未清理边界")
 	}
 	zero := int64(0)

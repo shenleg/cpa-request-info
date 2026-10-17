@@ -10,6 +10,7 @@ import errno
 import json
 import signal
 import socket
+import sqlite3
 import subprocess
 import threading
 import time
@@ -89,6 +90,21 @@ def public_status(address):
     assert code == 200, "公开状态不可读取"
     assert state["state"]["gap_alerts"]["generation"], "提醒快照缺少generation"
     return state
+
+
+def sqlite_records(directory):
+    """只读取得已有 SQLite 的完整提交顺序快照；返回记录元组，缺库/journal、错误 schema 或损坏时直接失败，不返回空扫描。"""
+    database = directory / "records.sqlite"
+    journal = directory / "records.sqlite-journal"
+    assert database.is_file() and database.stat().st_size > 0, "SQLite主库缺失或为空"
+    assert journal.is_file() and journal.stat().st_size > 0, "SQLite journal缺失或为空"
+    connection = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=5)
+    try:
+        assert connection.execute("PRAGMA application_id").fetchone()[0] == 0x43504149, "SQLite应用标识不符"
+        assert connection.execute("PRAGMA user_version").fetchone()[0] == 1, "SQLite版本不符"
+        return connection.execute("SELECT seq,id,object_id,received_at,received_sec,received_ns,protocol,purpose,model,request_reasoning,text,truncated,extraction_incomplete FROM records ORDER BY seq").fetchall()
+    finally:
+        connection.close()
 
 
 def port():
@@ -187,8 +203,8 @@ openai-compatibility:
         assert request(address, API + "/monitor", "POST", {"object_id": object_id, "name": "Linux合成磁盘验收"})[0] == 200
         assert request(address, "/v1/chat/completions", "POST", payload, CLIENT)[0] == 200
         prior = wait_for(lambda: request(address, API + "/records/search", "POST", {})[1]["records"], "首条输入未同步保存")[0]
-        prior_outputs = {entry.name: entry.read_bytes() for entry in (mount / "audit").glob("records-*.jsonl")}
-        assert prior_outputs
+        prior_records = sqlite_records(mount / "audit")
+        assert len(prior_records) == 1 and prior_records[0][1] == prior["id"] and prior_records[0][10] == TEXT[:65536], "SQLite首条对照记录缺失或内容不符"
         written = 0
         if args.mode == "enospc":
             fd = os.open(mount / "external-filler.bin", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -242,7 +258,7 @@ openai-compatibility:
             assert state["available"] is False and inner["available"] is False, "只读启动未报告采集器不可用"
             assert inner["reason"] == "storage_unavailable", "只读启动未报告storage_unavailable"
             assert inner["diagnostics_persisted"] is False, "只读且无采集器时谎报诊断已持久化"
-            assert {entry.name: entry.read_bytes() for entry in (mount / "audit").glob("records-*.jsonl")} == prior_outputs, "只读失败修改了原记录"
+            assert sqlite_records(mount / "audit") == prior_records, "只读失败修改了原 SQLite 记录内容"
         # 固定诊断文件可原位覆盖；ENOSPC不必然使确认失败，不能将200误判为夹具不真实。
         ack_code, acknowledgement = request(address, API + "/gaps/acknowledge", "POST", {"generation": alerts["generation"], "revision": alerts["revision"]})
         assert ack_code in (200, 503), "磁盘故障确认未返回200或503"
@@ -294,6 +310,7 @@ openai-compatibility:
         recovered_gap = any(item["history_retained"] and (item["reason"] == fault_reason or (item["reason"] in ("unclean_shutdown", "legacy_unknown", "recovery_unavailable") and item["affected_count"] is None and item["count_accuracy"] == "unknown")) for item in recovered_alerts["items"])
         assert recovered_gap, "恢复可写与正常重启抹掉了公开缺口历史或未知损失信号"
         assert request(address, API + "/detail?id=" + prior["id"])[1]["text"] == TEXT[:65536]
+        assert sqlite_records(mount / "audit") == prior_records, "故障及重启修改了 SQLite 幸存记录字段"
         # 恢复后再发同一模型输入，区分故障期fail-open与修复后模型/采集真正可用。
         assert request(address, "/v1/chat/completions", "POST", payload, CLIENT)[0] == 200
         assert received == [True, True, True, True], "发现/修复与重启改变或遗漏了实际模型输入"
@@ -308,14 +325,14 @@ openai-compatibility:
             records = wait_for(repaired_saved, "修复后的模型输入没有恢复保存")
             capture_resumed = True
         else:
-            # ENOSPC可能已写入部分尾行；释放空间不等于修复损坏，禁止夹具要求应用静默截断历史。
+            # 释放空间不等于修复 SQLite 完整性故障；禁止夹具要求应用静默重建数据库。
             assert args.mode == "enospc" and repaired_state["state"]["reason"] == "storage_error", "恢复后未给出真实停采原因"
             code, records = request(address, API + "/records/search", "POST", {})
-            assert code == 200 and records["total"] == 1, "损坏尾部使失败副本冒充保存或损坏旧输入"
+            assert code == 200 and records["total"] == 1, "SQLite 故障使未提交副本冒充保存或损坏旧输入"
             capture_resumed = False
         result = {"runtime_fault_visible": runtime_fault_visible, "recovery_loss_signal": recovered_gap, "result": "passed", "mode": args.mode, "errno": failure_errno, "volume_bytes": fs.f_blocks * fs.f_frsize, "external_fill_bytes": written, "host_uid": user.pw_uid, "model_statuses": [200, 200, 200, 200], "discovery_requests": 1, "discovery_saved": False, "upstream_received": len(received), "upstream_invalid": sum(not entry for entry in received), "saved_records": records["total"], "old_detail_preserved": True, "capture_available": state["available"], "reason": inner.get("reason") or state.get("reason"), "private_mount_namespace": True, "readonly_scope": "restart" if args.mode == "readonly" else None, "old_detail_query_after_writable_restart": args.mode == "readonly"}
         # 新增证据仅为布尔摘要；不附公开响应全文、模型输入、认证材料或宿主日志。
-        result.update({"gap_alerts_visible": True, "gap_fault_active_before_ack": True, "gap_fault_active_after_ack": True, "gap_ack_contract_valid": True, "gap_ack_succeeded": ack_code == 200, "gap_recovery_history_or_uncertainty_visible": recovered_gap, "model_input_unchanged_after_repair": True, "capture_resumed_after_repair": capture_resumed, "partial_tail_not_silently_repaired": not capture_resumed})
+        result.update({"gap_alerts_visible": True, "gap_fault_active_before_ack": True, "gap_fault_active_after_ack": True, "gap_ack_contract_valid": True, "gap_ack_succeeded": ack_code == 200, "gap_recovery_history_or_uncertainty_visible": recovered_gap, "model_input_unchanged_after_repair": True, "capture_resumed_after_repair": capture_resumed, "sqlite_record_content_preserved": True, "sqlite_fault_remained_paused_after_repair": not capture_resumed})
         if args.mode == "enospc":
             result["gap_storage_error_affected_count_positive"] = True
         else:
@@ -363,8 +380,8 @@ def execute(args, user):
                 if audit.is_dir():
                     files = list(audit.rglob("*"))
                     assert not any(p.is_symlink() for p in files), "unexpected_audit_symlink"
-                    # 每场景至多两条64KiB正文；2MiB足够状态和损坏尾行，拒绝意外复制大量产物。
-                    assert sum(p.stat().st_size for p in files if p.is_file()) <= 2 << 20, "evidence_exceeds_2MiB"
+                    # 两条64KiB正文连同 SQLite 主库和逐步扩展的 PERSIST journal 控制在4MiB内，拒绝复制填充文件或无界产物。
+                    assert sum(p.stat().st_size for p in files if p.is_file()) <= 4 << 20, "evidence_exceeds_4MiB"
                     shutil.copytree(audit, work / "synthetic-audit-preserved")
             finally:
                 subprocess.run(["umount", str(mount)], check=True)

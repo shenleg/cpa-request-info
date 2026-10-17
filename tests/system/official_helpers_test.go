@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -100,7 +101,27 @@ func respondDiscovery(w http.ResponseWriter, r *http.Request) bool {
 // 返回前核对无记录；恢复目录和明确不可用目录不发送发现请求，管理或调用失败终止测试。
 func (h *instance) discoverCallers(t *testing.T) {
 	t.Helper()
-	code, raw := h.request(t, "GET", api+"/objects", adminKey, nil)
+	code, raw := h.request(t, "GET", api+"/status", adminKey, nil)
+	// 根路由可先于动态插件路由就绪；环境管理密码不做 bcrypt，首次查询更容易命中这个窗口。
+	deadline := time.Now().Add(15 * time.Second)
+	for code == http.StatusNotFound && time.Now().Before(deadline) {
+		time.Sleep(25 * time.Millisecond)
+		code, raw = h.request(t, "GET", api+"/status", adminKey, nil)
+	}
+	var status struct {
+		Available bool `json:"available"`
+		State     struct {
+			State string `json:"state"`
+		} `json:"state"`
+	}
+	if code != http.StatusOK || json.Unmarshal(raw, &status) != nil {
+		t.Fatalf("发现前采集状态不可用：HTTP=%d", code)
+	}
+	// 损坏配置和数据库的回归夹具仍须能启动宿主；不能要求其历史查询成功才允许断言故障。
+	if !status.Available || status.State.State != "active" {
+		return
+	}
+	code, raw = h.request(t, "GET", api+"/objects", adminKey, nil)
 	var catalog struct {
 		Available bool `json:"available"`
 		Objects   []struct {

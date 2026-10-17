@@ -1,18 +1,13 @@
-// 本文件管理安全目录、独占锁、配置原子替换与单写入者分段JSONL；仅完整校验后的到期历史可由维护回收。
+// 本文件管理安全目录、独占锁、身份种子、配置原子替换及 SQLite 单写入者生命周期。
 package audit
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/rand"
-	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 )
@@ -48,7 +43,7 @@ func openDirectory(path string) (*os.Root, error) {
 		}
 		opened, err := next.Stat(".")
 		current.Close()
-		// 对比打开前后 inode，避免 Lstat 与 OpenRoot 之间替换为链接或其他目录。
+		// 打开后核对 inode，拒绝 Lstat 与 OpenRoot 之间的目录替换。
 		if err != nil || !os.SameFile(info, opened) {
 			next.Close()
 			return nil, errors.New("unsafe_directory")
@@ -65,8 +60,6 @@ func openDirectory(path string) (*os.Root, error) {
 
 func (c *Collector) initialize() error {
 	identityReady := false
-	// 身份验证成功后，历史扫描失败仍尽力恢复既有诊断，避免损坏尾部遮住异常退出。
-	// 身份不可用或未有标记时不改写未知目录，原故障状态保持可见。
 	defer func() {
 		if c.diagnostics == nil && identityReady {
 			if _, err := c.root.Lstat(diagnosticName); err == nil {
@@ -77,6 +70,10 @@ func (c *Collector) initialize() error {
 		}
 	}()
 	var err error
+	c.path, err = filepath.Abs(c.path)
+	if err != nil {
+		return err
+	}
 	c.directory, err = c.root.Open(".")
 	if err != nil {
 		return err
@@ -92,7 +89,7 @@ func (c *Collector) initialize() error {
 	if err = syscall.Flock(int(c.lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return err
 	}
-	if err := c.initializeCallerScopeSeed(); err != nil {
+	if err = c.initializeCallerScopeSeed(); err != nil {
 		c.pause("identity_unavailable")
 		return nil
 	}
@@ -103,12 +100,11 @@ func (c *Collector) initialize() error {
 		c.pause("storage_error")
 		return nil
 	}
-	if _, err = c.root.Lstat("monitors.tmp"); err == nil {
-		c.pause("storage_error")
-		return nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		c.pause("storage_error")
-		return nil
+	for _, name := range names {
+		if strings.HasPrefix(name, "records-") || name == "retention.tmp" || name == "monitors.tmp" || name == databaseName+"-wal" || name == databaseName+"-shm" {
+			c.pause("storage_error")
+			return nil
+		}
 	}
 	if _, err = c.root.Lstat("monitors.json"); err == nil {
 		data, err := c.readBounded("monitors.json", maxLine)
@@ -122,7 +118,6 @@ func (c *Collector) initialize() error {
 			return nil
 		}
 		if config.BudgetBytes == 0 {
-			// 只有旧版没有持久预算；后续保存后启动默认值不再覆盖管理员设置。
 			config.BudgetBytes = c.status.BudgetBytes
 		}
 		c.config = config
@@ -131,33 +126,24 @@ func (c *Collector) initialize() error {
 		c.pause("storage_error")
 		return nil
 	}
-	c.configValid = true
-	sort.Strings(names)
-	for _, name := range names {
-		if !strings.HasPrefix(name, "records-") {
-			continue
-		}
-		if _, ok := segmentNumber(name); !ok {
-			c.pause("storage_error")
-			return nil
-		}
-		seg := segment{name: name}
-		err := c.scanSegment(&seg)
-		c.segments = append(c.segments, seg)
-		c.status.Saved += int64(seg.count)
-		if err != nil {
-			c.pause("storage_error")
-			return nil
-		}
+	if err := c.openSQLite(); err != nil {
+		c.pauseStorage(err)
+		return nil
 	}
+	c.configValid = true
 	if err := c.openDiagnostics(); err != nil {
 		c.pauseStorage(err)
 	}
 	if err := c.sweepExpired(auditNow()); err != nil {
 		c.pauseStorage(err)
 	}
-	// 新实例没有上一运行期的暂停原因；启动也须留出最坏写入和滞回空间，不能因默认active绕过恢复门槛。
-	if c.status.State == "active" && c.status.BudgetBytes-c.status.UsedBytes < resumeRequiredBytes {
+	if c.status.State == "active" {
+		if _, err := c.sqliteWindowLimit(); err != nil {
+			c.pauseStorage(err)
+		}
+	}
+	// 新进程也必须满足恢复滞回，不能通过重启绕过容量暂停门槛。
+	if c.status.State == "active" && c.status.BudgetBytes-c.status.UsedBytes < c.status.ResumeRequiredBytes {
 		c.pause("budget_exhausted")
 	}
 	if err := c.refreshCapacity(); err != nil {
@@ -166,14 +152,16 @@ func (c *Collector) initialize() error {
 	return nil
 }
 
-const callerScopeSeedName = "caller-scope-v1.seed"
-const callerScopeSeedMagic = "cpa-request-info:caller-scope-seed:v1\n"
+const callerScopeSeedName = "caller-scope-v1-sqlite-v1.seed"
+const callerScopeSeedMagic = "cpa-request-info:caller-scope-seed:sqlite:v1\n"
 const callerScopeSeedBytes = 32
 
-// initializeCallerScopeSeed 只在已有 flock 下初始化新身份域；失败遗留物保留，禁止轮换或迁移旧身份。
+// initializeCallerScopeSeed 只在持锁空目录初始化 SQLite 身份域；失败现场保留，不迁移或轮换。
 func (c *Collector) initializeCallerScopeSeed() error {
-	if _, err := c.root.Lstat("identity.seed"); !errors.Is(err, os.ErrNotExist) {
-		return errors.New("identity_unavailable")
+	for _, name := range []string{"identity.seed", "caller-scope-v1.seed"} {
+		if _, err := c.root.Lstat(name); !errors.Is(err, os.ErrNotExist) {
+			return errors.New("identity_unavailable")
+		}
 	}
 	info, err := c.root.Lstat(callerScopeSeedName)
 	if errors.Is(err, os.ErrNotExist) {
@@ -181,7 +169,6 @@ func (c *Collector) initializeCallerScopeSeed() error {
 		if openErr != nil {
 			return openErr
 		}
-		// 读两项就足以区分仅有自身锁的空目录，避免为未知旧目录建立无界列表。
 		entries, readErr := directory.ReadDir(2)
 		closeErr := directory.Close()
 		if (readErr != nil && !errors.Is(readErr, io.EOF)) || closeErr != nil || len(entries) != 1 || entries[0].Name() != ".audit.lock" {
@@ -202,6 +189,7 @@ func (c *Collector) initializeCallerScopeSeed() error {
 		if writeErr != nil || n != len(data) || syncErr != nil || closeErr != nil {
 			return errors.New("identity_unavailable")
 		}
+		c.newStorage = true
 		info, err = c.root.Lstat(callerScopeSeedName)
 	}
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() != int64(len(callerScopeSeedMagic)+callerScopeSeedBytes) {
@@ -217,7 +205,6 @@ func (c *Collector) initializeCallerScopeSeed() error {
 		return errors.New("identity_unavailable")
 	}
 	data, readErr := io.ReadAll(io.LimitReader(file, int64(len(callerScopeSeedMagic)+callerScopeSeedBytes+1)))
-	// 重开同样同步文件和父目录；上次初始化若在同步期间失败，不能未经验证就启用身份。
 	syncErr := file.Sync()
 	closeErr := file.Close()
 	if readErr != nil || len(data) != len(callerScopeSeedMagic)+callerScopeSeedBytes || !bytes.HasPrefix(data, []byte(callerScopeSeedMagic)) || syncErr != nil || closeErr != nil {
@@ -230,8 +217,7 @@ func (c *Collector) initializeCallerScopeSeed() error {
 	return nil
 }
 
-// scanDirectory 将整个专用目录（包括新身份种子、未知辅助文件及嵌套文件）的保守分配空间纳入预算。
-// 分批读取及硬性条目/深度上限防止目录自身成为无界索引，任何链接/特殊文件均停采。
+// scanDirectory 将专用目录、未知辅助文件和嵌套文件的保守分配空间全部计入预算，拒绝链接和特殊文件。
 func (c *Collector) scanDirectory() ([]string, int64, error) {
 	var names []string
 	var used int64
@@ -270,7 +256,7 @@ func (c *Collector) scanDirectory() ([]string, int64, error) {
 					if info.Mode().Perm() != 0700 {
 						return errors.New("unsafe_permissions")
 					}
-					if err = walk(name, depth+1); err != nil {
+					if err := walk(name, depth+1); err != nil {
 						return err
 					}
 				} else {
@@ -296,26 +282,21 @@ func (c *Collector) scanDirectory() ([]string, int64, error) {
 }
 
 func allocated(info os.FileInfo) int64 {
-	// 逻辑长度按 4 KiB 向上取整；实际 blocks 更大时优先采用实际值，空文件/目录也预留一块。
+	// 同时计算逻辑长度与实际块数；即使稀疏文件和空文件也不能逃过预算。
 	size := rounded(info.Size())
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Blocks*512 > size {
 		size = stat.Blocks * 512
 	}
 	return size
 }
+
 func rounded(size int64) int64 {
 	if size == 0 {
 		return 4096
 	}
 	return (size + 4095) / 4096 * 4096
 }
-func segmentNumber(name string) (int, bool) {
-	if len(name) != len("records-000001.jsonl") || !strings.HasPrefix(name, "records-") || !strings.HasSuffix(name, ".jsonl") {
-		return 0, false
-	}
-	n, err := strconv.Atoi(name[8:14])
-	return n, err == nil && n > 0 && fmt.Sprintf("records-%06d.jsonl", n) == name
-}
+
 func (c *Collector) readBounded(name string, maximum int) ([]byte, error) {
 	file, err := c.root.OpenFile(name, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
@@ -328,77 +309,6 @@ func (c *Collector) readBounded(name string, maximum int) ([]byte, error) {
 	}
 	return data, nil
 }
-func (c *Collector) scanSegment(seg *segment) error {
-	file, err := c.root.OpenFile(seg.name, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 || info.Size() > segmentSize {
-		return errors.New("invalid_segment")
-	}
-	return eachRecord(file, info.Size(), func(record Record, bytes int64) error { seg.committed += bytes; seg.count++; return nil })
-}
-
-// eachRecord 只允许完整换行记录；读缓冲/每条记录均有硬上限，不将整段正文载入内存。
-func eachRecord(file io.Reader, limit int64, visit func(Record, int64) error) error {
-	if limit >= 0 {
-		file = io.LimitReader(file, limit)
-	}
-	reader := bufio.NewReaderSize(file, 32<<10)
-	for {
-		var line []byte
-		for {
-			part, err := reader.ReadSlice('\n')
-			if len(line)+len(part) > maxLine {
-				return errors.New("invalid_record")
-			}
-			line = append(line, part...)
-			if errors.Is(err, bufio.ErrBufferFull) {
-				continue
-			}
-			if errors.Is(err, io.EOF) && len(line) == 0 {
-				return nil
-			}
-			if err != nil {
-				return errors.New("partial_record")
-			}
-			break
-		}
-		// 原始字段只用于区分旧记录缺省与新字段的 null/空值；未知字段仍由严格解码拒绝。
-		var stored struct {
-			Record
-			Purpose          json.RawMessage `json:"purpose"`
-			RequestReasoning json.RawMessage `json:"request_reasoning"`
-		}
-		decoder := json.NewDecoder(bytes.NewReader(line))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&stored); err != nil {
-			return errors.New("invalid_record")
-		}
-		record := stored.Record
-		if stored.Purpose != nil {
-			if json.Unmarshal(stored.Purpose, &record.Purpose) != nil || (record.Purpose != PurposeMain && record.Purpose != PurposeTurn && record.Purpose != PurposeUnknown) {
-				return errors.New("invalid_record")
-			}
-		}
-		if stored.RequestReasoning != nil {
-			var err error
-			record.RequestReasoning, err = storedReasoning(stored.RequestReasoning)
-			if err != nil {
-				return errors.New("invalid_record")
-			}
-		}
-		var trailing any
-		if decoder.Decode(&trailing) != io.EOF || !validEvent(Event{ID: record.ID, ObjectID: record.ObjectID, ReceivedAt: record.ReceivedAt, Protocol: record.Protocol}) || !supportedProtocol(record.Protocol) || len(record.Model) > 1024 || len(record.Text) > maxText {
-			return errors.New("invalid_record")
-		}
-		if err := visit(record, int64(len(line))); err != nil {
-			return err
-		}
-	}
-}
 
 func (c *Collector) saveMonitors(data []byte, budget int64) error {
 	_, used, err := c.scanDirectory()
@@ -408,7 +318,6 @@ func (c *Collector) saveMonitors(data []byte, budget int64) error {
 	c.mu.Lock()
 	c.status.UsedBytes = used
 	c.mu.Unlock()
-	// 配置可以使用自己的预留，但临时副本和目录增长必须仍在事务预算内。
 	if used+rounded(int64(len(data)))+4096 > budget {
 		return errors.New("budget_exhausted")
 	}
@@ -416,7 +325,7 @@ func (c *Collector) saveMonitors(data []byte, budget int64) error {
 	if err != nil {
 		return errors.New("storage_error")
 	}
-	if n, writeErr := file.Write(data); writeErr != nil || n != len(data) {
+	if n, err := file.Write(data); err != nil || n != len(data) {
 		file.Close()
 		return errors.New("storage_error")
 	}
@@ -469,8 +378,7 @@ func (c *Collector) writeLoop() {
 		}
 		c.ioMu.Lock()
 		c.mu.Lock()
-		active := c.status.State == "active"
-		reason := c.status.Reason
+		active, reason := c.status.State == "active", c.status.Reason
 		c.mu.Unlock()
 		if active {
 			if err := c.appendRecord(queued.record); err != nil {
@@ -487,108 +395,35 @@ func (c *Collector) writeLoop() {
 			}
 			c.gap(reason)
 		}
-		c.ioMu.Unlock()
+		// 查询可用作 FIFO 保存屏障；释放 I/O 锁前完成队列记账，避免已查到记录却仍显示排队。
 		c.mu.Lock()
 		c.queuedBytes -= queued.bytes
 		c.status.Queued--
 		c.mu.Unlock()
+		c.ioMu.Unlock()
 	}
-}
-
-func (c *Collector) appendRecord(record Record) error {
-	data, err := json.Marshal(record)
-	if err != nil || len(data)+1 > maxLine {
-		return errors.New("storage_error")
-	}
-	data = append(data, '\n')
-	_, used, err := c.scanDirectory()
-	if err != nil {
-		return err
-	}
-	c.mu.Lock()
-	c.status.UsedBytes = used
-	budget := c.status.BudgetBytes
-	c.mu.Unlock()
-	rotate := len(c.segments) == 0 || c.segments[len(c.segments)-1].committed+int64(len(data)) > segmentSize
-	growth := rounded(int64(len(data))) + 4096
-	if !rotate {
-		old := c.segments[len(c.segments)-1].committed
-		growth = rounded(old+int64(len(data))) - rounded(old)
-	}
-	if used+growth+auxiliaryReserve+maintenanceReserve > budget {
-		return errors.New("budget_exhausted")
-	}
-	if rotate {
-		if c.active != nil {
-			if err = c.active.Close(); err != nil {
-				c.active = nil
-				return err
-			}
-			c.active = nil
-		}
-		number := 1
-		if len(c.segments) > 0 {
-			number, _ = segmentNumber(c.segments[len(c.segments)-1].name)
-			number++
-		}
-		name := fmt.Sprintf("records-%06d.jsonl", number)
-		c.active, err = c.root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0600)
-		if err != nil {
-			return err
-		}
-		if err = c.directory.Sync(); err != nil {
-			return err
-		}
-		c.segments = append(c.segments, segment{name: name})
-	} else if c.active == nil {
-		c.active, err = c.root.OpenFile(c.segments[len(c.segments)-1].name, os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0600)
-		if err != nil {
-			return err
-		}
-	}
-	seg := &c.segments[len(c.segments)-1]
-	info, err := c.active.Stat()
-	if err != nil || info.Size() != seg.committed {
-		return errors.New("storage_error")
-	}
-	n, err := c.active.Write(data)
-	if err != nil || n != len(data) {
-		return errors.New("storage_error")
-	}
-	if err = c.active.Sync(); err != nil {
-		return err
-	}
-	// 只有 fsync 成功才推进查询边界；失败的尾部保留原样，并停采等待人工恢复。
-	seg.committed += int64(len(data))
-	seg.count++
-	c.mu.Lock()
-	c.status.Saved++
-	c.mu.Unlock()
-	_, used, err = c.scanDirectory()
-	c.mu.Lock()
-	c.status.UsedBytes = used
-	c.mu.Unlock()
-	if err != nil {
-		// 正文已经同步并公开；后续目录核验失败只改变健康状态，不能把同一条计为丢失。
-		c.pauseStorage(err)
-	}
-	return nil
 }
 
 func (c *Collector) releaseFiles() {
 	failed := false
-	if c.active != nil {
-		if c.active.Close() != nil {
+	if c.connection != nil {
+		if c.connection.Close() != nil {
 			failed = true
 		}
-		c.active = nil
+		c.connection = nil
 	}
-	if c.diagnostics != nil {
-		if c.diagnostics.Close() != nil {
+	if c.db != nil {
+		if c.db.Close() != nil {
 			failed = true
 		}
-		c.diagnostics = nil
+		c.db = nil
 	}
+	for _, file := range []*os.File{c.database, c.journal, c.diagnostics} {
+		if file != nil && file.Close() != nil {
+			failed = true
+		}
+	}
+	c.database, c.journal, c.diagnostics = nil, nil, nil
 	if c.lock != nil {
 		if syscall.Flock(int(c.lock.Fd()), syscall.LOCK_UN) != nil {
 			failed = true

@@ -2,6 +2,7 @@
 package system
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -76,50 +77,72 @@ func TestRetentionRejectsInvalidPersistedSettings(t *testing.T) {
 	}
 }
 
-// TestRetentionTemporaryFailurePreservesLiveHistory 验证回收遇到外部临时路径故障时不修改原始段，历史仍按期限查询。
-func TestRetentionTemporaryFailurePreservesLiveHistory(t *testing.T) {
-	received := time.Date(2030, 6, 1, 0, 0, 0, 0, time.UTC)
-	clock := newRetentionClock(t, received)
-	h := startRetentionHost(t, 1<<30, "", clock)
+// TestRetentionSQLitePermissionFailurePreservesHistory 验证主库及 PERSIST journal 权限故障明确停采，修复权限后幸存内容不变。
+func TestRetentionSQLitePermissionFailurePreservesHistory(t *testing.T) {
+	for _, name := range []string{"records.sqlite", "records.sqlite-journal"} {
+		t.Run(name, func(t *testing.T) {
+			received := time.Date(2030, 6, 1, 0, 0, 0, 0, time.UTC)
+			clock := newRetentionClock(t, received)
+			h := startRetentionHost(t, 1<<30, "", clock)
+			h.monitorAll(t)
+			marker := fmt.Sprintf("RETENTION-FAULT-%d", time.Now().UnixNano())
+			old := searchSubmit(t, h, keyA, "retention-model", marker+"-OLD")
+			retentionClock(t, clock, received.Add(24*time.Hour), 0)
+			live := searchSubmit(t, h, keyA, "retention-model", marker+"-LIVE")
+			assertRecordSchema(t, h.stateDir, 2)
+			original := retentionOutput(t, h.stateDir)
+			path := filepath.Join(h.stateDir, name)
+			if err := os.Chmod(path, 0400); err != nil {
+				t.Fatal(err)
+			}
+			retentionClock(t, clock, received.Add(7*24*time.Hour), 1)
+			waitBudgetState(t, h, func(s budgetState) bool { return s.Reason == "storage_error" })
+			// 故障期间查询也必须拒绝不安全文件；先修复权限，再单独核对存活内容及逻辑期限。
+			if err := os.Chmod(path, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(original, retentionOutput(t, h.stateDir)) {
+				t.Fatal("权限故障期间维护修改或删除了 SQLite 记录")
+			}
+			if code, _ := h.request(t, "GET", api+"/detail?id="+old.ID, adminKey, nil); code != 404 {
+				t.Fatal("维护失败使到期记录仍可查询")
+			}
+			code, raw := h.request(t, "GET", api+"/detail?id="+live.ID, adminKey, nil)
+			var detail savedRecord
+			if code != 200 || json.Unmarshal(raw, &detail) != nil || detail.Text != marker+"-LIVE" {
+				t.Fatal("维护失败损坏了未到期历史")
+			}
+			if state := readBudgetState(t, h); state.Reason != "storage_error" {
+				t.Fatal("仅恢复权限就自动解除真实存储故障")
+			}
+		})
+	}
+}
+
+// TestRetentionSQLiteCorruptionIsNotRebuilt 验证损坏主库在重启时明确拒绝，不重建数据库或覆盖原始故障现场。
+func TestRetentionSQLiteCorruptionIsNotRebuilt(t *testing.T) {
+	h := startHost(t, 1<<30, true, "")
 	h.monitorAll(t)
-	marker := fmt.Sprintf("RETENTION-FAULT-%d", time.Now().UnixNano())
-	old := searchSubmit(t, h, keyA, "retention-model", marker+"-OLD")
-	retentionClock(t, clock, received.Add(24*time.Hour), 0)
-	live := searchSubmit(t, h, keyA, "retention-model", marker+"-LIVE")
-	original := retentionOutput(t, h.stateDir)
-	// 故障属于隔离磁盘边界，不为生产加入注入API；不能把不安全路径当作可删除的临时副本。
-	if err := os.WriteFile(filepath.Join(h.stateDir, "retention.tmp"), []byte("synthetic external fault"), 0400); err != nil {
+	searchSubmit(t, h, keyA, "audit-test-model", "RETENTION-CORRUPT-SQLITE-CONTROL")
+	h.stop()
+	path := filepath.Join(h.stateDir, "records.sqlite")
+	original, err := os.ReadFile(path)
+	if err != nil || len(original) < 100 {
+		t.Fatal("缺少有效 SQLite 损坏夹具", err)
+	}
+	corrupt := append([]byte(nil), original...)
+	copy(corrupt[:16], []byte("corrupt-sqlite-v1"))
+	if err := os.WriteFile(path, corrupt, 0600); err != nil {
 		t.Fatal(err)
 	}
-	retentionClock(t, clock, received.Add(7*24*time.Hour), 1)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		code, raw := h.request(t, "GET", api+"/status", adminKey, nil)
-		var status struct {
-			State struct {
-				Reason string `json:"reason"`
-			} `json:"state"`
-		}
-		if code != 200 || json.Unmarshal(raw, &status) != nil {
-			t.Fatal("清理故障状态不可读")
-		}
-		if status.State.Reason == "storage_error" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("清理故障没有明确报告")
-		}
-		time.Sleep(20 * time.Millisecond)
+	h = startHost(t, 1<<30, true, "", h.stateDir)
+	waitBudgetState(t, h, func(s budgetState) bool { return s.State == "paused" && s.Reason == "storage_error" })
+	if code, _ := h.request(t, "POST", "/v1/chat/completions", keyA, snapshotInput(t, "FORBIDDEN_CORRUPT_SQLITE_INPUT")); code != 200 {
+		t.Fatal("SQLite 损坏影响了模型请求")
 	}
-	if string(retentionOutput(t, h.stateDir)) != string(original) {
-		t.Fatal("维护失败修改或删除了权威历史")
-	}
-	code, _ := h.request(t, "GET", api+"/detail?id="+old.ID, adminKey, nil)
-	if code != 404 {
-		t.Fatal("清理失败使到期记录仍可查询")
-	}
-	code, _ = h.request(t, "GET", api+"/detail?id="+live.ID, adminKey, nil)
-	if code != 200 {
-		t.Fatal("清理失败损坏了未到期历史")
+	h.stop()
+	after, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(after, corrupt) {
+		t.Fatal("损坏数据库被重建或改写", err)
 	}
 }

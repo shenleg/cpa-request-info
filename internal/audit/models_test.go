@@ -2,7 +2,6 @@
 package audit_test
 
 import (
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
@@ -31,36 +30,27 @@ func TestModelsEmptyAndClosed(t *testing.T) {
 	}
 }
 
-// TestModelsAcrossPagesSegmentsAndRestart 验证模型跨段、跨页和跨对象排序去重，保留大小写差异且忽略空模型，筛选不改变目录。
-func TestModelsAcrossPagesSegmentsAndRestart(t *testing.T) {
+// TestModelsAcrossPagesAndRestart 验证模型跨页和跨对象排序去重，保留大小写差异且忽略空模型，筛选不改变目录。
+func TestModelsAcrossPagesAndRestart(t *testing.T) {
 	dir := newAuditDirectory(t)
 	c := openAudit(t, dir, 0)
 	first := monitorScope(t, c, "models-first-scope")
 	second := monitorScope(t, c, "models-second-scope")
 	c.Close()
-	// 两个小段避免用大量正文触发轮换；每段独有模型均在较早记录，第一页看不到它们。
+	// 各批独有模型均在较早记录，第一页看不到它们；所有夹具都是真实提交的 SQLite 行。
 	models := [][]string{{"segment-one-only", "zeta", "Alpha", ""}, {"segment-two-only", "alpha", "zeta", "Alpha", "latest"}}
 	index := 0
-	for segment, names := range models {
-		var lines []byte
+	for _, names := range models {
 		for _, model := range names {
 			objectID := first
 			if index%2 != 0 {
 				objectID = second
 			}
-			record := audit.Record{
-				ID: fmt.Sprintf("model-record-%d", index), ObjectID: objectID,
-				ReceivedAt: time.Now().UTC().Format(time.RFC3339Nano), Protocol: "responses",
-				Model: model, Text: "model catalog text",
-			}
-			raw, err := json.Marshal(record)
-			if err != nil {
-				t.Fatal(err)
-			}
-			lines = append(lines, append(raw, '\n')...)
+			record := fixtureRecord(fmt.Sprintf("model-record-%d", index), objectID, time.Now().UTC(), "model catalog text")
+			record.Model = model
+			insertFixtureRecords(t, dir, record)
 			index++
 		}
-		writeAuditFile(t, dir, fmt.Sprintf("records-%06d.jsonl", segment+1), lines)
 	}
 	want := []string{"Alpha", "alpha", "latest", "segment-one-only", "segment-two-only", "zeta"}
 	c = openAudit(t, dir, 0)

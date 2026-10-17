@@ -1,8 +1,9 @@
-// 本文件通过真实宿主的受保护接口与隔离输出验证保留期，不调用私有存储或查询方法。
+// 本文件通过真实宿主接口和隔离 SQLite 记录快照验证保留期、维护与持久内容。
 package system
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 // retentionSettings 读取公开保留设置；返回天数和正文上限，接口或JSON不符则终止测试。
@@ -114,20 +117,99 @@ func newRetentionClock(t *testing.T, now time.Time) string {
 	return path
 }
 
-// retentionOutput 扫描隔离目录的持久输出；返回所有记录行，文件或读取失败终止测试。
-func retentionOutput(t *testing.T, stateDir string) []byte {
+// openRecordDatabase 打开已有隔离 SQLite；writable 仅用于停机后的有效 schema 夹具，失败终止测试，不创建缺失数据库。
+// 返回连接由调用者关闭；只读查询不把正常维护引起的数据库元数据变化当作记录改写。
+func openRecordDatabase(t *testing.T, stateDir string, writable bool) *sql.DB {
 	t.Helper()
-	files, err := filepath.Glob(filepath.Join(stateDir, "records-*.jsonl"))
+	mode := "ro"
+	if writable {
+		mode = "rw"
+	}
+	location := &url.URL{Scheme: "file", Path: filepath.Join(stateDir, "records.sqlite")}
+	query := url.Values{"mode": {mode}, "_busy_timeout": {"5000"}}
+	if writable {
+		query.Set("_journal_mode", "PERSIST")
+	}
+	location.RawQuery = query.Encode()
+	db, err := sql.Open("sqlite3", location.String())
 	if err != nil {
 		t.Fatal(err)
 	}
+	db.SetMaxOpenConns(1)
+	if err := db.Ping(); err != nil {
+		db.Close()
+		t.Fatal("隔离 SQLite 数据库不可读取", err)
+	}
+	return db
+}
+
+// assertRecordSchema 验证真实 records 表只含业务字段和必要的提交/时间索引列，且至少有 minimum 条记录。
+// stateDir 必须已有 SQLite；返回前关闭连接，缺库、未知列、空夹具或查询失败均终止测试。
+func assertRecordSchema(t *testing.T, stateDir string, minimum int) {
+	t.Helper()
+	db := openRecordDatabase(t, stateDir, false)
+	defer db.Close()
+	rows, err := db.Query("PRAGMA table_info(records)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed := map[string]bool{"seq": true, "id": true, "object_id": true, "received_at": true, "received_sec": true, "received_ns": true, "protocol": true, "purpose": true, "model": true, "request_reasoning": true, "text": true, "truncated": true, "extraction_incomplete": true}
+	seen := 0
+	for rows.Next() {
+		var ordinal, notNull, primary int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&ordinal, &name, &kind, &notNull, &defaultValue, &primary); err != nil {
+			t.Fatal(err)
+		}
+		if !allowed[name] {
+			t.Fatalf("SQLite 记录新增非白名单列：%s", name)
+		}
+		seen++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	rows.Close()
+	if seen != len(allowed) {
+		t.Fatal("SQLite 记录 schema 缺少约定列")
+	}
+	var count int
+	if err := db.QueryRow("SELECT count(*) FROM records").Scan(&count); err != nil || count < minimum {
+		t.Fatalf("SQLite 记录夹具数量不符：count=%d minimum=%d err=%v", count, minimum, err)
+	}
+}
+
+// retentionOutput 读取 SQLite 中按提交顺序排列的全部记录，包括尚未物理删除的过期记录。
+// 返回每条记录的确定性 JSON 快照而非数据库原字节；缺库、损坏或查询失败终止测试，零条记录返回空切片。
+func retentionOutput(t *testing.T, stateDir string) []byte {
+	t.Helper()
+	db := openRecordDatabase(t, stateDir, false)
+	defer db.Close()
+	rows, err := db.Query("SELECT seq,id,object_id,received_at,received_sec,received_ns,protocol,purpose,model,request_reasoning,text,truncated,extraction_incomplete FROM records ORDER BY seq")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
 	var output []byte
-	for _, file := range files {
-		data, err := os.ReadFile(file)
+	for rows.Next() {
+		values := make([]any, 13)
+		targets := make([]any, len(values))
+		for i := range values {
+			targets[i] = &values[i]
+		}
+		if err := rows.Scan(targets...); err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(values)
 		if err != nil {
 			t.Fatal(err)
 		}
 		output = append(output, data...)
+		output = append(output, '\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	return output
 }
@@ -150,7 +232,7 @@ func TestRetentionExpiresAcrossQueries(t *testing.T) {
 	if page := searchRecords(t, h, nil); page.Total != 1 {
 		t.Fatal("七天前记录提前到期")
 	}
-	// 先填入位置缓存；到期详情不能直接返回缓存位置的数据。
+	// 先读取到期前详情；重复读取仍须重新检查逻辑保留期限。
 	code, _ := h.request(t, "GET", api+"/detail?id="+record.ID, adminKey, nil)
 	if code != 200 {
 		t.Fatal("到期前详情不可读")
@@ -158,7 +240,7 @@ func TestRetentionExpiresAcrossQueries(t *testing.T) {
 	retentionClock(t, clock, received.Add(7*24*time.Hour), 0)
 	code, _ = h.request(t, "GET", api+"/detail?id="+record.ID, adminKey, nil)
 	if code != 404 {
-		t.Fatalf("缓存详情暴露过期正文，HTTP=%d", code)
+		t.Fatalf("重复读取详情暴露过期正文，HTTP=%d", code)
 	}
 	for _, query := range []url.Values{nil, {"q": {marker}}, {"object_id": {record.ObjectID}, "model": {"retention-model"}, "limit": {"1"}}, {"offset": {"1"}}} {
 		if page := searchRecords(t, h, query); page.Total != 0 || len(page.Records) != 0 {
@@ -220,7 +302,7 @@ func retentionUsage(t *testing.T, h *instance) int64 {
 	return status.State.Used
 }
 
-// TestRetentionSweepPreservesLiveLines 验证独立周期在主动暂停时回收混合段，未到期原始行不变且缓存失效。
+// TestRetentionSweepPreservesLiveLines 验证主动暂停期间仍删除到期记录、释放 SQLite 空间，并完整保留幸存记录。
 func TestRetentionSweepPreservesLiveLines(t *testing.T) {
 	received := time.Date(2030, 2, 1, 0, 0, 0, 0, time.UTC)
 	clock := newRetentionClock(t, received)
@@ -242,7 +324,7 @@ func TestRetentionSweepPreservesLiveLines(t *testing.T) {
 	if len(liveLine) == 0 {
 		t.Fatal("未找到未过期对照行")
 	}
-	// 先建立两条位置缓存，混合段替换后旧字节偏移不得继续使用。
+	// 先经列表和详情访问两条记录，维护后查询必须反映已提交的删除。
 	searchRecords(t, h, nil)
 	snapshotMutation(t, h, "/pause", map[string]bool{"paused": true})
 	usedBefore := retentionUsage(t, h)
@@ -253,12 +335,12 @@ func TestRetentionSweepPreservesLiveLines(t *testing.T) {
 	retentionClock(t, clock, received.Add(7*24*time.Hour), 1)
 	output := waitRetentionOutput(t, h, func(raw []byte) bool { return !bytes.Contains(raw, []byte(old.ID)) })
 	if !bytes.Equal(output, liveLine) || len(output) >= len(original) {
-		t.Fatal("混合段清理改写了未过期记录，或没有释放输出空间")
+		t.Fatal("SQLite 维护修改了幸存记录，或没有删除到期记录")
 	}
 	code, raw := h.request(t, "GET", api+"/detail?id="+live.ID, adminKey, nil)
 	var detail savedRecord
 	if code != 200 || json.Unmarshal(raw, &detail) != nil || detail.Text != marker+"-LIVE" {
-		t.Fatal("清理后详情缓存仍使用旧偏移")
+		t.Fatal("SQLite 维护后幸存记录详情不符")
 	}
 	if page := searchRecords(t, h, nil); page.Total != 1 || len(page.Records) != 1 || page.Records[0].ID != live.ID {
 		t.Fatal("清理后分页计数错误")
@@ -266,7 +348,7 @@ func TestRetentionSweepPreservesLiveLines(t *testing.T) {
 	if usedAfter := retentionUsage(t, h); usedAfter >= usedBefore {
 		t.Fatal("后台回收没有减少公开目录占用")
 	}
-	// 没有新提交时也清理最后一个分段，主动暂停不冻结期限。
+	// 没有新提交时也清理最后一条记录，主动暂停不冻结期限。
 	retentionClock(t, clock, received.Add(9*24*time.Hour), 2)
 	waitRetentionOutput(t, h, func(raw []byte) bool { return len(raw) == 0 })
 }
@@ -355,6 +437,6 @@ func TestRetentionRemovedAndDowntime(t *testing.T) {
 		t.Fatal("停机冻结或重置了保留期限")
 	}
 	if len(retentionOutput(t, stateDir)) != 0 {
-		t.Fatal("启动没有回收停机期间过期的分段")
+		t.Fatal("启动没有删除停机期间到期的 SQLite 记录")
 	}
 }

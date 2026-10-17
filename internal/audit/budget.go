@@ -13,8 +13,8 @@ import (
 const diagnosticSize int64 = 4096
 const diagnosticName = "capacity.json"
 
-// 最大编码行和新分段目录开销之外多留256KiB，恢复后不会因相同大小的下一条输入立即停采。
-const resumeRequiredBytes = auxiliaryReserve + maintenanceReserve + maxLine + 4096 + (256 << 10)
+// 完整页窗与配置空间之外再留256KiB，恢复后不会因相同大小的下一条输入立即停采。
+const capacityHysteresisBytes int64 = 256 << 10
 
 type diagnosticSummary struct {
 	Version      int               `json:"version"`
@@ -62,13 +62,13 @@ func (c *Collector) openDiagnostics() error {
 			file.Close()
 			return err
 		}
-		// 新目录没有先前采集证据；已有配置/分段却没有标记时不能倒推出正常退出。
+		// 新目录没有先前采集证据；既有数据库缺诊断时不能倒推出正常退出。
 		_, configErr := c.root.Lstat("monitors.json")
 		if configErr != nil && !errors.Is(configErr, os.ErrNotExist) {
 			file.Close()
 			return configErr
 		}
-		if errors.Is(configErr, os.ErrNotExist) && len(c.segments) == 0 {
+		if errors.Is(configErr, os.ErrNotExist) && c.newStorage {
 			c.mu.Lock()
 			if !c.sessionStarted {
 				c.status.Recovery = Recovery{}
@@ -289,18 +289,21 @@ func (c *Collector) refreshCapacity() error {
 	if !usable {
 		return nil
 	}
+	if err := c.boundSQLitePages(); err != nil {
+		return err
+	}
 	if c.diagnostics == nil {
 		if err := c.openDiagnostics(); err != nil {
 			return err
 		}
 	}
-	_, used, err := c.scanDirectory()
-	if err != nil {
-		return err
+	_, windowErr := c.sqliteWindowLimit()
+	if windowErr != nil && windowErr.Error() != "budget_exhausted" {
+		return windowErr
 	}
 	c.mu.Lock()
-	c.status.UsedBytes = used
-	if used+auxiliaryReserve+maintenanceReserve >= c.status.BudgetBytes {
+	used := c.status.UsedBytes
+	if windowErr != nil || used+auxiliaryReserve >= c.status.BudgetBytes {
 		if c.status.Reason != "budget_exhausted" {
 			c.status.State = "paused"
 			c.status.Reason = "budget_exhausted"
@@ -310,7 +313,7 @@ func (c *Collector) refreshCapacity() error {
 			c.gapEntries["budget_exhausted"] = entry
 			c.markGapHistory("budget_exhausted")
 		}
-	} else if c.status.Reason == "budget_exhausted" && c.status.BudgetBytes-used >= resumeRequiredBytes {
+	} else if c.status.Reason == "budget_exhausted" && c.status.BudgetBytes-used >= c.status.ResumeRequiredBytes {
 		c.status.State = "active"
 		c.status.Reason = ""
 		entry := c.gapEntries["budget_exhausted"]

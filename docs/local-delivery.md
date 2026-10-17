@@ -1,6 +1,8 @@
 # 官方 CPA 插件构建与安装说明
 
-本文说明正式精简版的构建、插件安装、发现启用和回滚，不执行生产部署。`0.2.0` 已完成 macOS arm64、Linux amd64 原生与浏览器验收，以及固定官方 Docker 镜像内非 root 加载、采集和重启验证；实际平台、限制及产物见[本轮交付记录](verification/official-http-input-2026-10-16.md)。
+本文说明 SQLite 版本的构建、插件安装、发现启用和回滚，不执行生产部署。记录存储改为内嵌 SQLite，不需要安装数据库服务或系统 SQLite；不导入旧 JSONL 历史、监控对象或设置。按本次授权只在 Linux 执行构建验收，macOS 不参与；实际通过项和产物以 [SQLite 验收记录](verification/sqlite-storage-2026-10-17.md) 为准，不能沿用旧版本报告。
+
+本轮安装包为 `.build/releases/sqlite-storage-0.3.0-linux-amd64.tar.gz`；已展开的正式库与 `INSTALL.md`、`SHA256SUMS`、`verification.json` 位于 `.build/releases/sqlite-storage-0.3.0-linux-amd64.20261017/`。不要误用本机 `.build/plugins/` 中的历史库。
 
 ## 兼容条件
 
@@ -12,7 +14,7 @@
 | 动态库 | 与宿主 OS、CPU 架构兼容；Linux 还须兼容目标 libc |
 | 管理前端 | 本轮验收使用 `v1.26.2`；插件页面内嵌于动态库，现有主管理页可用时不必另行挂载 HTML |
 
-契约入口为 `host/manifest.json` 和 [ADR-0004](adr/0004-official-http-execution.md)。不再需要私有观察合同或宿主补丁，不承诺未来 CPA、其他 fork、任意 libc 或其他认证来源兼容。当前验收覆盖内置客户端 Key；固定管理前端 `v1.26.2` 已完成本轮双端真实浏览器验收。
+契约入口为 `host/manifest.json` 和 [ADR-0004](adr/0004-official-http-execution.md)。不再需要私有观察合同或宿主补丁，不承诺未来 CPA、其他 fork、任意 libc 或其他认证来源兼容。验收范围为内置客户端 Key；固定管理前端 `v1.26.2` 的本轮 Linux 浏览器结果见 SQLite 验收记录，不引用旧双端报告。
 
 ## 先构建插件，不必重编用户 CPA
 
@@ -29,7 +31,7 @@ make build-plugin
 
 该命令不获取、修改或重编宿主。macOS 库不能复制到 Linux 使用；Linux 库必须在与目标架构/libc 兼容的环境中构建，特别注意宿主机与容器可能不同。交叉编译成功不等于在目标宿主已加载、运行。
 
-本轮已验证的 Linux amd64 库保留在 `.build/distribution/http-execution-0.2.0-linux-amd64.94Rl4a/request-input-audit.so`，同目录有 `SHA256SUMS` 和 `verification.json`；该路径是本次本地产物，不是已公开发布的下载地址。Linux arm64 精简版尚未验收。
+SQLite 版本正式 Linux 产物及 SHA-256 见 [SQLite 验收记录](verification/sqlite-storage-2026-10-17.md)。旧 `.build/distribution/http-execution-0.2.0-linux-amd64.94Rl4a/` 是 JSONL 历史产物，不用于本次安装。Linux arm64、musl 和 macOS 的本轮运行未获授权或未验收，不提供相应通过声明。
 
 开发与系统验收才使用：
 
@@ -45,7 +47,7 @@ make build
 
 先确认目标确为固定官方版本，并保留原镜像引用/摘要或二进制、Compose、配置、环境设置和原插件目录的恢复副本。现有 `.env`、认证 Key、auth 目录、端口、管理访问策略及其他插件均沿用，不以本文示例替换。更改生产配置或部署须单独授权。
 
-给新插件分配一个**全新的专用 state-dir**。不要复用旧补丁版目录；旧 raw-Key 身份与新 caller-scope 身份不等价，没有自动迁移。
+给 SQLite 插件分配一个**全新的空专用 state-dir**。不要复用旧 JSONL 或补丁版目录，也不要复制旧 seed、监控配置或诊断；旧目录原样保留不用。新目录会生成新匿名身份，升级后需重新发现、命名并启用监控。
 
 ### 裸机或既有官方宿主
 
@@ -58,7 +60,7 @@ plugins:
   configs:
     request-input-audit:
       enabled: true
-      state-dir: /absolute/path/to/existing/plugins/request-input-audit-data
+      state-dir: /absolute/path/to/existing/plugins/request-input-audit-data-sqlite
       budget-bytes: 1073741824
 ```
 
@@ -77,14 +79,14 @@ ${docker_home}/cpa/
 ├── auth-dir/
 └── plugins-dir/
     ├── request-input-audit.so
-    └── request-input-audit-data/
+    └── request-input-audit-data-sqlite/
         ├── .audit.lock
-        ├── caller-scope-v1.seed
+        ├── caller-scope-v1-sqlite-v1.seed
         ├── monitors.json
         └── …其他审计数据
 ```
 
-**首次安装时只准备空的 `request-input-audit-data` 目录；树中的锁、种子和配置由插件自行创建，不手工填写。** 动态库必须在插件扫描目录根层，CPA 不递归扫描子目录。数据子目录只放该插件状态，不混放 `.so`、HTML 或其他插件数据。
+**首次安装时只准备空的 `request-input-audit-data-sqlite` 目录；树中的锁、种子和配置由插件自行创建，不手工填写。** 动态库必须在插件扫描目录根层，CPA 不递归扫描子目录。数据子目录只放该插件状态，不混放 `.so`、HTML 或其他插件数据。
 
 下面以已验收的镜像版本展示目录映射。沿用你现有的服务名、配置、认证、端口和其他挂载，不整段覆盖 Compose；不要为了照抄示例直接降级正在使用的 CPA。`${docker_home}` 沿用现有 Compose 变量。
 
@@ -102,7 +104,7 @@ services:
       - ${docker_home}/cpa/plugins-dir:/CLIProxyAPI/plugins
 ```
 
-这条 `plugins-dir` 挂载已经包含数据子目录，**不需要额外的数据挂载、命名卷或 `.so` 单文件挂载，也不需要额外的插件 HTML 挂载**。插件目录挂载必须可写；`request-input-audit-data` 为 `0700`、状态文件为 `0600`，所有者应为容器中 CPA 的实际运行 UID/GID，不能统一假定为1000或放宽成777。目录和祖先不能经过符号链接。
+这条 `plugins-dir` 挂载已经包含数据子目录，**不需要额外的数据挂载、命名卷或 `.so` 单文件挂载，也不需要额外的插件 HTML 挂载**。插件目录挂载必须可写；`request-input-audit-data-sqlite` 为 `0700`、状态文件为 `0600`，所有者应为容器中 CPA 的实际运行 UID/GID，不能统一假定为1000或放宽成777。目录和祖先不能经过符号链接。
 
 如果目前使用 `latest` 与 `pull_policy: always`，建议先记录当前正常版本与镜像摘要，再固定到该版本或摘要，避免重建时顺带升级；这不是要求直接改成示例版本。
 
@@ -117,7 +119,7 @@ plugins:
   configs:
     request-input-audit:
       enabled: true
-      state-dir: /CLIProxyAPI/plugins/request-input-audit-data
+      state-dir: /CLIProxyAPI/plugins/request-input-audit-data-sqlite
       budget-bytes: 1073741824
 ```
 
@@ -129,17 +131,19 @@ plugins:
 
 `management.html` 是 CPA 主管理页面，不是插件页面。现有管理页面已经能打开插件菜单时，可以沿用，不必新增 HTML 挂载。若需要复现本轮固定 `v1.26.2` 管理页面，才单独准备该资源目录：运行 `bash scripts/fetch-management-ui.sh` 并按 `host/management-ui.json` 校验后，将产物目录挂载到自选静态路径，用 `MANAGEMENT_STATIC_PATH` 指向它，并关闭自动更新。不要把它放进审计数据子目录；页面位于插件目录本身也不会被 CPA 自动采用。未来或其他管理前端版本仍需验证。
 
-### 已有精简版数据改放到子目录
+### 从 JSONL 版本升级：不迁移历史
 
-如果原先使用 `/CLIProxyAPI/audit-http-execution` 且已经有对象或记录，不能只修改 `state-dir`，否则新目录会生成新身份，看不到原有监控配置和历史。
+本次按用户要求从零开始，不导入旧历史、监控选择、名称或设置。以下步骤需要在实际安装环境执行，不由开发验收自动执行。
 
-1. 正常停止 CPA，使写入排空。
-2. 将原数据目录的**全部内容，包括隐藏文件、`caller-scope-v1.seed`、配置和记录**复制到新的 `plugins-dir/request-input-audit-data`。目标应为空，不合并两份独立审计数据；保留所有者和权限。
-3. 修改 `config.yaml` 的 `state-dir`。如果 Compose 中有原数据目录的独立挂载，可移除该挂载项，但保留宿主机旧目录或旧命名卷，不删除数据。
-4. 若修改了挂载或环境变量，使用 `docker compose up -d --no-deps --force-recreate --pull never --no-build cli-proxy-api` 重建服务；仅修改 CPA 配置时可使用 `docker compose restart cli-proxy-api`。服务名按实际填写，操作会短暂停服。
-5. 确认状态可用，对象 ID、名称、监控状态和历史保持，再发送新的 HTTP 输入确认保存。旧目录继续保留，不能删除或重新生成 seed 来“修复”身份。
+1. 记录现有 CPA 版本和运行 UID/GID，保留原插件库及配置恢复副本；不更新镜像、不改认证材料。
+2. 正常停止 CPA，使写入排空。保留旧 state-dir，不删除、不复制其内容到新目录。
+3. 将本轮已验收的正式 `request-input-audit.so` 放入现有插件扫描目录根层，保留其他插件；不要安装 `audittest` 库。
+4. 在已有挂载覆盖的 `plugins-dir` 内创建新的空 `request-input-audit-data-sqlite`，归实际 CPA 运行 UID/GID，权限 `0700`。不要使用 `777`，不要手工创建 seed 或数据库。
+5. 仅将插件配置的 `state-dir` 改为 `/CLIProxyAPI/plugins/request-input-audit-data-sqlite`；预算保留原需求。现有整目录挂载已覆盖新子目录，无需另加数据库或 HTML 挂载。
+6. 仅修改库/CPA 配置时，按实际服务名重启，例如 `docker compose restart cli-proxy-api`；如实际修改了挂载才使用 `docker compose up -d --no-deps --force-recreate --pull never --no-build cli-proxy-api`。操作会短暂停服。
+7. 检查状态可用，管理页首次应无监控和历史。按下一节重新发现、命名并启用对象，发送带本轮唯一文本的新请求，确认搜索、详情及重启后仍可查询。
 
-这是**同一精简版身份格式的目录迁移**，不是旧补丁版 `identity.seed` 的格式迁移。旧补丁版目录仍须保留并使用新的精简版空目录。
+新旧目录不兼容。回滚同时恢复旧插件、旧配置与旧目录，保留新的 SQLite 目录；不要把新目录交给旧插件，也不要通过删除 seed 或数据库来修复错误。
 
 ## 加载后的发现与启用
 
@@ -162,11 +166,12 @@ plugins:
 
 ## 数据保护与回滚
 
-- `caller-scope-v1.seed` 为格式 magic + 32随机字节，取得 `flock` 后仅在除锁文件外为空的目录创建，并同步文件及目录。新 seed、配置、诊断和正文须作为**整个 state-dir** 持久保存、保护和备份，不只复制 JSONL。目录 `0700`、文件 `0600`，不能多实例共享。
+- `caller-scope-v1-sqlite-v1.seed` 为格式 magic + 32随机字节，取得 `flock` 后仅在除锁文件外为空的目录创建，并同步文件及目录。新 seed、配置、诊断、`records.sqlite` 和 `records.sqlite-journal` 须作为**整个 state-dir** 持久保存和保护；备份应正常停写后复制完整目录，不只复制数据库主文件。目录 `0700`、文件 `0600`，不能多实例共享。
 - 旧 `identity.seed`、已有数据却缺新 seed、seed 损坏或权限不合规时明确停采拒绝。不删除、不迁移、不覆盖、不轮换，不用“换一个种子”修复旧目录。新格式不能当作旧对象身份继续使用。
 - 默认预算1GiB、保留7天、正文上限64KiB，管理范围分别为4MiB–1GiB、1–30整天、1–65536字节。整个专用目录纳入预算；到期不可查不等于安全擦除，暂停和停机不冻结期限。
 - 应用层明文保存，普通文本秘密不自动脱敏。主机高权限、卷、快照和备份读取者仍能读正文，管理员需保护这些副本。不要把合成测试 Key 复制到生产。
-- 新字段 `request_reasoning` 可被本版本读取，旧记录缺字段保持原样；旧二进制的严格解码器不认识新字段，写入新记录后不能将同一 state-dir 直接交给旧插件降级，不自动改写或迁移。
+- SQLite 主库与持久回滚日志都计入目录预算，日志工作空间随主库逐步分配并保留用于降额后的维护。保守情况下主库容量约为总预算一半，正文还要扣除索引；到期删除和增量回收后实际占用才减少。不要手动清空或删除 journal。
+- 本版本不读取旧 JSONL，也不把旧字段兼容测试当作迁移能力。新旧插件仅使用各自的数据目录，降级须恢复旧插件、旧配置和旧目录。
 - 出错先在管理页停止新采集；管理不可用时停用该插件或正常停止本实例，再恢复原配置/镜像/插件加载方式。保留原镜像和配置，以及新旧 state-dir/卷；不删除 volume，不自动清理数据，也不把新目录交给旧版插件打开。
 - 恢复采集前核对故障和实际状态；提高预算只能解除符合条件的容量暂停，不能修复真实 I/O 或完整性错误。正常停止尽力排空，同进程崩溃可能丢失未落盘副本，未提供 native 崩溃隔离或 exactly-once。
 
@@ -184,7 +189,7 @@ make tools-test
 make browser
 ```
 
-命令定义以 `Makefile` 为准；本轮实际执行、平台、浏览器、容器及故障结果已记录在[交付记录](verification/official-http-input-2026-10-16.md)。原探针和旧票13的通过结果不能替代后续正式版验收。`legacy_patched` 仅保留历史用例，不用 skip 冒充当前兼容；默认不构建私有 compat-overlay。
+命令定义以 `Makefile` 为准；本次用户限定只在 Linux 执行，以上命令不在本机运行。本轮实际执行、浏览器、容器及故障结果见 [SQLite 验收记录](verification/sqlite-storage-2026-10-17.md)。原探针和旧版本的通过结果不能替代本轮验收。`legacy_patched` 仅保留历史用例，不用 skip 冒充当前兼容；默认不构建私有 compat-overlay。
 
 Linux 真实磁盘故障需在获准的隔离环境另外执行，不因 macOS 夹具在 Linux skip 而算通过：
 
@@ -198,4 +203,4 @@ sudo make -C "$SOURCE" verify-linux-disk \
 
 该入口要求调用者明确提供权限、绝对源码路径、新空证据目录和既有非 root 用户；可先调用 `scripts/verify-linux-disk.sh --source "$SOURCE" --output "$OUTPUT" --user "$RUN_USER" --validate-only` 检查参数。它使用私有 mount namespace 的64MiB tmpfs，不操作物理磁盘、不自动 sudo、不强制卸载、不删除文件。只读测试是停止写入者后只读重挂再启动，不冒充运行中热切。进程和挂载正常回收，证据文件保留。
 
-官方宿主可能仍有既有后台网络请求，`--local-model` 不保证完全离线。两端自主验收、固定基点工作区审查、有限证据和独立提交授权遵循[验证与交付约定](agents/verification.md)。
+官方宿主可能仍有既有后台网络请求，`--local-model` 不保证完全离线。除本次用户明确限定仅 Linux 执行外，自主验收、固定基点工作区审查、有限证据和独立提交授权遵循[验证与交付约定](agents/verification.md)。

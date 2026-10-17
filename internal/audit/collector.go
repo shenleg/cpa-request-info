@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,7 +23,6 @@ const (
 	minBudget      int64 = 4 << 20
 	maxText              = 64 << 10
 	maxLine              = 512 << 10
-	segmentSize    int64 = 1 << 20
 	maxQueuedBytes int64 = 8 << 20
 	// 64 位平台的记录及队列计数136字节，另计思考对象40字节及可选预算8字节。
 	queuedRecordOverhead = 184
@@ -100,7 +100,13 @@ type Collector struct {
 	root        *os.Root
 	lock        *os.File
 	directory   *os.File
-	active      *os.File
+	db          *sql.DB
+	connection  *sql.Conn
+	database    *os.File
+	journal     *os.File
+	path        string
+	newStorage  bool
+	pageLimit   int64
 	diagnostics *os.File
 	// callerScopeSeed 只在持锁初始化并同步成功后发布，不向宿主暴露或缓存 caller_scope。
 	callerScopeSeed []byte
@@ -119,25 +125,17 @@ type Collector struct {
 	config               configuration
 	configValid          bool
 	generation           string
-	segments             []segment
-	// 只保留最近查询页（最多100条）的文件位置，不缓存正文或建立全量身份索引；由 ioMu 保护。
-	pageHints   map[string]recordLocation
-	queue       chan queuedRecord
-	done        chan struct{}
-	closeOnce   sync.Once
-	closed      bool
-	queuedBytes int64
-	status      Status
+	queue                chan queuedRecord
+	done                 chan struct{}
+	closeOnce            sync.Once
+	closed               bool
+	queuedBytes          int64
+	status               Status
 }
 
 type queuedRecord struct {
 	record Record
 	bytes  int64
-}
-type segment struct {
-	name      string
-	committed int64
-	count     int
 }
 
 // Open 打开独占审计目录并扫描已提交记录；dir 必须不经过符号链接。
@@ -159,7 +157,7 @@ func Open(dir string, budget int64) (*Collector, error) {
 	if err != nil {
 		return nil, errors.New("storage_unavailable")
 	}
-	c := &Collector{root: root, diagnosticWake: make(chan struct{}, 1), generation: hex.EncodeToString(generation[:]), config: configuration{Version: 4, BudgetBytes: budget, MaxTextBytes: maxText, RetentionDays: defaultRetentionDays, RetentionCaps: []retentionCap{}, Objects: make(map[string]Object)}, queue: make(chan queuedRecord, 64), done: make(chan struct{}), status: Status{Available: true, State: "active", BudgetBytes: budget, Gaps: map[string]uint64{}, GapHistory: map[string]string{}, Recovery: Recovery{Uncertain: true, DetectedAt: auditNow().UTC().Format(time.RFC3339Nano), Reason: "recovery_unavailable"}}}
+	c := &Collector{root: root, path: dir, diagnosticWake: make(chan struct{}, 1), generation: hex.EncodeToString(generation[:]), config: configuration{Version: 4, BudgetBytes: budget, MaxTextBytes: maxText, RetentionDays: defaultRetentionDays, RetentionCaps: []retentionCap{}, Objects: make(map[string]Object)}, queue: make(chan queuedRecord, 64), done: make(chan struct{}), status: Status{Available: true, State: "active", BudgetBytes: budget, ReservedBytes: auxiliaryReserve, ResumeRequiredBytes: auxiliaryReserve + capacityHysteresisBytes, Gaps: map[string]uint64{}, GapHistory: map[string]string{}, Recovery: Recovery{Uncertain: true, DetectedAt: auditNow().UTC().Format(time.RFC3339Nano), Reason: "recovery_unavailable"}}}
 	c.gapEntries = make(map[string]gapEntry)
 	for _, key := range []string{"read_error", "invalid_event", "invalid_json", "unsupported_protocol", "unsupported_content", "metadata_too_large", "queue_full", "storage_error", "budget_exhausted", "observer_unavailable"} {
 		c.status.Gaps[key] = 0
@@ -379,8 +377,6 @@ func (c *Collector) Status() Status {
 	result.CapturePaused = c.config.CapturePaused
 	result.MaxTextBytes = c.config.MaxTextBytes
 	result.RetentionDays = c.config.RetentionDays
-	result.ReservedBytes = auxiliaryReserve + maintenanceReserve
-	result.ResumeRequiredBytes = resumeRequiredBytes
 	result.OverBudgetBytes = max(0, result.UsedBytes-result.BudgetBytes)
 	if result.CapacityGap && result.Reason != "budget_exhausted" {
 		result.CapacityGap = !c.expired(Record{ReceivedAt: c.capacityLastAt}, auditNow())

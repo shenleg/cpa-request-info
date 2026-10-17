@@ -66,13 +66,16 @@ async function startDemo(options) {
         } catch {reject(new Error('invalid_ready_url'));}
       });
     });
-    /** 切换本实例已保存段的权限；只操纵合成目录，不伪造公开响应，文件系统失败直接抛错。 */
+    /** 切换本实例 SQLite 主库及 journal 的权限；只操纵合成目录，缺少有效存储文件或 I/O 失败直接抛错。 */
     async function storageFault(enabled, startup=false) {
       const directory=path.join(ready.directory,'audit-http-execution');
       if(startup){await fs.chmod(path.join(directory,'.audit.lock'),enabled?0o400:0o600);return;}
-      const names=(await fs.readdir(directory)).filter(name=>/^records-\d{6}\.jsonl$/.test(name));
-      if (!names.length) throw new Error('fault_seed_missing');
-      for (const name of names) await fs.chmod(path.join(directory,name),enabled?0o400:0o600);
+      const files=['records.sqlite','records.sqlite-journal'].map(name=>path.join(directory,name));
+      for (const file of files) {
+        const info=await fs.lstat(file);
+        if (!info.isFile()||info.size===0) throw new Error('fault_seed_missing');
+      }
+      for (const file of files) await fs.chmod(file,enabled?0o400:0o600);
     }
     /** 对当前宿主发送 SIGKILL 并等同目录新进程 ready；返回前已健康检查，超时/退出抛错。 */
     async function restart() {

@@ -19,8 +19,8 @@ import (
 	"github.com/shenleg/cpa-request-info/internal/audit"
 )
 
-const scopeSeedFile = "caller-scope-v1.seed"
-const scopeSeedMagic = "cpa-request-info:caller-scope-seed:v1\n"
+const scopeSeedFile = "caller-scope-v1-sqlite-v1.seed"
+const scopeSeedMagic = "cpa-request-info:caller-scope-seed:sqlite:v1\n"
 
 // newAuditDirectory 为测试创建0700空目录并返回路径；失败终止测试，不注册自动删除。
 func newAuditDirectory(t *testing.T) string {
@@ -132,7 +132,7 @@ func TestCaptureExecutionPurposeSkip(t *testing.T) {
 		t.Fatalf("辅助执行可查询：%v", err)
 	}
 	c.Close()
-	if bytes.Contains(readAuditFile(t, dir, "records-000001.jsonl"), []byte("invalid-json-private-skip")) {
+	if bytes.Contains(readAuditFile(t, dir, "records.sqlite"), []byte("invalid-json-private-skip")) {
 		t.Fatal("辅助正文被持久保存")
 	}
 }
@@ -259,7 +259,7 @@ func TestCaptureExecutionHTTPWhitelist(t *testing.T) {
 
 // TestCallerScopeRejectsLegacyDirectory 验证旧种子、已有数据或未知文件不能触发新身份创建，不自动迁移或改写文件。
 func TestCallerScopeRejectsLegacyDirectory(t *testing.T) {
-	for _, name := range []string{"identity.seed", "records-000001.jsonl", "unknown-state"} {
+	for _, name := range []string{"identity.seed", "caller-scope-v1.seed", "records-000001.jsonl", "unknown-state"} {
 		t.Run(name, func(t *testing.T) {
 			dir := newAuditDirectory(t)
 			original := bytes.Repeat([]byte{'s'}, 32)
@@ -438,10 +438,10 @@ func TestRequestPurposeMixedRestart(t *testing.T) {
 	const scope = "mixed-purpose-scope"
 	objectID := monitorScope(t, c, scope)
 	c.Close()
-	// 空白和字段顺序有意与 Marshal 不同，用于证明读取及维护不重新编码幸存历史。
+	// SQLite 用空 purpose 表示未记录用途；不再读取旧 JSONL 目录。
 	legacyTime := time.Now().UTC()
-	legacy := []byte(fmt.Sprintf("{ \"text\":\"legacy\", \"id\":\"legacy-purpose\", \"object_id\":%q, \"received_at\":%q, \"protocol\":\"responses\", \"model\":\"synthetic\", \"truncated\":false }\n", objectID, legacyTime.Format(time.RFC3339Nano)))
-	writeAuditFile(t, dir, "records-000001.jsonl", legacy)
+	legacy := fixtureRecord("legacy-purpose", objectID, legacyTime, "legacy")
+	insertFixtureRecords(t, dir, legacy)
 	c = openAudit(t, dir, 0)
 	want := map[string]audit.RequestPurpose{"legacy-purpose": ""}
 	for _, purpose := range []audit.RequestPurpose{audit.PurposeMain, audit.PurposeTurn, audit.PurposeUnknown} {
@@ -451,14 +451,9 @@ func TestRequestPurposeMixedRestart(t *testing.T) {
 	}
 	waitSaved(t, c, 4)
 	c.Close()
-	original := readAuditFile(t, dir, "records-000001.jsonl")
-	if !bytes.HasPrefix(original, legacy) {
-		t.Fatal("新增用途时改写了旧记录")
-	}
-	// 同段加入到期夹具，重启会执行原字节复制；所有幸存新旧记录必须保持原行。
-	expired := bytes.Replace(legacy, []byte("legacy-purpose"), []byte("expired-purpose"), 1)
-	expired = bytes.Replace(expired, []byte(legacyTime.Format(time.RFC3339Nano)), []byte(legacyTime.Add(-8*24*time.Hour).Format(time.RFC3339Nano)), 1)
-	writeAuditFile(t, dir, "records-000001.jsonl", append(expired, original...))
+	// 加入同库到期记录；维护删除不能补写幸存记录的用途。
+	expired := fixtureRecord("expired-purpose", objectID, legacyTime.Add(-8*24*time.Hour), "expired")
+	insertFixtureRecords(t, dir, expired)
 	c = openAudit(t, dir, 0)
 	if status := c.Status(); status.State != "active" || status.Saved != 4 {
 		t.Fatalf("新旧混合记录重启失败：%+v", status)
@@ -484,35 +479,28 @@ func TestRequestPurposeMixedRestart(t *testing.T) {
 			t.Fatalf("旧记录用途被伪造或新用途被省略：%s", encoded)
 		}
 	}
-	c.Close()
-	if !bytes.Equal(original, readAuditFile(t, dir, "records-000001.jsonl")) {
-		t.Fatal("重启改写了混合历史")
+	got, err := c.Detail("legacy-purpose")
+	if err != nil || got.Text != legacy.Text || got.ReceivedAt != legacy.ReceivedAt {
+		t.Fatalf("维护改写幸存记录：%+v err=%v", got, err)
 	}
+	c.Close()
 }
 
-// TestRequestPurposeRejectsInvalidStorage 验证非法用途含空值和null导致明确停采，仍严格拒绝未知字段且保留原行。
+// TestRequestPurposeRejectsInvalidStorage 验证非法用途文本导致明确停采，数据库边界保留原值而不修复。
 func TestRequestPurposeRejectsInvalidStorage(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		field string
-	}{
-		{"skip", `"purpose":"skip"`},
-		{"unknown_value", `"purpose":"future"`},
-		{"case", `"purpose":"MAIN"`},
-		{"empty", `"purpose":""`},
-		{"null", `"purpose":null`},
-		{"number", `"purpose":42`},
-		{"object", `"purpose":{}`},
-		{"array", `"purpose":[]`},
-		{"unknown_field", `"purpose":"main","headers":{"X-Synthetic":"not allowed"}`},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+	for _, value := range []string{"skip", "future", "MAIN", "42", "{}", "[]"} {
+		t.Run(value, func(t *testing.T) {
 			dir := newAuditDirectory(t)
 			c := openAudit(t, dir, 0)
 			objectID := monitorScope(t, c, "invalid-purpose-scope")
 			c.Close()
-			line := []byte(fmt.Sprintf("{\"id\":\"invalid-purpose\",\"object_id\":%q,\"received_at\":%q,\"protocol\":\"responses\",\"model\":\"synthetic\",\"text\":\"content\",\"truncated\":false,%s}\n", objectID, time.Now().UTC().Format(time.RFC3339Nano), tc.field))
-			writeAuditFile(t, dir, "records-000001.jsonl", line)
+			insertFixtureRecords(t, dir, fixtureRecord("invalid-purpose", objectID, time.Now().UTC(), "content"))
+			db := fixtureDatabase(t, dir)
+			if _, err := db.Exec("UPDATE records SET purpose=?", value); err != nil {
+				t.Fatal(err)
+			}
+			closeFixture(t, db)
+			original := readAuditFile(t, dir, "records.sqlite")
 			c = openAudit(t, dir, 0)
 			if status := c.Status(); status.State != "paused" || status.Reason != "storage_error" || status.Saved != 0 {
 				t.Fatalf("非法用途没有拒绝：%+v", status)
@@ -525,7 +513,7 @@ func TestRequestPurposeRejectsInvalidStorage(t *testing.T) {
 				t.Fatalf("存储故障时辅助执行新增缺口：%+v", status)
 			}
 			c.Close()
-			if !bytes.Equal(line, readAuditFile(t, dir, "records-000001.jsonl")) {
+			if !bytes.Equal(original, readAuditFile(t, dir, "records.sqlite")) {
 				t.Fatal("非法历史被改写")
 			}
 		})
@@ -539,7 +527,8 @@ func TestCaptureExecutionBudgetContinuation(t *testing.T) {
 	scope := "budget-caller-scope"
 	id := monitorScope(t, c, scope)
 	c.Close()
-	writeAuditFile(t, dir, "budget-padding", bytes.Repeat([]byte{'p'}, 2<<20))
+	padding := int64(4<<20) - directoryCharge(t, dir) - c.Status().ReservedBytes + 4096
+	writeAuditFile(t, dir, "budget-padding", bytes.Repeat([]byte{'p'}, int(padding)))
 	c = openAudit(t, dir, 0)
 	budget := int64(4 << 20)
 	if err := c.SetSettings(audit.SettingsChange{BudgetBytes: &budget}); err != nil {

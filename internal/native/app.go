@@ -83,7 +83,7 @@ func (a *App) Handle(method string, raw []byte) (any, error) {
 	switch method {
 	case "plugin.register", "plugin.reconfigure":
 		a.configure(raw)
-		return map[string]any{"schema_version": 6, "metadata": map[string]any{"Name": "输入审计", "Version": "0.2.0", "Author": "cpa-request-info", "GitHubRepository": "https://github.com/shenleg/cpa-request-info"}, "capabilities": map[string]bool{"management_api": true, "request_interceptor": true}}, nil
+		return map[string]any{"schema_version": 6, "metadata": map[string]any{"Name": "输入审计", "Version": "0.3.0", "Author": "cpa-request-info", "GitHubRepository": "https://github.com/shenleg/cpa-request-info"}, "capabilities": map[string]bool{"management_api": true, "request_interceptor": true}}, nil
 	case "management.register":
 		type route struct{ Method, Path string }
 		type resource struct{ Path, Menu, Description string }

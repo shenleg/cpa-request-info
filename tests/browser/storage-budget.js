@@ -125,6 +125,8 @@ module.exports = async (page, options = {}) => {
       const monitored = await page.request.post(api+'/monitor', {headers:{Authorization:'Bearer '+admin},data:{object_id:object.id,name:'预算验收对象'}});
       assert(monitored.status()===200, '预算场景未能准备监控对象');
     }
+    // 两轮保留各70条64KiB记录；SQLite还计入等量日志工作空间，填充阶段需32MiB而非旧JSONL的16MiB。
+    await save(32);
     // 每条正文固定为 64 KiB，70 条本轮记录超过最低预算；不借用前一场景或前一轮历史证明满额。
     for (let index=0;index<70;index++) {
       const marker = runId+'-'+index+'-';
@@ -164,7 +166,7 @@ module.exports = async (page, options = {}) => {
     await frame.locator('#health').filter({hasText:'诊断持久化：已保存'}).waitFor({state:'attached'});
     const health = await frame.locator('#health').textContent();
     assert(health.includes('超额：'+gap.state.over_budget_bytes) && health.includes('配置与维护预留：') && health.includes('恢复所需空闲：'), '状态未展示实际超额、预留和恢复空间');
-    await save(16);
+    await save(32);
     const resumed = await read('/status');
     assert(resumed.state.state==='active' && !resumed.state.capture_paused && resumed.state.capacity_gap, '调高预算没有恢复或清除了先前告警');
     await frame.locator('#capture-state').filter({hasText:'实际可采集'}).waitFor();
@@ -172,7 +174,7 @@ module.exports = async (page, options = {}) => {
     await frame.locator('#pause').click();
     await idle();
     await frame.locator('#capture-state').filter({hasText:'主动暂停'}).waitFor();
-    await save(32);
+    await save(64);
     const paused = await read('/status');
     assert(paused.state.capture_paused && paused.state.state==='active', '调整预算意外解除了主动暂停');
     await frame.locator('#capture-state').filter({hasText:'主动暂停'}).waitFor();

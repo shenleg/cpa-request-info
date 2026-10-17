@@ -4,7 +4,6 @@ package audit_test
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -155,7 +154,7 @@ func TestRequestReasoningRejectsInvalidInput(t *testing.T) {
 	}
 }
 
-// TestRequestReasoningMixedRestart 验证旧缺字段为 nil、新空声明为对象，组合参数及零预算在维护和重启后保持原值与原行。
+// TestRequestReasoningMixedRestart 验证 SQLite NULL 为 nil、新空声明为对象，组合参数及零预算在维护和重启后保持原值。
 func TestRequestReasoningMixedRestart(t *testing.T) {
 	dir := newAuditDirectory(t)
 	c := openAudit(t, dir, 0)
@@ -163,20 +162,15 @@ func TestRequestReasoningMixedRestart(t *testing.T) {
 	objectID := monitorScope(t, c, scope)
 	c.Close()
 	stamp := time.Now().UTC()
-	legacy := []byte(fmt.Sprintf("{ \"text\":\"legacy\", \"id\":\"legacy-reasoning\", \"object_id\":%q, \"received_at\":%q, \"protocol\":\"responses\", \"model\":\"synthetic\", \"truncated\":false }\n", objectID, stamp.Format(time.RFC3339Nano)))
-	writeAuditFile(t, dir, "records-000001.jsonl", legacy)
+	legacy := fixtureRecord("legacy-reasoning", objectID, stamp, "legacy")
+	insertFixtureRecords(t, dir, legacy)
 	c = openAudit(t, dir, 0)
 	c.CaptureExecution("new-empty", scope, "responses", audit.PurposeUnknown, reasoningInput(t, "responses", ""))
 	c.CaptureExecution("new-all", scope, "anthropic-messages", audit.PurposeMain, reasoningInput(t, "anthropic-messages", `"output_config":{"effort":"high"},"thinking":{"type":"enabled","budget_tokens":0}`))
 	waitSaved(t, c, 3)
 	c.Close()
-	original := readAuditFile(t, dir, "records-000001.jsonl")
-	if !bytes.HasPrefix(original, legacy) {
-		t.Fatal("追加时改写了旧记录")
-	}
-	expired := bytes.Replace(legacy, []byte("legacy-reasoning"), []byte("expired-reasoning"), 1)
-	expired = bytes.Replace(expired, []byte(stamp.Format(time.RFC3339Nano)), []byte(stamp.Add(-8*24*time.Hour).Format(time.RFC3339Nano)), 1)
-	writeAuditFile(t, dir, "records-000001.jsonl", append(expired, original...))
+	expired := fixtureRecord("expired-reasoning", objectID, stamp.Add(-8*24*time.Hour), "expired")
+	insertFixtureRecords(t, dir, expired)
 	c = openAudit(t, dir, 0)
 	zero := int64(0)
 	want := map[string]*audit.RequestReasoning{
@@ -207,10 +201,11 @@ func TestRequestReasoningMixedRestart(t *testing.T) {
 			t.Fatalf("旧记录被补字段或新对象被省略：%s", raw)
 		}
 	}
-	c.Close()
-	if !bytes.Equal(original, readAuditFile(t, dir, "records-000001.jsonl")) {
-		t.Fatal("维护或重启改写幸存记录")
+	got, err := c.Detail("legacy-reasoning")
+	if err != nil || !reflect.DeepEqual(got, legacy) {
+		t.Fatalf("维护或重启改写幸存记录：%+v err=%v", got, err)
 	}
+	c.Close()
 }
 
 // TestRequestReasoningRejectsInvalidStorage 验证持久对象的空值、错型、重复、未知字段和超长声明均明确停采且保留原文件。
@@ -229,14 +224,19 @@ func TestRequestReasoningRejectsInvalidStorage(t *testing.T) {
 			c := openAudit(t, dir, 0)
 			id := monitorScope(t, c, "storage-reasoning-scope")
 			c.Close()
-			line := []byte(fmt.Sprintf("{\"id\":\"invalid-reasoning\",\"object_id\":%q,\"received_at\":%q,\"protocol\":\"responses\",\"model\":\"synthetic\",\"text\":\"content\",\"truncated\":false,\"request_reasoning\":%s}\n", id, time.Now().UTC().Format(time.RFC3339Nano), value))
-			writeAuditFile(t, dir, "records-000001.jsonl", line)
+			insertFixtureRecords(t, dir, fixtureRecord("invalid-reasoning", id, time.Now().UTC(), "content"))
+			db := fixtureDatabase(t, dir)
+			if _, err := db.Exec("UPDATE records SET request_reasoning=?", value); err != nil {
+				t.Fatal(err)
+			}
+			closeFixture(t, db)
+			original := readAuditFile(t, dir, "records.sqlite")
 			c = openAudit(t, dir, 0)
 			if status := c.Status(); status.State != "paused" || status.Reason != "storage_error" || status.Saved != 0 {
 				t.Fatalf("非法持久思考声明没有拒绝：%+v", status)
 			}
 			c.Close()
-			if !bytes.Equal(line, readAuditFile(t, dir, "records-000001.jsonl")) {
+			if !bytes.Equal(original, readAuditFile(t, dir, "records.sqlite")) {
 				t.Fatal("非法历史被改写")
 			}
 		})

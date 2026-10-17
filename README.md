@@ -1,10 +1,10 @@
 # CPA HTTP 执行输入记录
 
-本仓库提供安装到**官方 CLIProxyAPI `v8.0.27`** 的原生插件，无需修改、重编或替换用户正在运行的 CPA。正式精简版 `0.2.0` 已通过 macOS arm64、Linux amd64 原生系统与浏览器验收，以及固定官方 Docker 镜像内的非 root 加载、采集和重启验证；尚未部署生产。实际范围和证据见[本轮交付记录](docs/verification/official-http-input-2026-10-16.md)。
+本仓库提供安装到**官方 CLIProxyAPI `v8.0.27`** 的原生插件，无需修改、重编或替换用户正在运行的 CPA。当前 `0.3.0` 将记录主存储改为内嵌 SQLite，不需要数据库服务或系统 SQLite。此版本不导入旧 JSONL 历史，必须使用新的数据目录；本轮仅在 Linux 构建验收，不沿用旧版本的 macOS 通过结论。存储决策见 [ADR-0005](docs/adr/0005-sqlite-record-storage.md)，实际验证见 [SQLite 验收记录](docs/verification/sqlite-storage-2026-10-17.md)。
 
-基础规范为 [HTTP 执行输入 spec](.scratch/official-http-input/spec.md) 和 [ADR-0004](docs/adr/0004-official-http-execution.md)。请求用途过滤增量见[规范](.scratch/request-purpose-filter/spec.md)与[本轮双平台验收](docs/verification/request-purpose-filter-2026-10-17.md)，不以旧版本报告替代。安装步骤见[本地交付说明](docs/local-delivery.md)。
+基础规范为 [HTTP 执行输入 spec](.scratch/official-http-input/spec.md) 和 [ADR-0004](docs/adr/0004-official-http-execution.md)。请求用途过滤增量见[规范](.scratch/request-purpose-filter/spec.md)与[原 JSONL 版本验收](docs/verification/request-purpose-filter-2026-10-17.md)，该历史报告不替代本轮 SQLite 验收。安装步骤见[本地交付说明](docs/local-delivery.md)。
 
-思考设置、模型下拉和详情复制的增量规范见[记录增强 spec](.scratch/record-metadata-and-actions/spec.md)，本轮实际验证结果见[验收记录](docs/verification/record-metadata-and-actions-2026-10-17.md)。
+思考设置、模型下拉和详情复制的增量规范见[记录增强 spec](.scratch/record-metadata-and-actions/spec.md)，原 JSONL 版本结果保留在[历史验收记录](docs/verification/record-metadata-and-actions-2026-10-17.md)。
 
 ## 支持条件与记录含义
 
@@ -27,9 +27,9 @@
 
 ### 新身份必须使用新的 state-dir
 
-新 `caller-scope-v1` 身份与旧 raw-Key 派生身份不等价，不要复用旧补丁版审计目录。推荐将动态库放在 `plugins-dir/request-input-audit.so`，专用数据放在 `plugins-dir/request-input-audit-data/`；现有插件目录挂载即可覆盖两者，`state-dir` 配置为 `/CLIProxyAPI/plugins/request-input-audit-data`。首次安装的数据子目录应为空，不能混放动态库或 HTML；已有精简版数据迁移步骤见[交付说明](docs/local-delivery.md#已有精简版数据改放到子目录)。
+SQLite 版本不复用旧 JSONL 或补丁版目录，不迁移历史、监控选择、名称或设置。推荐将动态库放在 `plugins-dir/request-input-audit.so`，新数据放在 `plugins-dir/request-input-audit-data-sqlite/`；现有插件目录挂载即可覆盖两者，`state-dir` 改为 `/CLIProxyAPI/plugins/request-input-audit-data-sqlite`。首次安装的数据子目录必须为空，不能混放动态库或 HTML；旧目录原样保留不用。升级和回滚见[交付说明](docs/local-delivery.md#从-jsonl-版本升级不迁移历史)。
 
-- `caller-scope-v1.seed` 由格式 magic 和 32 个随机字节组成；取得 `flock` 后，仅在空目录中初始化（除本进程锁文件外无其他内容），并同步保存文件和目录。
+- `caller-scope-v1-sqlite-v1.seed` 由格式 magic 和 32 个随机字节组成；取得 `flock` 后，仅在空目录中初始化（除本进程锁文件外无其他内容），并同步保存文件和目录。新 seed 会改变匿名对象 ID，升级后需重新发现、命名并启用监控。
 - 专用目录为 `0700`、seed 和其他状态文件为 `0600`。seed 必须和**整个 state-dir** 一起持久保存、保护和备份；单独复制正文不够。多个实例不能共享此目录。
 - 发现旧 `identity.seed`、已有数据却缺新 seed、seed 损坏或权限不合规时明确停采拒绝。不自动迁移、删除、覆盖或轮换种子；故障遗留物保留。
 
@@ -47,7 +47,7 @@
 
 `request_reasoning` 只保存 Before 可见的请求声明：Chat 的 `reasoning_effort`、Responses 的 `reasoning.effort`、Messages 的 `output_config.effort` 与 `thinking.type` / `thinking.budget_tokens`，对应 `effort`、`type`、`budget_tokens`。等级、模式和预算独立展示，不互相换算；预算为0与未指定不同。新记录的空对象显示“未指定”，旧记录缺字段显示“未记录”。**这些是请求值，不保证是 CPA 后缀、协议转换或配置覆盖后的最终上游强度**。不保存完整思考配置对象，不从模型名推断。
 
-**新增字段的降级限制：** 新插件可读取原有记录，但旧插件的严格解码器会拒绝其不认识的 `purpose` 或 `request_reasoning`。不能把写入新记录后的 state-dir 直接交给旧插件降级运行；本项目不自动迁移、删除或改写数据。
+**格式升级与降级限制：** SQLite 版本不读取旧 JSONL。新旧插件不能共用数据目录；回滚必须同时恢复旧插件、旧配置和旧目录，不把 SQLite 目录交给旧插件。本项目不自动迁移、删除或改写旧历史。
 
 ### 识别与过滤规则
 
@@ -119,7 +119,9 @@
 
 上限只影响后续回调取得的副本。保留期从 Before 观察时刻计算，到期退出列表、搜索和详情；启动及周期维护回收空间，暂停、移除、停机不冻结期限。缩短保留期须确认；调长不延长旧记录或使过期记录重新出现。预算包括 seed、配置、诊断和辅助文件，不仅是正文；满额停止新采集，不提前覆盖未到期历史。容量恢复不等于真实 I/O 或完整性故障已修复。
 
-使用 64 条 / 8 MiB 有界副本队列及分段 JSONL，只有写入并同步成功的记录可查；入队不等于保存。缺口历史、当前活动故障与已阅状态分别显示，观察时刻不冒充损失起止，不将不同原因的次数相加当成独立丢失请求数。不恢复异常退出前的内存副本，不承诺 exactly-once、零丢失、零延迟或任意流量完整保存七天。
+使用 64 条 / 8 MiB 有界副本队列及内嵌 SQLite，只有持久事务提交成功的记录可查；入队不等于保存。`records.sqlite` 保存记录及索引，`records.sqlite-journal` 是持久复用的回滚日志工作空间；`monitors.json` 保存监控及设置，`capacity.json` 保存固定诊断。日志随主库逐步分配，不在空目录预占整个预算。每次写入前须有完整的 256 页（1 MiB）主库增长窗口及对应日志空间；不足时在执行 SQL 前停采，SQL 执行或提交中的磁盘满不冒充容量暂停。为保证写入及降额后的清理仍有工作空间，保守情况下主库可用容量约为总预算的一半，并可能剩余不足一个增长窗口的未用空间；净正文还需扣除索引等开销。正文关键词仍为 ASCII 不区分大小写的字面子串，不是全文检索语法。
+
+缺口历史、当前活动故障与已阅状态分别显示，观察时刻不冒充损失起止，不将不同原因的次数相加当成独立丢失请求数。不恢复异常退出前的内存副本，不承诺 exactly-once、零丢失、零延迟或任意流量完整保存七天。
 
 ### 管理 API
 
@@ -162,9 +164,9 @@ make verify            # 开发验收入口，不等于已经通过
 
 插件产物为 `.build/plugins/request-input-audit.dylib`（macOS）或 `.build/plugins/request-input-audit.so`（Linux）。`.build/bin/cliproxyapi` 仅供开发验收，**安装插件不需要替换用户 CPA**。Linux 动态库须与宿主架构及 libc 兼容，不能把 macOS 动态库拷到 Linux；交叉编译成功不代表目标平台已加载运行。
 
-插件前端内嵌于动态库，不需要单独部署 HTML；现有 CPA 主管理页面可用时直接沿用。本轮主管理前端以 `v1.26.2` 验收，两端各 8 个真实浏览器场景各两轮通过；如需固定该版本，可通过 `MANAGEMENT_STATIC_PATH` 指定其静态目录并禁止自动更新。镜像 `eceasy/cli-proxy-api:v8.0.27` 已在 Linux amd64 验证挂载正式 `.so`、非 root 采集与重启；当前推荐的单目录挂载结构见[交付说明](docs/local-delivery.md)，不自建 CPA 镜像。
+插件前端内嵌于动态库，不需要单独部署 HTML；现有 CPA 主管理页面可用时直接沿用。本轮主管理前端以 `v1.26.2` 在 Linux 验收，具体场景和轮次以 SQLite 验收记录为准，不沿用旧双端结果；如需固定该版本，可通过 `MANAGEMENT_STATIC_PATH` 指定其静态目录并禁止自动更新。镜像 `eceasy/cli-proxy-api:v8.0.27` 已在 Linux amd64 验证挂载正式 `.so`、非 root 采集与重启；当前推荐的单目录挂载结构见[交付说明](docs/local-delivery.md)，不自建 CPA 镜像。
 
-自主双端验收、固定基点工作区审查、有限证据和独立提交授权规则见[验证与交付约定](docs/agents/verification.md)。测试只使用隔离合成配置与可控上游，不复制合成 Key 到生产；本轮实际结果须由验收记录给出，旧报告不代替本轮运行。
+自主验收、固定基点工作区审查、有限证据和独立提交授权规则见[验证与交付约定](docs/agents/verification.md)。测试只使用隔离合成配置与可控上游，不复制合成 Key 到生产；本轮实际结果须由验收记录给出，旧报告不代替本轮运行。
 
 ## 风险与历史
 

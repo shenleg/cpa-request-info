@@ -1,4 +1,4 @@
-// 本文件通过磁盘工具公开CLI验证参数及空目录边界；不挂载、不提权、不模拟业务，不删除夹具。
+// 本文件验证磁盘工具公开 CLI 及 SQLite 记录快照；不挂载、不提权、不启动宿主，不删除夹具。
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {spawnSync} = require('node:child_process');
@@ -68,4 +68,69 @@ test('未知容量参数明确拒绝，不能扩大固定64MiB卷', () => {
   const result = run(['--size', '1G']);
   assert.equal(result.status, 2);
   assert.match(result.stderr, /unrecognized arguments/);
+});
+
+test('SQLite快照读取有效记录，缺库、缺journal、损坏与错误schema必须失败', () => {
+  const f = fixture();
+  // 使用 Python 标准库构造真实 SQLite；记录包含 NUL，不能按 JSONL 扫描或比较整个数据库字节。
+  const code = String.raw`
+import importlib.util
+import pathlib
+import sqlite3
+import sys
+
+spec = importlib.util.spec_from_file_location("disk_verifier", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = pathlib.Path(sys.argv[2])
+valid = root / "valid"
+valid.mkdir()
+connection = sqlite3.connect(valid / "records.sqlite")
+connection.executescript("""
+PRAGMA journal_mode=PERSIST;
+PRAGMA application_id=0x43504149;
+PRAGMA user_version=1;
+CREATE TABLE records(seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL,object_id TEXT NOT NULL,received_at TEXT NOT NULL,received_sec INTEGER NOT NULL,received_ns INTEGER NOT NULL,protocol TEXT NOT NULL,purpose TEXT NOT NULL,model TEXT NOT NULL,request_reasoning TEXT,text TEXT NOT NULL,truncated INTEGER NOT NULL,extraction_incomplete INTEGER NOT NULL) STRICT;
+""")
+text = "sqlite-nul-\x00%_中文"
+connection.execute("INSERT INTO records VALUES(1,'control','object','2030-01-01T00:00:00Z',1893456000,0,'chat-completions','','model',NULL,?,0,0)", (text,))
+connection.commit()
+connection.close()
+expected = module.sqlite_records(valid)
+assert len(expected) == 1 and expected[0][1] == "control" and expected[0][10] == text
+connection = sqlite3.connect(valid / "records.sqlite")
+connection.execute("PRAGMA cache_size=128")
+connection.close()
+assert module.sqlite_records(valid) == expected
+
+def rejects(directory):
+    """断言快照对无效磁盘边界明确失败；directory 指向保留夹具，不删除或改写文件。"""
+    try:
+        module.sqlite_records(directory)
+    except (AssertionError, sqlite3.DatabaseError):
+        return
+    raise AssertionError("无效SQLite被空扫描冒充成功")
+
+missing = root / "missing"
+missing.mkdir()
+rejects(missing)
+(valid / "records.sqlite-journal").rename(valid / "journal.preserved")
+rejects(valid)
+corrupt = root / "corrupt"
+corrupt.mkdir()
+(corrupt / "records.sqlite").write_bytes(b"invalid sqlite header")
+(corrupt / "records.sqlite-journal").write_bytes(b"preserved fault")
+rejects(corrupt)
+wrong = root / "wrong-schema"
+wrong.mkdir()
+connection = sqlite3.connect(wrong / "records.sqlite")
+connection.executescript("PRAGMA journal_mode=PERSIST; PRAGMA application_id=0x43504149; PRAGMA user_version=1; CREATE TABLE records(id TEXT);")
+connection.close()
+rejects(wrong)
+print("SQLite fixture boundaries verified")
+`;
+  const result = spawnSync('python3', ['-I', '-c', code, path.join(__dirname, 'verify-linux-disk.py'), f.output], {encoding:'utf8', timeout:5000});
+  if (result.error) throw result.error;
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /SQLite fixture boundaries verified/);
 });

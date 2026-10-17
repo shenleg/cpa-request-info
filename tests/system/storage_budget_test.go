@@ -98,6 +98,39 @@ func budgetOutputUsage(t *testing.T, root string) int64 {
 	return total
 }
 
+// setBudgetAuxiliaryFree 调整合成辅助文件，使整个目录的实际计费剩余空间接近 free；path 必须位于本轮隔离目录。
+// 主库与 journal 的当前占用都参与计算；分配、统计或无法形成目标空间时终止测试，无返回值。
+func setBudgetAuxiliaryFree(t *testing.T, h *instance, path string, free int64) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allocated := ((info.Size() + 4095) / 4096) * 4096
+	if allocated == 0 {
+		allocated = 4096
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok && stat.Blocks*512 > allocated {
+		allocated = stat.Blocks * 512
+	}
+	state := readBudgetState(t, h)
+	base := budgetOutputUsage(t, h.stateDir) - allocated
+	size := state.BudgetBytes - base - free
+	if free <= 0 || size < 4096 || size > state.BudgetBytes {
+		t.Fatalf("辅助夹具无法形成目标剩余空间：base=%d target_free=%d budget=%d", base, free, state.BudgetBytes)
+	}
+	if err := os.WriteFile(path, bytes.Repeat([]byte{0x5a}, int(size)), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestBudgetSettingsPersist 验证预算受严格校验，保存后优先于启动默认值，联合设置不部分生效。
 func TestBudgetSettingsPersist(t *testing.T) {
 	h := startHost(t, 1<<30, true, "")
@@ -195,7 +228,7 @@ func TestBudgetExpiryResumesWithGap(t *testing.T) {
 	}
 }
 
-// TestBudgetLoweredMaintenanceContinues 验证超预算不提前淘汰，混合段无空间时仍回收后续全到期段并保留主动暂停。
+// TestBudgetLoweredMaintenanceContinues 验证降额不提前淘汰 SQLite 记录，超额仍执行非增长维护并保留主动暂停。
 func TestBudgetLoweredMaintenanceContinues(t *testing.T) {
 	now := time.Date(2031, 2, 1, 0, 0, 0, 0, time.UTC)
 	clock := newRetentionClock(t, now)
@@ -224,7 +257,7 @@ func TestBudgetLoweredMaintenanceContinues(t *testing.T) {
 	if used := budgetOutputUsage(t, h.stateDir); used > state.UsedBytes {
 		t.Fatal("超额期间配置失败仍增加了持久化占用")
 	}
-	// 第一个分段含未到期对照；不能因其改写无空间就放弃之后无增长的整段回收。
+	// 到期和存活记录共享同一个数据库；降低预算不能阻止复用现有 journal 的删除和页面回收。
 	retentionClock(t, clock, now.Add(7*24*time.Hour), 1)
 	waitBudgetState(t, h, func(s budgetState) bool { return s.UsedBytes < 4<<20 && s.Reason != "storage_error" })
 	retentionClock(t, clock, now.Add(7*24*time.Hour), 2)
@@ -264,9 +297,8 @@ func TestBudgetAuxiliaryGrowthHysteresis(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(directory, "auxiliary.data")
-	if err := os.WriteFile(path, bytes.Repeat([]byte{0x5a}, 2<<20), 0600); err != nil {
-		t.Fatal(err)
-	}
+	initial := readBudgetState(t, h)
+	setBudgetAuxiliaryFree(t, h, path, initial.ReservedBytes/2)
 	retentionClock(t, clock, now, 1)
 	state := waitBudgetState(t, h, func(s budgetState) bool { return s.Reason == "budget_exhausted" && s.DiagnosticsPersisted })
 	if expected := budgetOutputUsage(t, h.stateDir); state.UsedBytes != expected || state.UsedBytes > 4<<20 {
@@ -284,18 +316,18 @@ func TestBudgetAuxiliaryGrowthHysteresis(t *testing.T) {
 		t.Fatal("重启未保留主动暂停、容量暂停和历史告警")
 	}
 	// 释放至正文准入预留以上、恢复门槛以下，不能立即反复切换状态。
-	if err := os.Truncate(path, 3<<19); err != nil {
-		t.Fatal(err)
-	}
+	middle := (state.ReservedBytes + state.ResumeRequiredBytes) / 2
+	setBudgetAuxiliaryFree(t, h, path, middle)
 	retentionClock(t, clock, now, 2)
-	state = waitBudgetState(t, h, func(s budgetState) bool { return s.UsedBytes < 2<<20 })
+	state = waitBudgetState(t, h, func(s budgetState) bool {
+		free := s.BudgetBytes - s.UsedBytes
+		return free > s.ReservedBytes && free < s.ResumeRequiredBytes
+	})
 	free := state.BudgetBytes - state.UsedBytes
 	if state.State != "paused" || free <= state.ReservedBytes || free >= state.ResumeRequiredBytes {
 		t.Fatal("容量恢复没有使用独立滞回余量")
 	}
-	if err := os.Truncate(path, 1<<20); err != nil {
-		t.Fatal(err)
-	}
+	setBudgetAuxiliaryFree(t, h, path, state.ResumeRequiredBytes+(256<<10))
 	retentionClock(t, clock, now, 3)
 	state = waitBudgetState(t, h, func(s budgetState) bool { return s.State == "active" })
 	if !state.CapturePaused || !state.CapacityGap || !state.DiagnosticsPersisted {
@@ -348,22 +380,17 @@ func TestBudgetAlertRetention(t *testing.T) {
 	h := startRetentionHost(t, 4<<20, "", clock)
 	h.monitorAll(t)
 	path := filepath.Join(h.stateDir, "synthetic-auxiliary")
-	if err := os.WriteFile(path, bytes.Repeat([]byte{0x5a}, 2<<20), 0600); err != nil {
-		t.Fatal(err)
-	}
+	initial := readBudgetState(t, h)
+	setBudgetAuxiliaryFree(t, h, path, initial.ReservedBytes/2)
 	retentionClock(t, clock, now, 1)
-	waitBudgetState(t, h, func(s budgetState) bool { return s.Reason == "budget_exhausted" && s.DiagnosticsPersisted })
-	if err := os.Truncate(path, 1<<20); err != nil {
-		t.Fatal(err)
-	}
+	paused := waitBudgetState(t, h, func(s budgetState) bool { return s.Reason == "budget_exhausted" && s.DiagnosticsPersisted })
+	setBudgetAuxiliaryFree(t, h, path, paused.ResumeRequiredBytes+(256<<10))
 	retentionClock(t, clock, now.Add(24*time.Hour), 2)
 	waitBudgetState(t, h, func(s budgetState) bool { return s.State == "active" && s.CapacityGap })
 	snapshotMutation(t, h, "/settings", map[string]int{"retention_days": 30})
 	retentionClock(t, clock, now.Add(7*24*time.Hour), 3)
 	waitBudgetState(t, h, func(s budgetState) bool { return !s.CapacityGap && s.DiagnosticsPersisted })
-	if err := os.WriteFile(path, bytes.Repeat([]byte{0x5a}, 2<<20), 0600); err != nil {
-		t.Fatal(err)
-	}
+	setBudgetAuxiliaryFree(t, h, path, initial.ReservedBytes/2)
 	retentionClock(t, clock, now.Add(8*24*time.Hour), 4)
 	waitBudgetState(t, h, func(s budgetState) bool {
 		return s.Reason == "budget_exhausted" && s.CapacityGap && s.DiagnosticsPersisted
@@ -390,9 +417,8 @@ func TestBudgetExpectedSkipsStaySkips(t *testing.T) {
 	clock := newRetentionClock(t, now)
 	h := startRetentionHost(t, 4<<20, "", clock)
 	h.monitorAll(t)
-	if err := os.WriteFile(filepath.Join(h.stateDir, "synthetic-auxiliary"), bytes.Repeat([]byte{0x5a}, 2<<20), 0600); err != nil {
-		t.Fatal(err)
-	}
+	initial := readBudgetState(t, h)
+	setBudgetAuxiliaryFree(t, h, filepath.Join(h.stateDir, "synthetic-auxiliary"), initial.ReservedBytes/2)
 	retentionClock(t, clock, now, 1)
 	before := waitBudgetState(t, h, func(s budgetState) bool { return s.Reason == "budget_exhausted" && s.DiagnosticsPersisted })
 	for _, entry := range []struct{ path, body string }{
@@ -409,19 +435,33 @@ func TestBudgetExpectedSkipsStaySkips(t *testing.T) {
 	}
 }
 
-// TestBudgetRestartKeepsRecoveryThreshold 验证编码膨胀导致的容量暂停在重启后仍须满足恢复余量，不能通过默认active绕过滞回。
+// TestBudgetRestartKeepsRecoveryThreshold 验证 SQLite 主库/journal 计费后的容量暂停跨重启仍遵守恢复门槛，不依赖 JSON 转义膨胀。
 func TestBudgetRestartKeepsRecoveryThreshold(t *testing.T) {
 	now := time.Date(2031, 6, 1, 0, 0, 0, 0, time.UTC)
 	clock := newRetentionClock(t, now)
 	h := startRetentionHost(t, 4<<20, "", clock)
 	h.monitorAll(t)
-	if err := os.WriteFile(filepath.Join(h.stateDir, "synthetic-auxiliary"), bytes.Repeat([]byte{0x5a}, 15<<17), 0600); err != nil {
-		t.Fatal(err)
+	text := "BUDGET-SQLITE-NUL-" + strings.Repeat("\x00", 65536-len("BUDGET-SQLITE-NUL-"))
+	body, _ := json.Marshal(map[string]any{"model": "audit-test-model", "messages": []map[string]string{{"role": "user", "content": text}}})
+	if code, _ := h.request(t, "POST", "/v1/chat/completions", keyA, body); code != http.StatusOK {
+		t.Fatal("SQLite NUL 夹具改变了模型响应")
 	}
-	// 64KiB NUL 会按JSON编码为约384KiB，不能只按原文字节判断下一条写入空间。
-	body, _ := json.Marshal(map[string]any{"model": "audit-test-model", "messages": []map[string]string{{"role": "user", "content": strings.Repeat("\x00", 65536)}}})
-	h.request(t, "POST", "/v1/chat/completions", keyA, body)
+	control := waitChatDetail(t, h, "BUDGET-SQLITE-NUL-")
+	if control.Text != text {
+		t.Fatal("SQLite 没有完整保留含 NUL 的正文")
+	}
+	assertRecordSchema(t, h.stateDir, 1)
+	initial := readBudgetState(t, h)
+	path := filepath.Join(h.stateDir, "synthetic-auxiliary")
+	setBudgetAuxiliaryFree(t, h, path, initial.ReservedBytes/2)
+	retentionClock(t, clock, now, 1)
 	paused := waitBudgetState(t, h, func(s budgetState) bool { return s.Reason == "budget_exhausted" && s.DiagnosticsPersisted })
+	setBudgetAuxiliaryFree(t, h, path, (paused.ReservedBytes+paused.ResumeRequiredBytes)/2)
+	retentionClock(t, clock, now, 2)
+	paused = waitBudgetState(t, h, func(s budgetState) bool {
+		free := s.BudgetBytes - s.UsedBytes
+		return free > s.ReservedBytes && free < s.ResumeRequiredBytes && s.DiagnosticsPersisted
+	})
 	free := paused.BudgetBytes - paused.UsedBytes
 	if free <= paused.ReservedBytes || free >= paused.ResumeRequiredBytes {
 		t.Fatal("夹具没有形成正文门槛与恢复门槛之间的空间")
@@ -432,5 +472,10 @@ func TestBudgetRestartKeepsRecoveryThreshold(t *testing.T) {
 	restarted := readBudgetState(t, h)
 	if restarted.State != "paused" || restarted.Reason != "budget_exhausted" || !restarted.CapacityGap {
 		t.Fatal("重启在没有释放空间时绕过了容量恢复门槛")
+	}
+	code, raw := h.request(t, "GET", api+"/detail?id="+control.ID, adminKey, nil)
+	var detail savedRecord
+	if code != http.StatusOK || json.Unmarshal(raw, &detail) != nil || detail.Text != text || searchRecords(t, h, nil).Total != 1 {
+		t.Fatal("容量暂停重启改变了 SQLite 对照记录")
 	}
 }

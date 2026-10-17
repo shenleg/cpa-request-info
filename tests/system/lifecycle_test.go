@@ -1,4 +1,4 @@
-// 本文件通过真实客户端提交和受保护管理接口验证对象生命周期，不查询私有存储或队列。
+// 本文件通过真实客户端提交、受保护接口和 SQLite 隐私白名单验证对象生命周期。
 package system
 
 import (
@@ -157,7 +157,7 @@ func TestIdentityUnavailableKeepsHistoryWithoutGuessing(t *testing.T) {
 	marker := fmt.Sprintf("LIFECYCLE-SEED-FAULT-%d-", time.Now().UnixNano())
 	modelCode := lifecycleSubmit(t, h, keyA, marker+"before")
 	before := lifecycleSaved(t, h, marker+"before")
-	seedPath := filepath.Join(h.stateDir, "caller-scope-v1.seed")
+	seedPath := filepath.Join(h.stateDir, "caller-scope-v1-sqlite-v1.seed")
 	if err := os.Chmod(seedPath, 0644); err != nil {
 		t.Fatal("合成种子权限故障设置失败")
 	}
@@ -212,7 +212,16 @@ func TestLifecyclePrivacyWhitelist(t *testing.T) {
 			}
 		}
 	}
-	allowed := map[string]bool{"id": true, "object_id": true, "received_at": true, "protocol": true, "purpose": true, "model": true, "request_reasoning": true, "text": true, "truncated": true}
+	assertRecordSchema(t, stateDir, 1)
+	records := retentionOutput(t, stateDir)
+	if !bytes.Contains(records, []byte(before.ID)) {
+		t.Fatal("SQLite 隐私夹具没有保存本轮对照记录")
+	}
+	for _, secret := range forbidden {
+		if bytes.Contains(records, []byte(secret)) {
+			t.Fatal("SQLite 逻辑记录包含禁存 Key 或片段")
+		}
+	}
 	if err := filepath.WalkDir(stateDir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -227,19 +236,6 @@ func TestLifecyclePrivacyWhitelist(t *testing.T) {
 		for _, secret := range forbidden {
 			if bytes.Contains(raw, []byte(secret)) {
 				return fmt.Errorf("新增存储出现禁存Key或片段")
-			}
-		}
-		if len(entry.Name()) >= 8 && entry.Name()[:8] == "records-" {
-			for _, line := range bytes.Split(bytes.TrimSpace(raw), []byte("\n")) {
-				var fields map[string]json.RawMessage
-				if json.Unmarshal(line, &fields) != nil || len(fields) != len(allowed) {
-					return fmt.Errorf("输入记录白名单不正确")
-				}
-				for key := range fields {
-					if !allowed[key] {
-						return fmt.Errorf("输入记录新增非白名单字段")
-					}
-				}
 			}
 		}
 		return nil
