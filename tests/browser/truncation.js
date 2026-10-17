@@ -47,7 +47,8 @@ module.exports = async (page, options = {}) => {
     assert(id !== '', '本轮符合状态的记录没有实际保存');
     await frame.getByRole('button', {name:'刷新已保存记录'}).click();
     const row = frame.locator('#records tbody tr').filter({hasText:fixture.marker});
-    await row.getByRole('cell', {name:fixture.label,exact:true}).waitFor();
+    // 内容状态与用途是独立标签，逐项精确核对，不能把整个状态单元格当成单一标签。
+    for (const label of fixture.label.split(' · ')) await row.locator('.flags').getByText(label,{exact:true}).waitFor();
     const detailResponse = page.waitForResponse(r => r.url().includes('/request-input-audit/detail?') && new URL(r.url()).searchParams.get('id')===id);
     await row.getByRole('button', {name:'查看',exact:true}).click();
     const response = await detailResponse;

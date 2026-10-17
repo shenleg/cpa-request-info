@@ -13,14 +13,17 @@ const suggestionPrompt = "[SUGGESTION MODE: Suggest what the user might naturall
 const actionPrompt = "Describe your most recent action in 3-5 words using present tense (-ing). Name the file or function, not the branch. Do not use tools."
 const titlePrompt = "Write the title in the predominant language of the session — a stray word or code token in another language doesn't change it, and neither does the English of these instructions."
 
-// anthropicUserContent 对已确认的末尾 user 分类后提取允许内容；skip 表示辅助请求正常跳过，无错误或存储操作。
-func anthropicUserContent(messages []json.RawMessage, limit int) (text string, truncated, incomplete, skip bool) {
+// anthropicUserContent 提取已确认的末尾 user；仅 unknown 用途按整请求辅助模板判断，避免误删明确对话中的模板引用。
+// messages 为协议消息，purpose 为有限用途，limit 为正文上限；返回正文、截断、不完整及正常跳过标记，无错误或存储操作。
+func anthropicUserContent(messages []json.RawMessage, purpose RequestPurpose, limit int) (text string, truncated, incomplete, skip bool) {
 	last, _ := protocolObject(messages[len(messages)-1])
-	if value, ok := clientMessageText(last["content"]); ok && clientAuxiliary(value) {
-		return "", false, false, true
-	}
-	if clientSplitTranscript(messages) {
-		return "", false, false, true
+	if purpose == PurposeUnknown {
+		if value, ok := clientMessageText(last["content"]); ok && clientAuxiliary(value) {
+			return "", false, false, true
+		}
+		if clientSplitTranscript(messages) {
+			return "", false, false, true
+		}
 	}
 	text, truncated, incomplete = anthropicClientContent(last["content"], limit)
 	return text, truncated, incomplete, false

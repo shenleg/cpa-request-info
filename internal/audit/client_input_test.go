@@ -20,7 +20,10 @@ func waitClientBarrier(t *testing.T, c *audit.Collector) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, err := c.Detail("client-barrier"); err == nil {
-			return
+			// 写入可见先于队列计数扣减；两者完成后才能断言没有剩余副本。
+			if c.Status().Queued == 0 {
+				return
+			}
 		} else if err.Error() != "not_found" {
 			t.Fatalf("查询屏障失败：%v", err)
 		}
@@ -32,8 +35,8 @@ func waitClientBarrier(t *testing.T, c *audit.Collector) {
 	t.Fatal("等待本轮保存屏障超时")
 }
 
-// captureClientInput 提交合成 Anthropic 消息并用后续保存作为 FIFO 屏障；返回本次记录与是否保存，编码或保存失败终止测试。
-func captureClientInput(t *testing.T, messages []any) (string, bool) {
+// captureClientInput 以 purpose 提交合成 Anthropic 消息并用后续保存作为 FIFO 屏障；返回正文与是否保存，编码、用途或保存失败终止测试。
+func captureClientInput(t *testing.T, purpose audit.RequestPurpose, messages []any) (string, bool) {
 	t.Helper()
 	c := openAudit(t, newAuditDirectory(t), 0)
 	scope := "synthetic-client-input-scope"
@@ -43,8 +46,8 @@ func captureClientInput(t *testing.T, messages []any) (string, bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.CaptureExecution("client-input", scope, "anthropic-messages", body)
-	c.CaptureExecution("client-barrier", scope, "anthropic-messages", []byte(`{"model":"synthetic-model","messages":[{"role":"user","content":"client-barrier"}]}`))
+	c.CaptureExecution("client-input", scope, "anthropic-messages", purpose, body)
+	c.CaptureExecution("client-barrier", scope, "anthropic-messages", audit.PurposeUnknown, []byte(`{"model":"synthetic-model","messages":[{"role":"user","content":"client-barrier"}]}`))
 	// 等待可查询的已保存屏障，不能用固定延时证明辅助内容没有保存。
 	waitClientBarrier(t, c)
 	if !maps.Equal(before, c.Status().Gaps) {
@@ -53,6 +56,9 @@ func captureClientInput(t *testing.T, messages []any) (string, bool) {
 	record, err := c.Detail("client-input")
 	if err != nil && err.Error() != "not_found" {
 		t.Fatalf("查询本轮记录失败：%v", err)
+	}
+	if err == nil && record.Purpose != purpose {
+		t.Fatalf("保存用途不符：got=%q want=%q", record.Purpose, purpose)
 	}
 	wantSaved := int64(1)
 	if err == nil {
@@ -78,6 +84,88 @@ func clientTextBlocks(texts ...string) []any {
 	return blocks
 }
 
+// TestClientInputPurposeTemplates 验证明示主会话与轮次保留完整模板，未知用途仍按旧规则跳过且不回找历史。
+func TestClientInputPurposeTemplates(t *testing.T) {
+	const title = "<session>\n合成历史\n</session>\n\nWrite the title in Chinese. Keep technical terms and code identifiers in their original form."
+	const action = "Describe your most recent action in 3-5 words using present tense (-ing). Name the file or function, not the branch. Do not use tools.\nGood: Reading parser.go\nBad (past tense): Read parser.go"
+	const transcript = "<transcript>\n{\"user\":\"合成历史\"}\n</transcript>\n检查最后一个动作"
+	for _, tc := range []struct {
+		name     string
+		messages []any
+		want     string
+	}{
+		{"title", []any{clientTextMessage(title)}, title},
+		{"action", []any{clientTextMessage(action)}, action},
+		{"suggestion_blocks", []any{clientTextMessage(clientTextBlocks(clientSuggestionFixture[:35], clientSuggestionFixture[35:]))}, clientSuggestionFixture},
+		{"transcript", []any{clientTextMessage(transcript)}, transcript},
+		{"split_transcript", []any{clientTextMessage("<transcript>\n"), clientTextMessage("{\"user\":\"合成历史\"}"), clientTextMessage("</transcript>"), clientTextMessage(clientClassifierFixture)}, clientClassifierFixture},
+	} {
+		for _, purpose := range []audit.RequestPurpose{audit.PurposeMain, audit.PurposeTurn, audit.PurposeUnknown} {
+			t.Run(tc.name+"/"+string(purpose), func(t *testing.T) {
+				text, saved := captureClientInput(t, purpose, tc.messages)
+				if purpose == audit.PurposeUnknown {
+					if saved {
+						t.Fatalf("未知用途没有沿用辅助模板规则：%q", text)
+					}
+					return
+				}
+				if !saved || text != tc.want {
+					t.Fatalf("明确用途的完整模板被丢弃：saved=%t got=%q want=%q", saved, text, tc.want)
+				}
+			})
+		}
+	}
+}
+
+// TestClientInputPurposeCleanContent 验证明示用途仍清理技能、提醒及IDE块，不提取工具结果或附件载荷。
+func TestClientInputPurposeCleanContent(t *testing.T) {
+	const reminder = "<system-reminder>\n附加说明\n</system-reminder>"
+	const skill = "Base directory for this skill: /synthetic/skill\n\n技能正文"
+	const ide = "<ide_selection>\n合成IDE上下文\n</ide_selection>"
+	content := clientTextBlocks(skill, reminder, ide, "真实正文")
+	content = append(content,
+		map[string]any{"type": "tool_result", "content": "不保存的工具结果"},
+		map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": "https://synthetic.invalid/private-marker"}},
+	)
+	for _, purpose := range []audit.RequestPurpose{audit.PurposeMain, audit.PurposeTurn, audit.PurposeUnknown} {
+		t.Run(string(purpose), func(t *testing.T) {
+			text, saved := captureClientInput(t, purpose, []any{clientTextMessage(content)})
+			if !saved || text != "真实正文[图片]" {
+				t.Fatalf("明确用途跳过了正文清理：saved=%t text=%q", saved, text)
+			}
+		})
+	}
+}
+
+// TestClientInputPurposeBoundedContent 验证明示用途仍在清理后截取UTF-8前缀，未知块的不完整状态与截断独立。
+func TestClientInputPurposeBoundedContent(t *testing.T) {
+	for _, purpose := range []audit.RequestPurpose{audit.PurposeMain, audit.PurposeTurn} {
+		t.Run(string(purpose), func(t *testing.T) {
+			c := openAudit(t, newAuditDirectory(t), 0)
+			const scope = "explicit-purpose-limit"
+			monitorScope(t, c, scope)
+			if err := c.SetMaxTextBytes(4); err != nil {
+				t.Fatal(err)
+			}
+			content := clientTextBlocks("<system-reminder>\n附加说明\n</system-reminder>", "中🙂z")
+			content = append(content, map[string]any{"type": "future", "payload": "不保存的未知载荷"})
+			body, err := json.Marshal(map[string]any{"messages": []any{clientTextMessage(content)}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.CaptureExecution("explicit-limit", scope, "anthropic-messages", purpose, body)
+			waitSaved(t, c, 1)
+			record, err := c.Detail("explicit-limit")
+			if err != nil || record.Purpose != purpose || record.Text != "中" || !record.Truncated || !record.ExtractionIncomplete {
+				t.Fatalf("明确用途改变截断或不完整状态：%+v err=%v", record, err)
+			}
+			if c.Status().Gaps["unsupported_content"] != 1 {
+				t.Fatal("未知块未按原规则报告一次提取缺口")
+			}
+		})
+	}
+}
+
 // TestClientInputAuxiliary 验证五类客户端辅助内容在字符串、跨块和跨消息形式下均不保存。
 func TestClientInputAuxiliary(t *testing.T) {
 	const title = "Write the title in the predominant language of the session — a stray word or code token in another language doesn't change it, and neither does the English of these instructions."
@@ -99,7 +187,7 @@ func TestClientInputAuxiliary(t *testing.T) {
 		{"skill_blocks", []any{clientTextMessage(clientTextBlocks("Base directory for this skill: /synthetic/skills/test\n\n# 技能说明"))}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if text, saved := captureClientInput(t, tc.messages); saved {
+			if text, saved := captureClientInput(t, audit.PurposeUnknown, tc.messages); saved {
 				t.Fatalf("辅助内容被保存：%q", text)
 			}
 		})
@@ -133,7 +221,7 @@ func TestClientInputCleanContent(t *testing.T) {
 		{"plain_transcript", "<transcript>\nexample\n</transcript>", "<transcript>\nexample\n</transcript>"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			text, saved := captureClientInput(t, []any{clientTextMessage(tc.content)})
+			text, saved := captureClientInput(t, audit.PurposeUnknown, []any{clientTextMessage(tc.content)})
 			if text != tc.want || saved != (tc.want != "") {
 				t.Fatalf("正文清理不符：text=%q saved=%t want=%q", text, saved, tc.want)
 			}
@@ -155,7 +243,7 @@ func TestClientInputManualBoundaries(t *testing.T) {
 		{"fence_across_tool", []any{clientTextMessage([]any{map[string]any{"type": "text", "text": "```xml\n"}, map[string]any{"type": "tool_result", "content": "ignored"}, map[string]any{"type": "text", "text": "<system-reminder>\n示例\n</system-reminder>\n```"}})}, fenced},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if text, saved := captureClientInput(t, tc.messages); !saved || text != tc.want {
+			if text, saved := captureClientInput(t, audit.PurposeUnknown, tc.messages); !saved || text != tc.want {
 				t.Fatalf("真实正文被误删：saved=%t text=%q want=%q", saved, text, tc.want)
 			}
 		})
@@ -178,7 +266,7 @@ func TestClientInputBeforeTruncation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		c.CaptureExecution(id, scope, "anthropic-messages", body)
+		c.CaptureExecution(id, scope, "anthropic-messages", audit.PurposeUnknown, body)
 	}
 	send("long-title", "<session>\n"+strings.Repeat("历史", 40000)+"\n</session>\n\nWrite the title in Chinese. Keep technical terms and code identifiers in their original form.")
 	send("long-transcript", "<transcript>\n{\"user\":\""+strings.Repeat("历史", 40000)+"\"}\n</transcript>\n附加指令")
@@ -207,7 +295,7 @@ func TestClientInputNestedPayload(t *testing.T) {
 	tool := map[string]any{"type": "tool_result", "content": clientTextBlocks(template)}
 	image := map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": template}}
 	content := append([]any{tool, image}, clientTextBlocks("真实正文")...)
-	if text, saved := captureClientInput(t, []any{clientTextMessage(content)}); !saved || text != "[图片]真实正文" {
+	if text, saved := captureClientInput(t, audit.PurposeUnknown, []any{clientTextMessage(content)}); !saved || text != "[图片]真实正文" {
 		t.Fatalf("嵌套载荷改变正文分类：%q saved=%t", text, saved)
 	}
 	for _, protocol := range []string{"chat-completions", "responses"} {
@@ -223,7 +311,7 @@ func TestClientInputNestedPayload(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			c.CaptureExecution("other-protocol", scope, protocol, body)
+			c.CaptureExecution("other-protocol", scope, protocol, audit.PurposeUnknown, body)
 			waitSaved(t, c, 1)
 			record, err := c.Detail("other-protocol")
 			if err != nil || record.Text != template {
@@ -235,7 +323,7 @@ func TestClientInputNestedPayload(t *testing.T) {
 
 // TestClientInputSuggestion 验证客户端建议请求整体跳过，不把它之前的真实原话重复保存。
 func TestClientInputSuggestion(t *testing.T) {
-	text, saved := captureClientInput(t, []any{
+	text, saved := captureClientInput(t, audit.PurposeUnknown, []any{
 		map[string]any{"role": "user", "content": "仅供上下文的历史原话"},
 		clientTextMessage(clientSuggestionFixture),
 	})

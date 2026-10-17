@@ -2,7 +2,7 @@
 <!-- 请求HTTP执行输入记录工作台：所有数据来自同源受保护 API，管理 Key 仅在当前页面内存驻留。 -->
 <html lang="zh-CN" data-theme="light">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-IdKW1i2Dp75SEdnpzptrhp+WpjT+NfemhQcz3L+Ab5M='; style-src 'sha256-qPu8pc6zAj/fIKmdRID3dcdEAalrGBwyOD9qpbvhiuM='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'sha256-c1UjCG5TPfz9Rti7zkskAlLjllm+MJVg3ko38hEl6Ro='; style-src 'sha256-qPu8pc6zAj/fIKmdRID3dcdEAalrGBwyOD9qpbvhiuM='; connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'">
 <title>输入审计</title>
 <style>
 :root{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color-scheme:light;--bg:#eef3fa;--surface:#fff;--soft:#f7f9fc;--hover:#f2f6fc;--text:#202c42;--secondary:#596a82;--muted:#5d6d85;--line:#e6ebf2;--blue:#275cda;--blue-soft:#edf3ff;--green:#187449;--green-soft:#eaf7f0;--amber:#926014;--amber-soft:#fff6e5;--red:#bf3c48;--red-soft:#fff0f1;--purple:#7454bb;--purple-soft:#f3effc;--overlay:#14243c52;font-size:13px}
@@ -60,7 +60,7 @@ dialog{color:var(--text);background:var(--surface);border:1px solid var(--line);
 <dialog id="detail-dialog" class="drawer" aria-labelledby="detail-title"><div class="drawer-inner"><header class="drawer-header"><div><h2 id="detail-title">单条详情</h2><p>本次 HTTP 执行输入中已保存的允许内容</p></div><button id="close-detail" class="btn ghost icon-only" aria-label="关闭输入详情"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></header><div class="drawer-scroll"><div class="side-content"><p id="detail-meta" class="detail-meta"></p><div class="detail-heading"><h3>已保存纯文本</h3><span id="detail-bytes" class="tiny"></span></div><pre id="detail" tabindex="0" aria-label="已保存纯文本正文">请选择一条记录。</pre><p>这里只展示已保存的允许内容，不代表完整请求、完整会话或模型回复。视觉省略不会改变这里的已保存正文。</p></div></div><footer class="drawer-footer">纯文本展示，不执行代码或渲染 HTML · 按 Esc 关闭</footer></div></dialog>
 <dialog id="management-dialog" class="drawer" aria-labelledby="management-title"><div class="drawer-inner"><header class="drawer-header"><div><h2 id="management-title">监控对象</h2><p>修改仅作用于HTTP执行输入记录，不改变宿主模型调用配置</p></div><button id="close-management" class="btn ghost icon-only" aria-label="关闭管理面板"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></header><div class="drawer-scroll"><div class="side-content"><section id="objects-panel"><p>先用目标 Key 发送一次受支持的 HTTP 请求，再刷新发现匿名对象并选择监控；默认不监控。这里只合并本次运行已见对象、持久配置和历史，不是宿主完整 Key 目录，不展示 Key、片段或上游账号。未选择的发现对象重启后消失；选择后才保存配置。移除只停止后续采集，保留名称和历史。</p><p id="catalog-state"></p><label class="field">审计对象 <select id="objects"></select></label><label class="field">名称 <input id="name" maxlength="256" placeholder="例如：合成业务对象"></label><p>名称最多 256 UTF-8 字节，不等于 256 个中文字符。</p><button class="btn" id="monitor">选择并命名</button><button class="btn" id="rename">仅改名</button><button class="btn" id="remove">移除监控</button></section><section id="settings-panel" hidden><p id="settings-state"></p><label class="field">总存储预算（MiB） <input id="budget-mib" type="number" min="4" max="1024" step="any" required></label><p>合法范围为 4–1024 MiB，默认 1024 MiB；允许能精确换算为整数字节的小数。预算包含正文、配置、诊断、未知辅助文件和维护临时空间，预留不是额外额度。保存后的预算优先于 YAML 初始默认值；降低预算不删除未过期历史，已有占用超过新预算时停止新采集。正常满额可使用配置预留；主动降额超预算后，部分管理写入可能被拒绝，需调高到足够预算。预算不保证任意流量都能保存七天。</p><label class="field">保留天数 <input id="retention-days" type="number" min="1" max="30" step="1" required></label><p>合法范围为 1–30 天，默认 7 天，从 Before 回调所见时刻起算；暂停、移除监控和停机不冻结期限。到期立即退出查询，后台每分钟清理。调长保留期不延长已有历史；缩短会使现有历史提前到期，保存前必须确认。</p><label class="field">UTF-8 字节上限 <input id="max-text-bytes" type="number" min="1" max="65536" step="1" required></label><p>合法范围为 1–65536 字节；仅改变后续提交，已接收副本保留原上限，旧正文不重新截断，不改变模型收到的完整输入。</p><button class="btn primary" id="save-settings">保存设置</button><p>三项设置一起保存；取消缩短确认时三项都不提交。逻辑到期和空间回收不等于磁盘、数据库空闲页、快照或备份的安全擦除；应用层不加密。</p></section><section id="diagnostics-panel" hidden><pre id="health" aria-label="采集状态"></pre><h3>缺口提醒与已阅</h3><p id="gap-unread">缺口提醒状态未知。</p><button class="btn" id="acknowledge-gaps" disabled>确认当前提醒已阅</button><p id="gap-message">确认只减少当前快照的提醒，不删除历史、不解除故障，也不改变完整性结论；新缺口会重新提醒。</p><p id="gap-acknowledged"></p><h3>当前活动故障</h3><pre id="gap-active"></pre><h3>保留期内缺口历史</h3><pre id="gap-history"></pre><p id="recovery-state"></p></section></div></div><footer class="drawer-footer"><p id="panel-message" role="status"></p>只展示受管理鉴权保护的信息，不展示客户端 Key 或上游凭据。</footer></div></dialog>
 </div>
-<footer class="bottom-note"><span><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>仅供隔离合成数据验收 · 正文不自动脱敏 · 应用层不加密</span><span>状态每 10 秒更新</span></footer><details class="help-details"><summary>支持范围与使用说明</summary><p id="notice">当前仅记录官方 Before 回调所见的 Chat Completions、Responses HTTP 与 Anthropic Messages 执行输入；不包括路由前失败或插件模型回调；WebSocket 不支持，普通与 duplex WebSocket 均不采集。不等于完整客户端输入审计：时间是 Before 所见时刻，模型可能已被宿主改写；同一客户端提交可对应多次执行记录，不按 TraceID 合并。先用目标 Key 发送受支持的 HTTP 请求，再在监控对象中刷新发现并选择；默认不监控。仅提取执行正文末尾用户消息的允许内容，不回找旧用户发言；执行正文可能已经包含宿主补回的上下文。Responses 字符串 input 直接作为用户文本；Anthropic 仅含 tool_result 的末尾 user 跳过，混合消息不提取工具结果内部数据。图片/音频/视频/文件只保存固定占位符，不保存附件载荷或工具内容，不回查 previous_response_id 或会话历史。未知块会产生提取不完整标记与缺口诊断；普通文本中的链接、Base64 和秘密不自动脱敏。正文按配置保存 1–65536 字节内的 UTF-8 前缀；单条上限只影响后续回调。常规故障采用 fail-open，不拒绝、终止或修改模型调用，但同步提取仍有耗时。未收到回调的数量未知，不能从记录数推算。native 与宿主同进程，进程级崩溃不隔离；异常重启只报告真实不确定性，不保证零丢失或 exactly-once。应用层不加密；仅供隔离合成数据验收，不适用于生产审计。</p></details>
+<footer class="bottom-note"><span><svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>仅供隔离合成数据验收 · 正文不自动脱敏 · 应用层不加密</span><span>状态每 10 秒更新</span></footer><details class="help-details"><summary>支持范围与使用说明</summary><p id="notice">当前仅记录官方 Before 回调所见的 Chat Completions、Responses HTTP 与 Anthropic Messages 执行输入；不包括路由前失败或插件模型回调；WebSocket 不支持，普通与 duplex WebSocket 均不采集。不等于完整客户端输入审计：时间是 Before 所见时刻，模型可能已被宿主改写；同一客户端提交可对应多次执行记录，不按 TraceID 合并。先用目标 Key 发送受支持的 HTTP 请求，再在监控对象中刷新发现并选择；默认不监控。明确的辅助、压缩和子任务调用不保存正文，但仍可发现匿名对象；其余仅提取执行正文末尾用户消息的允许内容，不回找旧用户发言。用途标签来自请求头，main/turn不是人工原文认证；无用途标记继续原提取，旧记录显示未记录用途。执行正文可能已经包含宿主补回的上下文。Responses 字符串 input 直接作为用户文本；Anthropic 仅含 tool_result 的末尾 user 跳过，混合消息不提取工具结果内部数据。图片/音频/视频/文件只保存固定占位符，不保存附件载荷或工具内容，不回查 previous_response_id 或会话历史。未知块会产生提取不完整标记与缺口诊断；普通文本中的链接、Base64 和秘密不自动脱敏。正文按配置保存 1–65536 字节内的 UTF-8 前缀；单条上限只影响后续回调。常规故障采用 fail-open，不拒绝、终止或修改模型调用，但同步提取仍有耗时。未收到回调的数量未知，不能从记录数推算。native 与宿主同进程，进程级崩溃不隔离；异常重启只报告真实不确定性，不保证零丢失或 exactly-once。应用层不加密；仅供隔离合成数据验收，不适用于生产审计。</p></details>
 </div><script>
 'use strict';
 // 认证材料只驻留闭包；所有数据通过同源受保护 API 获取，禁止把正文/名称作为 HTML。
@@ -187,6 +187,10 @@ dialog{color:var(--text);background:var(--surface);border:1px solid var(--line);
   function protocolLabel(protocol) {
     return protocol === 'anthropic-messages' ? 'Anthropic Messages' : protocol === 'responses' ? 'Responses HTTP' : protocol === 'chat-completions' ? 'Chat Completions' : '未知';
   }
+  // 用途只描述调用类别；旧记录不追溯分类，main 和 turn 都不是人工原文认证。
+  function purposeLabel(purpose) {
+    return purpose === 'main' ? '主会话调用' : purpose === 'turn' ? '对话轮次' : purpose === 'unknown' ? '用途未知' : '未记录用途';
+  }
   // 两个标记彼此独立，不能以截断标签掩盖未知块导致的不完整。
   function contentStatus(record) {
     const labels = [];
@@ -270,6 +274,7 @@ dialog{color:var(--text);background:var(--surface);border:1px solid var(--line);
         if (flags.childNodes.length) flags.append(textCell('flag-separator',' · '));
         flags.append(textCell('badge '+(label==='已截断'?'amber':label==='提取不完整'?'purple':'green'),label));
       }
+      flags.append(textCell('badge neutral',purposeLabel(record.purpose)));
       status.append(flags);row.append(time,object,protocol,model,preview,status);
       const cell=document.createElement('td'), button=document.createElement('button');button.className='btn ghost view-button';button.textContent='查看';
       button.addEventListener('click',()=>guard(async()=>{
@@ -279,7 +284,7 @@ dialog{color:var(--text);background:var(--surface);border:1px solid var(--line);
         if (!$('detail-dialog').open) $('detail-dialog').showModal();
         try {
           const r=await api('/detail?id='+encodeURIComponent(record.id));
-          $('detail-meta').textContent=(r.name||r.object_id)+' · '+r.received_at+' · '+protocolLabel(r.protocol)+' · '+(r.model||'未知')+' · '+contentStatus(r);$('detail').textContent=r.text;
+          $('detail-meta').textContent=(r.name||r.object_id)+' · '+r.received_at+' · '+protocolLabel(r.protocol)+' · '+(r.model||'未知')+' · '+contentStatus(r)+' · '+purposeLabel(r.purpose);$('detail').textContent=r.text;
           $('detail-bytes').textContent = new TextEncoder().encode(r.text).length.toLocaleString('zh-CN')+' 字节';
         } catch(error) {$('detail').textContent = '详情加载失败：'+error.message;throw error;}
       }));

@@ -2,7 +2,7 @@
 
 本仓库提供安装到**官方 CLIProxyAPI `v8.0.27`** 的原生插件，无需修改、重编或替换用户正在运行的 CPA。正式精简版 `0.2.0` 已通过 macOS arm64、Linux amd64 原生系统与浏览器验收，以及固定官方 Docker 镜像内的非 root 加载、采集和重启验证；尚未部署生产。实际范围和证据见[本轮交付记录](docs/verification/official-http-input-2026-10-16.md)。
 
-当前规范为 [HTTP 执行输入 spec](.scratch/official-http-input/spec.md) 和 [ADR-0004](docs/adr/0004-official-http-execution.md)。安装步骤见[本地交付说明](docs/local-delivery.md)。
+基础规范为 [HTTP 执行输入 spec](.scratch/official-http-input/spec.md) 和 [ADR-0004](docs/adr/0004-official-http-execution.md)。请求用途过滤增量见[规范](.scratch/request-purpose-filter/spec.md)与[本轮双平台验收](docs/verification/request-purpose-filter-2026-10-17.md)，不以旧版本报告替代。安装步骤见[本地交付说明](docs/local-delivery.md)。
 
 ## 支持条件与记录含义
 
@@ -37,11 +37,14 @@
 
 - 不保存历史、system/developer 指令、工具调用或工具结果、模型回复、完整请求、认证材料和附件 payload。工具结果内部不递归提取；附件仅留 `[图片]`、`[音频]`、`[视频]`、`[文件]` 等协议白名单占位符，不保存 URL、文件名、引用或 Base64 载荷。
 - 工具续跑、正常空输入、非用户末尾正常跳过。未知或畸形内容不序列化为整请求：能安全提取的部分标记 `extraction_incomplete`，不能安全提取则仅报告固定原因。
-- Anthropic Messages 在截断前排除已确认的客户端辅助请求：输入建议、标题、动作描述和权限判断转录整条跳过，不重存其中引用的用户原话；独立技能展开、成对的客户端提醒和 IDE 上下文块不进入正文。混合消息仍保留独立正文及附件占位符，普通引用、代码示例和正文空白不变。这是已知格式识别，不是可信人工来源证明；逐字相同的手工粘贴无法区分。只影响新记录，不清理已有历史，见[过滤规范](.scratch/client-input-filter/spec.md)。
+- 优先按已发送的用途头和专用 compact 路径跳过辅助、压缩、预热、记忆、子智能体和 workflow 调用；仍发现匿名对象，不拒绝模型请求。首版只读请求头和路径，不解析 body.client_metadata，也不要求客户开启配置。无标记、未知或冲突的用途继续原提取，标注“用途未知”，见[用途规范](.scratch/request-purpose-filter/spec.md)。
+- Anthropic Messages 的用途未知请求在截断前按已知模板排除建议、标题、动作和权限转录；明确 main 不再因整条模板被跳过。两者均清理独立技能、成对提醒和 IDE 上下文，保留独立正文、空白及附件占位符。这些规则不证明人工来源，只影响新记录，不改写历史，见[原有格式规则](.scratch/client-input-filter/spec.md)。
 - 只截断审计副本，不改模型输入。`truncated` 与 `extraction_incomplete` 独立展示，可以同时为 true。
 - **普通文本里的秘密、Key、URL、Base64 不自动脱敏；应用层明文保存。** 纯文本展示不代表正文不敏感。
 
-记录字段限于 `id`、`object_id`、`received_at`、`protocol`、`model`、`text`、`truncated` 和可选的 `extraction_incomplete`。名称保存在对象配置中，不逐条复制。
+记录字段限于 `id`、`object_id`、`received_at`、`protocol`、`model`、`purpose`、`text`、`truncated` 和可选的 `extraction_incomplete`。`purpose=main/turn/unknown` 分别显示“主会话调用 / 对话轮次 / 用途未知”；旧记录缺该字段显示“未记录用途”。主会话与对话轮次均不是人工原文认证；不保存原用途头或子代理 ID。名称保存在对象配置中，不逐条复制。
+
+**用途字段的降级限制：** 新插件可读取原有记录，但旧插件的严格解码器会拒绝带 `purpose` 的新记录。不能把写入新记录后的 state-dir 直接交给旧插件降级运行；本项目不自动迁移、删除或改写数据。
 
 ## 存储与管理
 

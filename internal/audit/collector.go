@@ -24,34 +24,37 @@ const (
 	maxLine              = 512 << 10
 	segmentSize    int64 = 1 << 20
 	maxQueuedBytes int64 = 8 << 20
-	// 64 位平台的六个字符串头、bool 对齐和队列字节计数共约112字节，向上预留到128。
+	// 64 位平台的七个字符串头、bool 对齐和队列字节计数共128字节。
 	queuedRecordOverhead = 128
 	// 配置最多 1024 个对象、单份不足 512 KiB；预留两份原子替换峰值及目录/锁块空间。
 	auxiliaryReserve int64 = 1 << 20
 )
 
 // Event 是宿主同步借用的只读入站事件；Body 不得在 Observe 返回后继续引用。
-// 字段仅含无秘密身份、提交元数据及原协议正文，ReadError 表示宿主读取失败。
+// 字段仅含无秘密身份、提交元数据及原协议正文，ReadError 表示宿主读取失败；Purpose 为有限用途分类。
 type Event struct {
-	ID         string   `json:"id"`
-	ObjectID   string   `json:"object_id"`
-	ReceivedAt string   `json:"received_at"`
-	Protocol   string   `json:"protocol"`
-	Body       []byte   `json:"body"`
-	ReadError  bool     `json:"read_error"`
-	Snapshot   Snapshot `json:"snapshot"`
+	ID         string         `json:"id"`
+	ObjectID   string         `json:"object_id"`
+	ReceivedAt string         `json:"received_at"`
+	Protocol   string         `json:"protocol"`
+	Purpose    RequestPurpose `json:"purpose"`
+	Body       []byte         `json:"body"`
+	ReadError  bool           `json:"read_error"`
+	Snapshot   Snapshot       `json:"snapshot"`
 }
 
 // Record 是唯一允许持久化及查询的输入白名单；名称由管理层从已知对象目录关联。
+// Purpose 只保存 main、turn、unknown；旧记录缺省时为空，不推断或补写历史用途。
 type Record struct {
-	ID                   string `json:"id"`
-	ObjectID             string `json:"object_id"`
-	ReceivedAt           string `json:"received_at"`
-	Protocol             string `json:"protocol"`
-	Model                string `json:"model"`
-	Text                 string `json:"text"`
-	Truncated            bool   `json:"truncated"`
-	ExtractionIncomplete bool   `json:"extraction_incomplete,omitempty"`
+	ID                   string         `json:"id"`
+	ObjectID             string         `json:"object_id"`
+	ReceivedAt           string         `json:"received_at"`
+	Protocol             string         `json:"protocol"`
+	Purpose              RequestPurpose `json:"purpose,omitempty"`
+	Model                string         `json:"model"`
+	Text                 string         `json:"text"`
+	Truncated            bool           `json:"truncated"`
+	ExtractionIncomplete bool           `json:"extraction_incomplete,omitempty"`
 }
 
 // Recovery 描述启动发现的不确定损失；发现时刻不是损失时段，未知数量与边界始终以 null 输出。
@@ -169,9 +172,10 @@ func Open(dir string, budget int64) (*Collector, error) {
 
 // CaptureExecution 处理官方 Before 已收到的一次 HTTP 执行；id 为官方 RequestID，callerScope 为已认证 caller_scope 摘要。
 // protocol 为 chat-completions、responses 或 anthropic-messages；不接受 WebSocket。
+// purpose 为有限用途分类；skip 在身份派生和资格判断后正常跳过正文，不产生缺口。
 // body 仅在调用期间借用，返回私有种子派生的匿名 ObjectID；未监控时不提取正文，身份不可用返回空串。
 // 无返回错误或磁盘 I/O；无效输入、提取和入队失败只更新缺口，存储故障保持停采，不推断未收到的回调。
-func (c *Collector) CaptureExecution(id, callerScope, protocol string, body []byte) string {
+func (c *Collector) CaptureExecution(id, callerScope, protocol string, purpose RequestPurpose, body []byte) string {
 	if len(c.callerScopeSeed) == 0 {
 		return ""
 	}
@@ -183,8 +187,11 @@ func (c *Collector) CaptureExecution(id, callerScope, protocol string, body []by
 	mac.Write([]byte("cpa-request-info:object-id:caller-scope:v1\x00"))
 	mac.Write([]byte(callerScope))
 	objectID := hex.EncodeToString(mac.Sum(nil))
-	event := Event{ID: id, ObjectID: objectID, ReceivedAt: auditNow().UTC().Format(time.RFC3339Nano), Protocol: protocol}
+	event := Event{ID: id, ObjectID: objectID, ReceivedAt: auditNow().UTC().Format(time.RFC3339Nano), Protocol: protocol, Purpose: purpose}
 	event.Snapshot = c.Prepare(event)
+	if purpose == PurposeSkip {
+		return objectID
+	}
 	// Prepare 已记录无效元数据；停采或未监控都不借用正文，不再把 unavailable 快照误报为无效回调。
 	if event.Snapshot.Decision != "capture" {
 		return objectID
@@ -205,6 +212,7 @@ func (c *Collector) ReportInputFailure() {
 }
 
 // Observe 按 event 的接收快照同步提取三协议 HTTP 或 Responses WebSocket 本次允许输入并非阻塞入队，不复核当前配置。
+// event.Purpose 应为 main、turn、unknown，skip 已由 CaptureExecution 跳过；Body 仅在调用期间借用。
 // 无返回值，解析及容量失败仅增加固定缺口诊断，不影响宿主请求；Body 不进入采集器。
 func (c *Collector) Observe(event Event) {
 	c.mu.Lock()
@@ -295,7 +303,7 @@ func (c *Collector) Observe(event Event) {
 		}
 		if event.Protocol == "anthropic-messages" {
 			var skip bool
-			text, truncated, incomplete, skip = anthropicUserContent(messages, event.Snapshot.MaxTextBytes)
+			text, truncated, incomplete, skip = anthropicUserContent(messages, event.Purpose, event.Snapshot.MaxTextBytes)
 			if skip {
 				return
 			}
@@ -323,8 +331,8 @@ func (c *Collector) Observe(event Event) {
 		return
 	}
 	// Clone 切断与解析出的巨大字符串/原正文的关系，队列只保留受限白名单副本。
-	record := Record{ID: strings.Clone(event.ID), ObjectID: strings.Clone(event.ObjectID), ReceivedAt: strings.Clone(event.ReceivedAt), Protocol: strings.Clone(event.Protocol), Model: strings.Clone(model), Text: strings.Clone(text), Truncated: truncated, ExtractionIncomplete: incomplete}
-	size := int64(len(record.ID) + len(record.ObjectID) + len(record.ReceivedAt) + len(record.Protocol) + len(record.Model) + len(record.Text) + queuedRecordOverhead)
+	record := Record{ID: strings.Clone(event.ID), ObjectID: strings.Clone(event.ObjectID), ReceivedAt: strings.Clone(event.ReceivedAt), Protocol: strings.Clone(event.Protocol), Purpose: event.Purpose, Model: strings.Clone(model), Text: strings.Clone(text), Truncated: truncated, ExtractionIncomplete: incomplete}
+	size := int64(len(record.ID) + len(record.ObjectID) + len(record.ReceivedAt) + len(record.Protocol) + len(record.Purpose) + len(record.Model) + len(record.Text) + queuedRecordOverhead)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed || c.status.State != "active" {

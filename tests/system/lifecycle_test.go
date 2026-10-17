@@ -212,7 +212,7 @@ func TestLifecyclePrivacyWhitelist(t *testing.T) {
 			}
 		}
 	}
-	allowed := map[string]bool{"id": true, "object_id": true, "received_at": true, "protocol": true, "model": true, "text": true, "truncated": true}
+	allowed := map[string]bool{"id": true, "object_id": true, "received_at": true, "protocol": true, "purpose": true, "model": true, "text": true, "truncated": true}
 	if err := filepath.WalkDir(stateDir, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err

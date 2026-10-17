@@ -269,6 +269,7 @@ type savedRecord struct {
 	Model                string    `json:"model"`
 	Name                 string    `json:"name"`
 	Protocol             string    `json:"protocol"`
+	Purpose              string    `json:"purpose"`
 	ReceivedAt           time.Time `json:"received_at"`
 	Truncated            bool      `json:"truncated"`
 	ExtractionIncomplete bool      `json:"extraction_incomplete"`

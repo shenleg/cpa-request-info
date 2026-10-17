@@ -6,7 +6,7 @@
 
 ## 实施与验收
 
-1. 实施开始记录当前 `HEAD` 作为固定审查基点，读取当前 ticket 和相关领域文档。本轮已固定基点为 `6711c1cb7a08c432e8690e66c87a3a74ad752480`，沿用用户指定的 `experiment/official-plugin-probe` 分支，不重新选基点或分支。
+1. 每次实施开始记录当前 `HEAD` 作为该票固定审查基点，读取当前 ticket 和相关领域文档，并按用户授权选择功能分支。`6711c1cb7a08c432e8690e66c87a3a74ad752480` / `experiment/official-plugin-probe` 是先前官方接口实验的历史上下文，不作为后续任务的默认基点或分支。
 2. 宿主接入先定位 manifest 指定的官方契约与固定源码：CPA `v8.0.27` / `bf9341629ef2300ac9d846a2e80fe2756f63a671`，C ABI `1` / RPC schema `6`，官方 `RequestInterceptor` + `Management`。`make build` 必须从精确 Git 对象新导出官方 host、无 patch；安装路径另验 `make build-plugin` 仅构建动态库，不重编或替换用户 CPA。取得具体问题的证据即结束调查；已委派调查等待结果，其他执行者复用定位，不重复全库搜索。
 3. 每张 ticket 都在本机 macOS 和既有隔离 Linux 环境验收**同一份最新源码**：快速检查、原生宿主/插件构建、真实系统测试、工具测试及涉及改动的浏览器场景。通常 Linux 入口为 `ssh linux-service`，沿用既有普通测试用户与隔离工具链，环境参考[历史 Linux 记录](../verification/linux-amd64-2026-10-15.md)，先核对实际环境，再建独立源码/结果目录。当前任务若禁止 SSH 或限定可改文件，严格遵守授权范围，未执行项留待有权限的主会话，不能声称双端完成。
 4. 对当前契约逐项验收三协议 HTTP/SSE、一次执行身份、重试与同文重交、失败/取消、内部 source 排除及 WebSocket 排除；核对 Before 时间与可能改写的模型。不把回调前未知模型/路由/读体失败当作可见事件，不据零缺口声称完整覆盖。

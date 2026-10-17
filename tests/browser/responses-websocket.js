@@ -152,7 +152,8 @@ module.exports = async (page, options = {}) => {
     await frame.getByRole('button', {name:'刷新已保存记录',exact:true}).click();
     const row = frame.locator('#records tbody tr').filter({hasText:fixture.marker});
     await row.getByRole('cell', {name:'Chat Completions',exact:true}).waitFor();
-    await row.getByRole('cell', {name:fixture.label,exact:true}).waitFor();
+    // 用途徽标与内容状态独立显示，保留对每个原有状态标签的精确断言。
+    for (const label of fixture.label.split(' · ')) await row.locator('.flags').getByText(label,{exact:true}).waitFor();
     const detailResponse = page.waitForResponse(r => r.url().includes('/request-input-audit/detail?') && new URL(r.url()).searchParams.get('id')===record.id);
     await row.getByRole('button', {name:'查看',exact:true}).click();
     const response = await detailResponse;

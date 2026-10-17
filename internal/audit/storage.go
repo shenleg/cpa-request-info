@@ -366,11 +366,21 @@ func eachRecord(file io.Reader, limit int64, visit func(Record, int64) error) er
 			}
 			break
 		}
-		var record Record
+		// 原始字段只用于区分旧记录缺省与新字段的 null/空值；未知字段仍由严格解码拒绝。
+		var stored struct {
+			Record
+			Purpose json.RawMessage `json:"purpose"`
+		}
 		decoder := json.NewDecoder(bytes.NewReader(line))
 		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(&record); err != nil {
+		if err := decoder.Decode(&stored); err != nil {
 			return errors.New("invalid_record")
+		}
+		record := stored.Record
+		if stored.Purpose != nil {
+			if json.Unmarshal(stored.Purpose, &record.Purpose) != nil || (record.Purpose != PurposeMain && record.Purpose != PurposeTurn && record.Purpose != PurposeUnknown) {
+				return errors.New("invalid_record")
+			}
 		}
 		var trailing any
 		if decoder.Decode(&trailing) != io.EOF || !validEvent(Event{ID: record.ID, ObjectID: record.ObjectID, ReceivedAt: record.ReceivedAt, Protocol: record.Protocol}) || !supportedProtocol(record.Protocol) || len(record.Model) > 1024 || len(record.Text) > maxText {

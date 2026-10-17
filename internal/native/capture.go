@@ -1,4 +1,4 @@
-// 本文件适配官方 HTTP 执行前回调，只借用正文和 caller_scope；发现集合只保留有界匿名 ID。
+// 本文件适配官方 HTTP 执行前回调，瞬时分类用途、借用正文和 caller_scope；发现集合只保留有界匿名 ID。
 package native
 
 import (
@@ -95,7 +95,7 @@ func (a *App) capture(raw []byte) (any, error) {
 	}
 	if state.available && state.collector != nil {
 		// CaptureExecution 返回后才登记；即便目录已满，已选对象的正文采集仍不受发现集合影响。
-		objectID := state.collector.CaptureExecution(id, scope, protocol, body)
+		objectID := state.collector.CaptureExecution(id, scope, protocol, requestPurpose(*path, fields["Headers"]), body)
 		if objectID != "" {
 			state.observed.add(objectID)
 		}

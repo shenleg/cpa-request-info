@@ -105,7 +105,7 @@ func assertHTTPOnceDetailMetadata(t *testing.T, h *instance, id string) {
 	}
 	for key := range fields {
 		switch key {
-		case "id", "object_id", "name", "received_at", "protocol", "model", "text", "truncated", "extraction_incomplete":
+		case "id", "object_id", "name", "received_at", "protocol", "purpose", "model", "text", "truncated", "extraction_incomplete":
 		default:
 			t.Fatal("管理详情含执行结果或追踪白名单之外的字段")
 		}

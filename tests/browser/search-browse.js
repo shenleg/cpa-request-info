@@ -43,13 +43,17 @@ module.exports = async (page, options) => {
     const response = await page.request.post(api+'/monitor',{headers,data:{object_id:object.id,name}});
     assert(response.status()===200,'搜索验收监控配置失败');
   }
-  /** 提交本轮文本；key/model 指定客户端身份和执行入口模型，content 是消息，宿主返回异常状态时抛错，无返回值。 */
-  async function submit(key, model, content) {
-    const response = await page.request.post(origin+'/v1/chat/completions',{headers:{Authorization:'Bearer '+key},data:{model,messages:[{role:'user',content}]}});
+  /** 提交本轮文本；key/model 指定身份与模型，content 是消息，purposeHeaders 是合成用途头；异常状态抛错，无返回值。 */
+  async function submit(key, model, content, purposeHeaders={}) {
+    const response = await page.request.post(origin+'/v1/chat/completions',{headers:{Authorization:'Bearer '+key,...purposeHeaders},data:{model,messages:[{role:'user',content}]}});
     assert(response.status()===200 || response.status()===400,'搜索验收模型提交失败');
   }
   const clientA='synthetic-client-audit-a-only', clientB='synthetic-client-audit-b-only';
-  for (let i=0;i<22;i++) await submit(clientA,'audit-test-model',marker+'ENTRY-'+String(i).padStart(2,'0'));
+  // 复用原分页样本验证用途，不增加场景或改变25条计数；这些是合成 HTTP 头，不是实际客户端发送证据。
+  for (let i=0;i<22;i++) {
+    const purposeHeaders=i===0 ? {'x-claude-code-request-class':'main'} : i===1 ? {'x-codex-turn-metadata':'{"request_kind":"turn"}'} : {};
+    await submit(clientA,'audit-test-model',marker+'ENTRY-'+String(i).padStart(2,'0'),purposeHeaders);
+  }
   const prefix=marker+'ENTRY-22 '+hostile;
   const text=prefix+'x'.repeat(65535-Buffer.byteLength(prefix));
   await submit(clientA,'audit-test-model',[{type:'text',text:text+'🙂FORBIDDEN_SEARCH_BROWSER_TAIL'},{type:'future',payload:'FORBIDDEN_SEARCH_BROWSER_UNKNOWN'}]);
@@ -66,7 +70,9 @@ module.exports = async (page, options) => {
   // 第二个可路由模型保留模型交集验证；未知模型在执行前被拒绝，不能记录其正文。
   assert(saved.total===25 && !saved.records.some(record=>record.preview===marker+'UNROUTED-MODEL'),'本轮 HTTP 执行夹具未保存或误采路由失败正文');
   const target=saved.records.find(record=>record.preview.startsWith(marker+'ENTRY-22'));
-  assert(target && target.truncated && target.extraction_incomplete,'搜索夹具双状态丢失');
+  assert(target && target.truncated && target.extraction_incomplete && target.purpose==='unknown','搜索夹具双状态或未知用途丢失');
+  const targetDetail=await read('/detail?id='+encodeURIComponent(target.id));
+  assert(targetDetail.id===target.id && targetDetail.purpose===target.purpose,'未知用途列表与详情不一致');
   await frame.getByRole('button',{name:'刷新已保存记录',exact:true}).click();
   const external=[];
   const onRequest=request=>{if(new URL(request.url()).origin!==origin)external.push(true);};
@@ -85,6 +91,19 @@ module.exports = async (page, options) => {
     },result.total);
     return result;
   }
+  /** 核对当前唯一结果的用途 API、列表标签与详情；purpose/label 是独立预期，失败抛错，成功无返回值。 */
+  async function verifyPurpose(result, purpose, label) {
+    assert(result.total===1 && result.records.length===1 && result.records[0].purpose===purpose,'用途列表分类错误');
+    const record=result.records[0];
+    const detail=await read('/detail?id='+encodeURIComponent(record.id));
+    assert(detail.id===record.id && detail.purpose===purpose,'用途详情与列表不一致');
+    const purposeRow=frame.locator('#records tbody tr').filter({hasText:record.preview});
+    await purposeRow.locator('.flags .badge').filter({hasText:label}).waitFor();
+    await purposeRow.getByRole('button',{name:'查看',exact:true}).click();
+    await frame.locator('#detail-meta').filter({hasText:label}).waitFor();
+    await page.waitForFunction(expected=>document.querySelector('iframe[title="输入审计"]').contentDocument.querySelector('#detail').textContent===expected,detail.text);
+    await frame.locator('#close-detail').click();
+  }
   try {
     await frame.getByRole('combobox',{name:'历史对象筛选',exact:true}).selectOption(target.object_id);
     /** 将 epoch 转为本地秒精度输入；范围已有五秒余量，避免 Chromium 去掉毫秒末尾零使 Playwright fill 误报格式错误。 */
@@ -97,16 +116,18 @@ module.exports = async (page, options) => {
     assert(result.total===23 && result.records.length===20,'四条件交集或第一页错误');
     await frame.locator('#page').filter({hasText:'第 1 页；匹配 23 条'}).waitFor();
     const row=frame.locator('#records tbody tr').filter({hasText:marker+'ENTRY-22'});
-    await row.getByRole('cell',{name:'已截断 · 提取不完整',exact:true}).waitFor();
+    await row.locator('.flags .badge').filter({hasText:'已截断'}).waitFor();
+    await row.locator('.flags .badge').filter({hasText:'提取不完整'}).waitFor();
+    await row.locator('.flags .badge').filter({hasText:'用途未知'}).waitFor();
     await row.locator('.object-name').waitFor();
     assert(await row.locator('.object-name').textContent()===name,'搜索结果未精确显示纯文本对象名称');
     await row.getByRole('button',{name:'查看',exact:true}).click();
-    await frame.locator('#detail-meta').filter({hasText:'已截断 · 提取不完整'}).waitFor();
+    await frame.locator('#detail-meta').filter({hasText:'已截断 · 提取不完整'}).filter({hasText:'用途未知'}).waitFor();
     const visible=await frame.locator('#detail').evaluate(element=>({text:element.textContent,bytes:new TextEncoder().encode(element.textContent).length,nodes:element.querySelectorAll('img,a,script,style').length,injected:element.ownerDocument.defaultView.__searchInjected===true}));
     assert(visible.text===text && visible.bytes===65535 && visible.nodes===0 && !visible.injected,'搜索详情没有保持已保存纯文本');
     assert(await frame.locator('#records b,#records img,#records script,#detail-meta b').count()===0,'名称或预览被解析为HTML');
     await frame.locator('#close-detail').click();
-    await row.getByRole('cell',{name:'已截断 · 提取不完整',exact:true}).screenshot({path:options.screenshot});
+    await row.locator('.flags').screenshot({path:options.screenshot});
     const next=page.waitForResponse(r=>r.url()===api+'/records/search'&&r.request().method()==='POST'&&r.request().postDataJSON().offset===20);
     await frame.getByRole('button',{name:'下一页',exact:true}).click();
     const nextResponse=await next;
@@ -122,6 +143,10 @@ module.exports = async (page, options) => {
     await frame.getByRole('textbox',{name:'正文关键词',exact:true}).fill(marker+'ENTRY-00');
     result=await apply();
     assert(result.total===1 && result.offset===0,'应用新筛选没有返回首页');
+    await verifyPurpose(result,'main','主会话调用');
+    await frame.getByRole('textbox',{name:'正文关键词',exact:true}).fill(marker+'ENTRY-01');
+    result=await apply();
+    await verifyPurpose(result,'turn','对话轮次');
     await frame.getByRole('textbox',{name:'正文关键词',exact:true}).fill('FORBIDDEN_SEARCH_BROWSER_TAIL');
     result=await apply();
     assert(result.total===0,'未保存尾部被页面搜索命中');
@@ -172,7 +197,7 @@ module.exports = async (page, options) => {
   filtered=await search({q:clientMarker,limit:100});
   assert(filtered.total===1 && filtered.records.length===1 && filtered.records[0].protocol==='anthropic-messages' && !filtered.records[0].truncated && !filtered.records[0].extraction_incomplete,'辅助请求被保存或正常正文状态错误');
   const filteredDetail=await read('/detail?id='+encodeURIComponent(filtered.records[0].id));
-  assert(filteredDetail.text===real,'过滤后的 API 详情含客户端附加内容');
+  assert(filteredDetail.text===real && filtered.records[0].purpose==='unknown' && filteredDetail.purpose==='unknown','过滤后的 API 详情含客户端附加内容或未知用途不一致');
   assert((await search({q:clientMarker+'AUX-'})).total===0,'客户端辅助内容仍可经 API 检索');
   const resetClientFilters=page.waitForResponse(r=>r.url()===api+'/records/search'&&r.request().method()==='POST'&&!r.request().postDataJSON().q);
   await frame.getByRole('button',{name:'清空筛选',exact:true}).click();
@@ -182,13 +207,15 @@ module.exports = async (page, options) => {
   assert(clientResult.total===1 && clientResult.records[0].id===filtered.records[0].id,'页面搜索未仅显示正常正文');
   const clientRow=frame.locator('#records tbody tr').filter({hasText:real});
   await clientRow.getByRole('cell',{name:'Anthropic Messages',exact:true}).waitFor();
+  await clientRow.locator('.flags .badge').filter({hasText:'用途未知'}).waitFor();
   await clientRow.getByRole('button',{name:'查看',exact:true}).click();
   await page.waitForFunction(expected=>document.querySelector('iframe[title="输入审计"]').contentDocument.querySelector('#detail').textContent===expected,real);
   assert(await frame.locator('#detail').textContent()===real,'页面详情未精确保留正常正文');
+  await frame.locator('#detail-meta').filter({hasText:'用途未知'}).waitFor();
   await frame.locator('#close-detail').click();
   await frame.getByRole('textbox',{name:'正文关键词',exact:true}).fill(clientMarker+'AUX-');
   clientResult=await apply();
   assert(clientResult.total===0,'页面仍能搜索客户端辅助关键词');
   await frame.locator('#empty').waitFor();
-  return {intersection:true,pagination:true,filterReset:true,singleDetail:true,contentFlags:true,plainText:true,clientInputFiltering:true,externalRequests:0,layout};
+  return {intersection:true,pagination:true,filterReset:true,singleDetail:true,contentFlags:true,plainText:true,clientInputFiltering:true,requestPurpose:true,externalRequests:0,layout};
 };

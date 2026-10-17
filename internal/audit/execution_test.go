@@ -6,7 +6,9 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,7 +86,7 @@ func waitSaved(t *testing.T, c *audit.Collector, count int64) {
 // monitorScope 通过未监控的 CaptureExecution 发现 scope 并启用，返回匿名身份；失败终止测试。
 func monitorScope(t *testing.T, c *audit.Collector, scope string) string {
 	t.Helper()
-	id := c.CaptureExecution("discovery", scope, "responses", []byte(`{"input":"not monitored"}`))
+	id := c.CaptureExecution("discovery", scope, "responses", audit.PurposeUnknown, []byte(`{"input":"not monitored"}`))
 	if len(id) != 64 {
 		t.Fatalf("身份无效：%q", id)
 	}
@@ -94,13 +96,54 @@ func monitorScope(t *testing.T, c *audit.Collector, scope string) string {
 	return id
 }
 
+// TestCaptureExecutionPurposeSkip 验证明示辅助执行仍可发现和选择，监控与主动暂停时均不解析正文或产生缺口。
+func TestCaptureExecutionPurposeSkip(t *testing.T) {
+	dir := newAuditDirectory(t)
+	c := openAudit(t, dir, 0)
+	const scope = "purpose-skip-scope"
+	before := c.Status().Gaps
+	id := c.CaptureExecution("skip-discovery", scope, "responses", audit.PurposeSkip, []byte("invalid-json-private-skip"))
+	if len(id) != 64 {
+		t.Fatalf("辅助执行未返回可发现身份：%q", id)
+	}
+	if err := c.Monitor(id, "辅助调用发现对象"); err != nil {
+		t.Fatal(err)
+	}
+	for _, paused := range []bool{false, true} {
+		if err := c.SetPaused(paused); err != nil {
+			t.Fatal(err)
+		}
+		if got := c.CaptureExecution("skip-monitored", scope, "responses", audit.PurposeSkip, []byte("invalid-json-private-skip")); got != id {
+			t.Fatalf("跳过或暂停改变身份：%q", got)
+		}
+		if status := c.Status(); status.Saved != 0 || status.Queued != 0 || !maps.Equal(before, status.Gaps) {
+			t.Fatalf("辅助调用被保存、排队或报告缺口：%+v", status)
+		}
+	}
+	if err := c.SetPaused(false); err != nil {
+		t.Fatal(err)
+	}
+	c.CaptureExecution("client-barrier", scope, "responses", audit.PurposeUnknown, []byte(`{"input":"barrier"}`))
+	waitClientBarrier(t, c)
+	if status := c.Status(); status.Saved != 1 || !maps.Equal(before, status.Gaps) {
+		t.Fatalf("辅助执行没有正常跳过：%+v", status)
+	}
+	if _, err := c.Detail("skip-monitored"); err == nil || err.Error() != "not_found" {
+		t.Fatalf("辅助执行可查询：%v", err)
+	}
+	c.Close()
+	if bytes.Contains(readAuditFile(t, dir, "records-000001.jsonl"), []byte("invalid-json-private-skip")) {
+		t.Fatal("辅助正文被持久保存")
+	}
+}
+
 // TestCaptureExecutionIdentity 验证身份按私有持久种子和scope域分隔派生，重启稳定、不同scope及目录互不相同。
 func TestCaptureExecutionIdentity(t *testing.T) {
 	dir := newAuditDirectory(t)
 	c := openAudit(t, dir, 0)
 	scope := strings.Repeat("a", 64)
 	id := monitorScope(t, c, scope)
-	if other := c.CaptureExecution("other", strings.Repeat("b", 64), "responses", nil); other == id {
+	if other := c.CaptureExecution("other", strings.Repeat("b", 64), "responses", audit.PurposeUnknown, nil); other == id {
 		t.Fatal("不同scope共用身份")
 	}
 	seed := readAuditFile(t, dir, scopeSeedFile)
@@ -123,7 +166,7 @@ func TestCaptureExecutionIdentity(t *testing.T) {
 	}
 	c.Close()
 	c = openAudit(t, dir, 0)
-	if got := c.CaptureExecution("reopened", scope, "responses", []byte(`{"input":"saved"}`)); got != id {
+	if got := c.CaptureExecution("reopened", scope, "responses", audit.PurposeUnknown, []byte(`{"input":"saved"}`)); got != id {
 		t.Fatalf("重启轮换身份：%s != %s", got, id)
 	}
 	waitSaved(t, c, 1)
@@ -131,7 +174,7 @@ func TestCaptureExecutionIdentity(t *testing.T) {
 		t.Fatal("重启或写入改写了种子")
 	}
 	other := openAudit(t, newAuditDirectory(t), 0)
-	if other.CaptureExecution("independent", scope, "responses", nil) == id {
+	if other.CaptureExecution("independent", scope, "responses", audit.PurposeUnknown, nil) == id {
 		t.Fatal("独立目录共用身份")
 	}
 }
@@ -142,8 +185,8 @@ func TestCaptureExecutionUnmonitored(t *testing.T) {
 	c := openAudit(t, dir, 0)
 	scope := "unmonitored-caller-scope-secret"
 	body := []byte("invalid-json-private-body-marker")
-	first := c.CaptureExecution("first", scope, "chat-completions", body)
-	if len(first) != 64 || c.CaptureExecution("second", scope, "responses", body) != first {
+	first := c.CaptureExecution("first", scope, "chat-completions", audit.PurposeUnknown, body)
+	if len(first) != 64 || c.CaptureExecution("second", scope, "responses", audit.PurposeUnknown, body) != first {
 		t.Fatal("未监控身份不稳定")
 	}
 	status := c.Status()
@@ -185,7 +228,7 @@ func TestCaptureExecutionHTTPWhitelist(t *testing.T) {
 			objectID := monitorScope(t, c, scope)
 			body := []byte(tc.body)
 			before := time.Now()
-			got := c.CaptureExecution("official-request-id", scope, tc.protocol, body)
+			got := c.CaptureExecution("official-request-id", scope, tc.protocol, audit.PurposeUnknown, body)
 			after := time.Now()
 			for i := range body {
 				body[i] = 'x'
@@ -225,7 +268,7 @@ func TestCallerScopeRejectsLegacyDirectory(t *testing.T) {
 			if status := c.Status(); status.State != "paused" || status.Reason != "identity_unavailable" {
 				t.Fatalf("旧目录未停采：%+v", status)
 			}
-			if c.CaptureExecution("legacy", "scope", "responses", []byte(`{"input":"must not save"}`)) != "" {
+			if c.CaptureExecution("legacy", "scope", "responses", audit.PurposeUnknown, []byte(`{"input":"must not save"}`)) != "" {
 				t.Fatal("无新种子仍返回身份")
 			}
 			c.Close()
@@ -282,7 +325,7 @@ func TestCallerScopeSeedFailureDoesNotRotate(t *testing.T) {
 			if status := c.Status(); status.State != "paused" || status.Reason != "identity_unavailable" {
 				t.Fatalf("种子失败未停采：%+v", status)
 			}
-			if c.CaptureExecution("failed", "scope", "responses", nil) != "" {
+			if c.CaptureExecution("failed", "scope", "responses", audit.PurposeUnknown, nil) != "" {
 				t.Fatal("种子失败后仍派生身份")
 			}
 			c.Close()
@@ -321,9 +364,9 @@ func TestReportInputFailure(t *testing.T) {
 	monitorScope(t, c, "scope")
 	c.ReportInputFailure()
 	c.ReportInputFailure()
-	c.CaptureExecution("invalid request id", "scope", "responses", nil)
-	c.CaptureExecution("empty-scope", "", "responses", nil)
-	c.CaptureExecution("websocket-not-http", "scope", "responses-websocket", []byte(`{"type":"response.create","input":"excluded"}`))
+	c.CaptureExecution("invalid request id", "scope", "responses", audit.PurposeUnknown, nil)
+	c.CaptureExecution("empty-scope", "", "responses", audit.PurposeUnknown, nil)
+	c.CaptureExecution("websocket-not-http", "scope", "responses-websocket", audit.PurposeUnknown, []byte(`{"type":"response.create","input":"excluded"}`))
 	status := c.Status()
 	if status.Gaps["invalid_event"] != 4 || status.Gaps["unsupported_protocol"] != 1 || status.Recovery.Uncertain {
 		t.Fatalf("无效回调诊断不符：%+v", status)
@@ -388,6 +431,107 @@ func TestCallerScopeSeedBudget(t *testing.T) {
 	}
 }
 
+// TestRequestPurposeMixedRestart 验证新旧用途混合读取及重启，旧缺省不被补写，新用途不会丢失。
+func TestRequestPurposeMixedRestart(t *testing.T) {
+	dir := newAuditDirectory(t)
+	c := openAudit(t, dir, 0)
+	const scope = "mixed-purpose-scope"
+	objectID := monitorScope(t, c, scope)
+	c.Close()
+	// 空白和字段顺序有意与 Marshal 不同，用于证明读取及维护不重新编码幸存历史。
+	legacyTime := time.Now().UTC()
+	legacy := []byte(fmt.Sprintf("{ \"text\":\"legacy\", \"id\":\"legacy-purpose\", \"object_id\":%q, \"received_at\":%q, \"protocol\":\"responses\", \"model\":\"synthetic\", \"truncated\":false }\n", objectID, legacyTime.Format(time.RFC3339Nano)))
+	writeAuditFile(t, dir, "records-000001.jsonl", legacy)
+	c = openAudit(t, dir, 0)
+	want := map[string]audit.RequestPurpose{"legacy-purpose": ""}
+	for _, purpose := range []audit.RequestPurpose{audit.PurposeMain, audit.PurposeTurn, audit.PurposeUnknown} {
+		id := "purpose-" + string(purpose)
+		want[id] = purpose
+		c.CaptureExecution(id, scope, "responses", purpose, []byte(`{"input":"new purpose"}`))
+	}
+	waitSaved(t, c, 4)
+	c.Close()
+	original := readAuditFile(t, dir, "records-000001.jsonl")
+	if !bytes.HasPrefix(original, legacy) {
+		t.Fatal("新增用途时改写了旧记录")
+	}
+	// 同段加入到期夹具，重启会执行原字节复制；所有幸存新旧记录必须保持原行。
+	expired := bytes.Replace(legacy, []byte("legacy-purpose"), []byte("expired-purpose"), 1)
+	expired = bytes.Replace(expired, []byte(legacyTime.Format(time.RFC3339Nano)), []byte(legacyTime.Add(-8*24*time.Hour).Format(time.RFC3339Nano)), 1)
+	writeAuditFile(t, dir, "records-000001.jsonl", append(expired, original...))
+	c = openAudit(t, dir, 0)
+	if status := c.Status(); status.State != "active" || status.Saved != 4 {
+		t.Fatalf("新旧混合记录重启失败：%+v", status)
+	}
+	records, total, err := c.List(0, 10, audit.Query{})
+	if err != nil || total != 4 || len(records) != 4 {
+		t.Fatalf("混合记录无法列出：count=%d total=%d err=%v", len(records), total, err)
+	}
+	for _, listed := range records {
+		expected, exists := want[listed.ID]
+		if !exists || listed.Purpose != expected {
+			t.Fatalf("列表用途不符：%+v", listed)
+		}
+		detail, err := c.Detail(listed.ID)
+		if err != nil || detail.Purpose != expected {
+			t.Fatalf("详情用途不符：%+v err=%v", detail, err)
+		}
+		encoded, err := json.Marshal(detail)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(encoded, []byte(`"purpose"`)) != (expected != "") {
+			t.Fatalf("旧记录用途被伪造或新用途被省略：%s", encoded)
+		}
+	}
+	c.Close()
+	if !bytes.Equal(original, readAuditFile(t, dir, "records-000001.jsonl")) {
+		t.Fatal("重启改写了混合历史")
+	}
+}
+
+// TestRequestPurposeRejectsInvalidStorage 验证非法用途含空值和null导致明确停采，仍严格拒绝未知字段且保留原行。
+func TestRequestPurposeRejectsInvalidStorage(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		field string
+	}{
+		{"skip", `"purpose":"skip"`},
+		{"unknown_value", `"purpose":"future"`},
+		{"case", `"purpose":"MAIN"`},
+		{"empty", `"purpose":""`},
+		{"null", `"purpose":null`},
+		{"number", `"purpose":42`},
+		{"object", `"purpose":{}`},
+		{"array", `"purpose":[]`},
+		{"unknown_field", `"purpose":"main","headers":{"X-Synthetic":"not allowed"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := newAuditDirectory(t)
+			c := openAudit(t, dir, 0)
+			objectID := monitorScope(t, c, "invalid-purpose-scope")
+			c.Close()
+			line := []byte(fmt.Sprintf("{\"id\":\"invalid-purpose\",\"object_id\":%q,\"received_at\":%q,\"protocol\":\"responses\",\"model\":\"synthetic\",\"text\":\"content\",\"truncated\":false,%s}\n", objectID, time.Now().UTC().Format(time.RFC3339Nano), tc.field))
+			writeAuditFile(t, dir, "records-000001.jsonl", line)
+			c = openAudit(t, dir, 0)
+			if status := c.Status(); status.State != "paused" || status.Reason != "storage_error" || status.Saved != 0 {
+				t.Fatalf("非法用途没有拒绝：%+v", status)
+			}
+			beforeSkip := c.Status().Gaps
+			if got := c.CaptureExecution("storage-skip", "invalid-purpose-scope", "responses", audit.PurposeSkip, []byte("invalid-json-private-skip")); got != objectID {
+				t.Fatalf("存储故障改变辅助执行身份：%q", got)
+			}
+			if status := c.Status(); status.Queued != 0 || !maps.Equal(beforeSkip, status.Gaps) {
+				t.Fatalf("存储故障时辅助执行新增缺口：%+v", status)
+			}
+			c.Close()
+			if !bytes.Equal(line, readAuditFile(t, dir, "records-000001.jsonl")) {
+				t.Fatal("非法历史被改写")
+			}
+		})
+	}
+}
+
 // TestCaptureExecutionBudgetContinuation 验证容量暂停仍解析工具续跑，只将本应保存的新输入记为容量缺口。
 func TestCaptureExecutionBudgetContinuation(t *testing.T) {
 	dir := newAuditDirectory(t)
@@ -404,6 +548,15 @@ func TestCaptureExecutionBudgetContinuation(t *testing.T) {
 	if c.Status().Reason != "budget_exhausted" {
 		t.Fatalf("夹具未触发预算暂停：%+v", c.Status())
 	}
+	beforeSkip := c.Status().Gaps
+	for i, protocol := range []string{"chat-completions", "responses", "anthropic-messages"} {
+		if got := c.CaptureExecution(fmt.Sprintf("budget-skip-%d", i), scope, protocol, audit.PurposeSkip, []byte("invalid-json-private-skip")); got != id {
+			t.Fatal("容量暂停时辅助执行改变身份")
+		}
+	}
+	if status := c.Status(); status.Saved != 0 || status.Queued != 0 || !maps.Equal(beforeSkip, status.Gaps) {
+		t.Fatalf("容量暂停时辅助执行产生缺口：%+v", status)
+	}
 	for i, tc := range []struct {
 		protocol string
 		body     string
@@ -412,14 +565,14 @@ func TestCaptureExecutionBudgetContinuation(t *testing.T) {
 		{"responses", `{"input":[{"type":"function_call_output","call_id":"call","output":"result"}]}`},
 		{"anthropic-messages", `{"messages":[{"role":"user","content":[{"type":"tool_result","tool_use_id":"call","content":"result"}]}]}`},
 	} {
-		if got := c.CaptureExecution(fmt.Sprintf("tool-%d", i), scope, tc.protocol, []byte(tc.body)); got != id {
+		if got := c.CaptureExecution(fmt.Sprintf("tool-%d", i), scope, tc.protocol, audit.PurposeUnknown, []byte(tc.body)); got != id {
 			t.Fatal("暂停改变了身份")
 		}
 	}
 	if count := c.Status().Gaps["budget_exhausted"]; count != 0 {
 		t.Fatalf("工具续跑被计为容量丢失：%d", count)
 	}
-	c.CaptureExecution("new-input", scope, "responses", []byte(`{"input":"must be a budget gap"}`))
+	c.CaptureExecution("new-input", scope, "responses", audit.PurposeUnknown, []byte(`{"input":"must be a budget gap"}`))
 	status := c.Status()
 	if status.Gaps["budget_exhausted"] != 1 || status.Gaps["observer_unavailable"] != 0 || status.Saved != 0 || status.Queued != 0 {
 		t.Fatalf("暂停时没有正确判断新输入：%+v", status)

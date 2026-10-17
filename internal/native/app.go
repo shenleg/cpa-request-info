@@ -404,7 +404,7 @@ func (a *App) management(req managementRequest) any {
 					preview = preview[:len(preview)-1]
 				}
 			}
-			items = append(items, map[string]any{"id": r.ID, "object_id": r.ObjectID, "name": names[r.ObjectID], "received_at": r.ReceivedAt, "protocol": r.Protocol, "model": r.Model, "truncated": r.Truncated, "extraction_incomplete": r.ExtractionIncomplete, "preview": preview})
+			items = append(items, map[string]any{"id": r.ID, "object_id": r.ObjectID, "name": names[r.ObjectID], "received_at": r.ReceivedAt, "protocol": r.Protocol, "model": r.Model, "purpose": r.Purpose, "truncated": r.Truncated, "extraction_incomplete": r.ExtractionIncomplete, "preview": preview})
 		}
 		return responseJSON(200, map[string]any{"records": items, "total": total, "offset": offset, "limit": limit})
 	}
@@ -417,7 +417,7 @@ func (a *App) management(req managementRequest) any {
 		if err != nil {
 			return responseJSON(404, map[string]string{"error": "not_found"})
 		}
-		return responseJSON(200, map[string]any{"id": r.ID, "object_id": r.ObjectID, "name": c.Monitors()[r.ObjectID], "received_at": r.ReceivedAt, "protocol": r.Protocol, "model": r.Model, "truncated": r.Truncated, "extraction_incomplete": r.ExtractionIncomplete, "text": r.Text})
+		return responseJSON(200, map[string]any{"id": r.ID, "object_id": r.ObjectID, "name": c.Monitors()[r.ObjectID], "received_at": r.ReceivedAt, "protocol": r.Protocol, "model": r.Model, "purpose": r.Purpose, "truncated": r.Truncated, "extraction_incomplete": r.ExtractionIncomplete, "text": r.Text})
 	}
 	return responseJSON(404, map[string]string{"error": "not_found"})
 }

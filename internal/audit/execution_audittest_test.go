@@ -31,7 +31,7 @@ func TestCaptureExecutionRetentionClock(t *testing.T) {
 	c := openAudit(t, newAuditDirectory(t), 0)
 	scope := "retention-scope"
 	monitorScope(t, c, scope)
-	c.CaptureExecution("before-extension", scope, "responses", []byte(`{"input":"old"}`))
+	c.CaptureExecution("before-extension", scope, "responses", audit.PurposeUnknown, []byte(`{"input":"old"}`))
 	waitSaved(t, c, 1)
 	record, err := c.Detail("before-extension")
 	if err != nil || record.ReceivedAt != start.Format(time.RFC3339Nano) {
@@ -42,7 +42,7 @@ func TestCaptureExecutionRetentionClock(t *testing.T) {
 	if err := c.SetSettings(audit.SettingsChange{RetentionDays: &days}); err != nil {
 		t.Fatal(err)
 	}
-	c.CaptureExecution("after-extension", scope, "responses", []byte(`{"input":"new"}`))
+	c.CaptureExecution("after-extension", scope, "responses", audit.PurposeUnknown, []byte(`{"input":"new"}`))
 	waitSaved(t, c, 2)
 	setCaptureClock(t, clockDir, "before-expiry.json", start.Add(7*24*time.Hour-time.Nanosecond))
 	if _, err := c.Detail("before-extension"); err != nil {
