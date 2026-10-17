@@ -1,4 +1,4 @@
-// 本文件验证明确 main 仅放过整请求模板，附加块、协议边界和 UTF-8 截断仍只影响审计副本，不改原生 Anthropic 上游。
+// 本文件验证 main/turn 仅放过整请求模板，所有用途均清理独立附加块，协议边界和 UTF-8 截断只影响审计副本，不改原生 Anthropic 上游。
 package system
 
 import (
@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// TestHTTPRequestPurposeAnthropicMain 验证 main 保留完整辅助模板而 unknown 沿用旧规则，正文清理、工具排除、不完整状态及字节上限不变。
+// TestHTTPRequestPurposeAnthropicMain 验证 main/turn 保留整请求模板、unknown 跳过；三类用途均清理技能/网页独立块且不改模型请求和响应。
 func TestHTTPRequestPurposeAnthropicMain(t *testing.T) {
 	received := make(chan []byte, 4)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -54,12 +54,14 @@ func TestHTTPRequestPurposeAnthropicMain(t *testing.T) {
 	}
 	var cases []sample
 	for _, template := range []struct{ name, text, replace string }{
+		{"recap", clientRecapPrefix + "\nSYNTHETIC_TEMPLATE_MARKER", "SYNTHETIC_TEMPLATE_MARKER"},
+		{"conversation", "<conversation>\nSYNTHETIC_TEMPLATE_MARKER", "SYNTHETIC_TEMPLATE_MARKER"},
 		{"action", clientActionTemplate, "FORBIDDEN_CLIENT_INPUT_ACTION"},
 		{"title", clientTitleTemplate, "FORBIDDEN_CLIENT_INPUT_SESSION"},
 		{"transcript", strings.ReplaceAll(clientTranscriptTemplate, "FORBIDDEN_CLIENT_INPUT_TOOL", "synthetic-template-agent"), "FORBIDDEN_CLIENT_INPUT_TRANSCRIPT"},
 		{"suggestion", "[SUGGESTION MODE: Suggest what the user might naturally type next into Claude Code.]\n\nFIRST: Look at the user's recent messages and original request.\n\nYour job is to predict what THEY would type - not what you think they should do.\n\nSYNTHETIC_TEMPLATE_MARKER\nFormat: 2-12 words, match the user's style. Or nothing.\n\nReply with ONLY the suggestion, no quotes or explanation.", "SYNTHETIC_TEMPLATE_MARKER"},
 	} {
-		for _, purpose := range []string{"main", "unknown"} {
+		for _, purpose := range []string{"main", "turn", "unknown"} {
 			marker := fmt.Sprintf("PURPOSE-ANTHROPIC-%s-%s-%d", template.name, purpose, time.Now().UnixNano())
 			if purpose == "unknown" {
 				marker = "FORBIDDEN_PURPOSE_ANTHROPIC_SKIPPED-" + marker
@@ -71,6 +73,29 @@ func TestHTTPRequestPurposeAnthropicMain(t *testing.T) {
 			}
 			cases = append(cases, sample{name: template.name + "_" + purpose, marker: marker, content: content, want: want, purpose: purpose})
 		}
+	}
+	for _, purpose := range []string{"main", "turn", "unknown"} {
+		for _, block := range []struct{ name, text string }{
+			{"reinvocation", clientReinvocationLine + "\nFORBIDDEN_PURPOSE_ANTHROPIC_REINVOCATION"},
+			{"web", "Web page content:\n\n---\n\nFORBIDDEN_PURPOSE_ANTHROPIC_WEB"},
+			{"web_title", "Web page content:\n\n---\n\n## 与过滤无关的标题\n\nFORBIDDEN_PURPOSE_ANTHROPIC_WEB_TITLE"},
+		} {
+			marker := fmt.Sprintf("PURPOSE-ANTHROPIC-%s-%s-%d", block.name, purpose, time.Now().UnixNano())
+			skipped := "FORBIDDEN_PURPOSE_ANTHROPIC_ONLY-" + marker
+			cases = append(cases, sample{name: block.name + "_only_" + purpose, marker: skipped, content: block.text + "\n" + skipped, purpose: purpose})
+			// 超过正文上限的辅助块不能挤掉独立正文或附件；未知尾块仍按原约定报告一次缺口。
+			mixed := append(clientTextBlocks(block.text+strings.Repeat("x", 65536), marker),
+				map[string]any{"type": "image", "source": map[string]string{"type": "url", "url": "FORBIDDEN_PURPOSE_ANTHROPIC_CONFIRMED_IMAGE"}},
+				map[string]any{"type": "document", "source": map[string]string{"type": "file", "file_id": "FORBIDDEN_PURPOSE_ANTHROPIC_CONFIRMED_FILE"}},
+				map[string]string{"type": "future", "payload": "FORBIDDEN_PURPOSE_ANTHROPIC_CONFIRMED_UNKNOWN"})
+			cases = append(cases, sample{name: block.name + "_mixed_before_limit_" + purpose, marker: marker, content: mixed, want: marker + "[图片][文件]", purpose: purpose, incomplete: true})
+		}
+	}
+	// 整请求规则只接受纯文本；相同起始模板带附件时应保留正文和附件占位符。
+	for i, text := range []string{clientRecapPrefix + "\n", "<conversation>\n"} {
+		marker := fmt.Sprintf("PURPOSE-ANTHROPIC-NONTEXT-%d-%d", i, time.Now().UnixNano())
+		content := append(clientTextBlocks(text+marker), map[string]any{"type": "image", "source": map[string]string{"type": "url", "url": "FORBIDDEN_PURPOSE_ANTHROPIC_TEMPLATE_IMAGE"}})
+		cases = append(cases, sample{name: fmt.Sprintf("unknown_template_with_attachment_%d", i), marker: marker, content: content, want: text + marker + "[图片]", purpose: "unknown"})
 	}
 	marker := fmt.Sprintf("PURPOSE-ANTHROPIC-CLEAN-%d", time.Now().UnixNano())
 	tool := map[string]any{"type": "tool_result", "tool_use_id": "synthetic-purpose-tool", "content": "FORBIDDEN_PURPOSE_ANTHROPIC_TOOL"}
@@ -100,8 +125,11 @@ func TestHTTPRequestPurposeAnthropicMain(t *testing.T) {
 				t.Fatal("用途原生 Anthropic 夹具编码失败")
 			}
 			var headers http.Header
-			if tc.purpose == "main" {
+			switch tc.purpose {
+			case "main":
 				headers = http.Header{"x-claude-code-request-class": {"main"}}
+			case "turn":
+				headers = http.Header{"x-codex-turn-metadata": {`{"request_kind":"turn"}`}}
 			}
 			beforeSaved, _, gaps := snapshotCounters(t, h)
 			plainCode, plainResponse := requestWithPurposeHeaders(t, off, "/v1/messages", keyA, body, headers)
@@ -124,7 +152,7 @@ func TestHTTPRequestPurposeAnthropicMain(t *testing.T) {
 			wantSaved := beforeSaved + 1
 			if tc.want == "" {
 				if searchRecords(t, h, url.Values{"q": {tc.marker}}).Total != 0 {
-					t.Fatal("用途未知模板或 main 的非用户内容被保存")
+					t.Fatal("应跳过的用途未知模板、独立附加块或非用户内容被保存")
 				}
 			} else {
 				wantSaved++

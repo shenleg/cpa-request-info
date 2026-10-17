@@ -310,6 +310,12 @@ func (c *Collector) Observe(event Event) {
 				return
 			}
 		} else {
+			// 此精确辅助指令只适用于未知用途 Chat；不能放进多协议共享的 chatContent。
+			if event.Protocol == "chat-completions" && event.Purpose == PurposeUnknown {
+				if value, ok := clientMessageText(last["content"]); ok && value == "follow system prompt" {
+					return
+				}
+			}
 			text, truncated, incomplete = chatContent(last["content"], event.Snapshot.MaxTextBytes)
 		}
 	}

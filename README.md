@@ -39,8 +39,7 @@
 
 - 不保存历史、system/developer 指令、工具调用或工具结果、模型回复、完整请求、认证材料和附件 payload。工具结果内部不递归提取；附件仅留 `[图片]`、`[音频]`、`[视频]`、`[文件]` 等协议白名单占位符，不保存 URL、文件名、引用或 Base64 载荷。
 - 工具续跑、正常空输入、非用户末尾正常跳过。未知或畸形内容不序列化为整请求：能安全提取的部分标记 `extraction_incomplete`，不能安全提取则仅报告固定原因。
-- 优先按已发送的用途头和专用 compact 路径跳过辅助、压缩、预热、记忆、子智能体和 workflow 调用；仍发现匿名对象，不拒绝模型请求。首版只读请求头和路径，不解析 body.client_metadata，也不要求客户开启配置。无标记、未知或冲突的用途继续原提取，标注“用途未知”，见[用途规范](.scratch/request-purpose-filter/spec.md)。
-- Anthropic Messages 的用途未知请求在截断前按已知模板排除建议、标题、动作和权限转录；明确 main 不再因整条模板被跳过。两者均清理独立技能、成对提醒和 IDE 上下文，保留独立正文、空白及附件占位符。这些规则不证明人工来源，只影响新记录，不改写历史，见[原有格式规则](.scratch/client-input-filter/spec.md)。
+- 优先使用已发送的用途头和专用 compact 路径识别辅助请求；未知用途继续提取，不要求客户改配置。随后按协议选择末尾输入、识别已知自动模板、清理独立附加块，具体条件见下方[识别与过滤规则](#识别与过滤规则)。
 - 只截断审计副本，不改模型输入。`truncated` 与 `extraction_incomplete` 独立展示，可以同时为 true。
 - **普通文本里的秘密、Key、URL、Base64 不自动脱敏；应用层明文保存。** 纯文本展示不代表正文不敏感。
 
@@ -49,6 +48,66 @@
 `request_reasoning` 只保存 Before 可见的请求声明：Chat 的 `reasoning_effort`、Responses 的 `reasoning.effort`、Messages 的 `output_config.effort` 与 `thinking.type` / `thinking.budget_tokens`，对应 `effort`、`type`、`budget_tokens`。等级、模式和预算独立展示，不互相换算；预算为0与未指定不同。新记录的空对象显示“未指定”，旧记录缺字段显示“未记录”。**这些是请求值，不保证是 CPA 后缀、协议转换或配置覆盖后的最终上游强度**。不保存完整思考配置对象，不从模型名推断。
 
 **新增字段的降级限制：** 新插件可读取原有记录，但旧插件的严格解码器会拒绝其不认识的 `purpose` 或 `request_reasoning`。不能把写入新记录后的 state-dir 直接交给旧插件降级运行；本项目不自动迁移、删除或改写数据。
+
+### 识别与过滤规则
+
+以下规则只决定**是否保存审计副本、保存哪些内容**，不拒绝或改写实际模型请求。处理顺序为执行来源与采集资格 → 请求用途 → 末尾消息/协议内容 → 模板排除与独立块清理 → UTF-8 长度截断 → 入队保存。正常跳过不增加采集缺口。
+
+#### 执行来源与采集资格
+
+| 识别条件 | 处理 |
+| --- | --- |
+| 官方回调 `source=plugin_host_model_callback` | 排除 CPA 插件通过宿主发起的内部嵌套执行；它不表示所有客户端自动调用 |
+| WebSocket Upgrade、未支持的路径或协议格式 | 不采集；当前仅支持 Chat Completions、Responses HTTP、Anthropic Messages 的 HTTP/SSE 执行 |
+| 首次发现、未监控或主动暂停 | 不保存正文；符合条件的外部 HTTP 执行仍可用于发现匿名对象 |
+| Chat/Messages 末条不是明确 `user`，或 Responses 末项不是明确用户消息 | 正常跳过，不回找前面的用户原话；Responses 字符串 `input` 直接视为本次文本 |
+| 工具调用、工具结果、模型回复、system/developer、正常空输入 | 不保存，不递归提取其嵌套正文；用户附件只保留固定协议占位符 |
+
+#### 请求用途：只读取实际收到的请求头与路径
+
+| 标记 | 值/条件 | 处理 |
+| --- | --- | --- |
+| `request_path` | `/v1/responses/compact`、`/backend-api/codex/responses/compact` | 跳过压缩请求 |
+| `x-claude-code-agent-id`、`x-openai-subagent` | 任一有效非空值 | 跳过子任务；优先于普通对话用途，即使同时有 Codex `turn` 也跳过 |
+| `x-claude-code-request-class` | `subagent`、`workflow`、`compaction`、`auxiliary` | 跳过辅助执行 |
+| `x-claude-code-request-class` | `main` | 保存用途为 `main`，继续正文提取与独立块清理 |
+| `x-codex-turn-metadata` JSON 中的 `request_kind` | `prewarm`、`compaction`、`memory` | 跳过预热、压缩、记忆调用 |
+| `x-codex-turn-metadata` JSON 中的 `request_kind` | `turn`，且没有有效子任务标记 | 保存用途为 `turn`，继续正文提取 |
+| 用途标记缺失、未知、损坏或互相矛盾 | 无法一致解释用途 | **继续采集，保存为 `unknown`（用途未知）**，再应用该协议的正文规则 |
+
+头名不区分大小写；多个同名值仅在全部一致且非空时有效。明确 compact 路径或有效子任务标记优先。Claude `main` 与 Codex `turn` 同时存在时保存为 `main`；两端均表示跳过时跳过，对话与辅助用途矛盾时为 `unknown`。不读取 `body.client_metadata`，不根据 User-Agent、会话 ID、prompt ID 或正文语言猜测人工来源。完整用途契约见[用途规范](.scratch/request-purpose-filter/spec.md)。
+
+#### 整条辅助请求排除
+
+下表只对**用途为 `unknown`** 的末尾纯文本用户消息匹配，不读取附件/工具内部内容。Anthropic 明确 `main`/`turn` 继续保留整请求模板，但仍执行下一节的独立块清理。
+
+| 协议 | 自动内容 | 识别条件与处理 |
+| --- | --- | --- |
+| Anthropic Messages | 输入建议 | 起始为固定 `[SUGGESTION MODE: …]`，并同时符合已确认的首段、任务、格式与结束指令；整条跳过，不只凭首行判断 |
+| Anthropic Messages | 动作描述 | 起始为完整 `Describe your most recent action in 3-5 words…` 固定指令，且同时包含 `Good:` 与 `Bad (` 示例；整条跳过 |
+| Anthropic Messages | 会话标题 | `<session>\n…\n</session>` 后紧接已确认的固定标题指令或语言变体；整条跳过 |
+| Anthropic Messages | 权限判断转录 | `<transcript>` 内为合法连续 JSON 转录且包含 user/assistant 条目；或符合跨连续 user 的已确认起止与分类指令结构；整条跳过，不提取转录中的原话 |
+| Anthropic Messages | 返回会话摘要 | 消息起始匹配固定前缀 `The user stepped away and is coming back. Recap in under 40 words. 1-2 plain sentences, no markdown.`；整条跳过 |
+| Anthropic Messages | 会话内容包装 | 整条纯文本以独立 `<conversation>` 行开头，其后有非空内容；整条跳过，不绑定内部标题，也不要求未确认的闭合标签 |
+| Chat Completions | 通用辅助指令 | 解码后的整条纯文本**精确等于** `follow system prompt`；整条跳过。不去除首尾空白、不忽略大小写、不匹配子串；混合附件/工具时不按此规则排除 |
+
+字符串和纯 text 块可用于整消息判定，连续 text 块直接组合，不额外插入空白；不跨历史消息组合正文。Responses 不应用上述客户端正文模板，也不应用下一节 Anthropic 专用块清理。
+
+#### Anthropic 独立附加块清理
+
+保留的 Anthropic 请求（`main`、`turn`、`unknown`）均执行下列清理，再保存剩余正文及附件占位符。**独立块指单独的协议 text 块，字符串 content 则整体视为一个块**；不从同一自动块内猜测哪一段可能是人工文字。
+
+| 内容 | 匹配条件 | 删除范围 |
+| --- | --- | --- |
+| 技能加载说明 | 块首 `Base directory for this skill: ` 后有非空路径及空行 | 删除该独立块 |
+| `/run` 技能重新调用 | 块的第一行精确为 `(Re-invocation of /run — the skill instructions were previously loaded; the arguments or dynamic output below are new.)` | 删除该独立块及块内动态输出；不泛化到任意技能名或中断提示 |
+| 网页内容包装 | 块首为 `Web page content:`，后接可选空白、`---`、至少一个空白及非空网页内容 | 删除该独立块；网页正文不必有 Markdown 标题 |
+| 客户端提醒 | 行边界或块边界上的完整成对 `<system-reminder>`，可有16–32位小写十六进制 `id` | 删除成对范围；嵌套必须完整，结束标签必须匹配同一标识 |
+| IDE 上下文 | 行边界或块边界上的完整成对 `<ide_opened_file>`、`<ide_selection>` | 删除成对范围 |
+
+其他独立正文与原始空白保留；工具不保存，附件按协议保留固定占位符。代码围栏中的上述附加块保留，包括跨 text/工具块的围栏。普通讨论、正文中引用标记、缺少配对的提醒/IDE 标签不会只因包含关键词而删除；`<conversation>` 是单独的整请求起始规则，不适用提醒标签的配对要求。
+
+**适用边界：**这些是有限的已知格式识别，不是人工来源证明。完整同形的手工粘贴也会被过滤；未识别的自动内容仍可能被记录。用途 `main`/`turn` 也不代表每段内容都由人工输入。所有分类与清理均早于长度截断；未知内容继续按原规则报告 `extraction_incomplete`，与 `truncated` 独立。规则只影响安装新版本后的新记录，**不会自动删除或重新过滤已有历史**。实现规范见[客户端过滤 spec](.scratch/client-input-filter/spec.md)。
 
 ## 存储与管理
 

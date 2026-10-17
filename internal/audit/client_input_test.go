@@ -38,6 +38,12 @@ func waitClientBarrier(t *testing.T, c *audit.Collector) {
 // captureClientInput 以 purpose 提交合成 Anthropic 消息并用后续保存作为 FIFO 屏障；返回正文与是否保存，编码、用途或保存失败终止测试。
 func captureClientInput(t *testing.T, purpose audit.RequestPurpose, messages []any) (string, bool) {
 	t.Helper()
+	return captureClientProtocolInput(t, "anthropic-messages", purpose, messages)
+}
+
+// captureClientProtocolInput 以 protocol/purpose 提交合成消息并等待 FIFO 屏障；返回正文与是否保存，编码、用途或保存失败终止测试。
+func captureClientProtocolInput(t *testing.T, protocol string, purpose audit.RequestPurpose, messages []any) (string, bool) {
+	t.Helper()
 	c := openAudit(t, newAuditDirectory(t), 0)
 	scope := "synthetic-client-input-scope"
 	monitorScope(t, c, scope)
@@ -46,7 +52,7 @@ func captureClientInput(t *testing.T, purpose audit.RequestPurpose, messages []a
 	if err != nil {
 		t.Fatal(err)
 	}
-	c.CaptureExecution("client-input", scope, "anthropic-messages", purpose, body)
+	c.CaptureExecution("client-input", scope, protocol, purpose, body)
 	c.CaptureExecution("client-barrier", scope, "anthropic-messages", audit.PurposeUnknown, []byte(`{"model":"synthetic-model","messages":[{"role":"user","content":"client-barrier"}]}`))
 	// 等待可查询的已保存屏障，不能用固定延时证明辅助内容没有保存。
 	waitClientBarrier(t, c)

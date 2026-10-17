@@ -4,7 +4,7 @@ Status: completed
 
 ## 目标
 
-修复 Anthropic Messages 末尾 user 文本被直接视为用户实际提交正文的问题：排除已确认的客户端辅助请求；真实提交只保留正文及允许的附件占位符，不保存独立客户端说明。
+修复 Anthropic Messages 末尾 user 文本被直接视为用户实际提交正文的问题：排除已确认的客户端辅助请求；真实提交只保留正文及允许的附件占位符，不保存独立客户端说明。追加截图确认的自动摘要、会话包装、技能重新调用和网页包装，以及 Chat Completions 的精确辅助指令；在 README 集中说明全部识别和过滤规则。
 
 ## 契约
 
@@ -13,9 +13,14 @@ Status: completed
 - 对明确独立且成对的客户端提醒/IDE上下文块排除，普通文字、XML、模板讨论与代码引用保持原样。
 - 分类和排除在保存长度限制之前完成；正常跳过不增加采集故障，原有未知块和截断状态不变。
 - 只处理已证实结构，不声称 HTTP 协议提供可信人工来源；完全相同的手工模板粘贴无法从正文区分。
-- 不修改实际模型请求，不靠正文去重，不扩展历史采集；不改变 Chat/Responses 普通文本规则。
+- 不修改实际模型请求，不靠正文去重，不扩展历史采集；Responses 不使用客户端正文模板。Chat 仅增加下述精确辅助指令规则，其他文本规则保持不变。
+- 配合[用途规范](../request-purpose-filter/spec.md)：Anthropic 整请求辅助模板仅用于 unknown，明确 main/turn 绕过整请求判断；保留用途均继续独立块清理。未知用途继续采集，不推断为人工输入。
+- unknown Anthropic 的起始固定返回摘要指令（`The user stepped away…` 及已确认格式指令）整条跳过；纯文本以独立 `<conversation>` 行开头且后有非空内容时整条跳过，不绑定内部标题、不要求未确认的结束标签。
+- Anthropic 独立块第一行精确匹配已确认 `/run` 重新调用说明时删除该块；块首 `Web page content:` 后接可选空白、`---`、至少一个空白及非空网页内容时删除该块。其他独立正文和附件保留，不猜测同一块内的人工正文边界，不要求网页有 Markdown 标题。
+- unknown Chat 末尾纯文本整消息精确为 `follow system prompt` 时正常跳过；不 trim、不忽略大小写、不匹配子串，混合工具/附件不按纯文本判断，明确用途和其他协议不使用此规则。
+- 普通引用和代码围栏保留；完整同形手工粘贴仍会被过滤。实际精确条件、协议与用途范围集中列在 [README](../../README.md#识别与过滤规则)。
 - 仅影响新记录，不删除或改写已有数据，不自动部署或提交。
 
 ## 实施
 
-[01-client-input-filter](issues/01-client-input-filter.md)。
+原有修复：[01-client-input-filter](issues/01-client-input-filter.md)。本轮追加：[02-confirmed-automatic-content](issues/02-confirmed-automatic-content.md)，验收完成前以该票状态为准。

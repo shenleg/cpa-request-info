@@ -41,6 +41,9 @@ const clientActionTemplate = "Describe your most recent action in 3-5 words usin
 const clientTitleTemplate = "<session>\nFORBIDDEN_CLIENT_INPUT_SESSION\n</session>\n\nWrite the title in the predominant language of the session — a stray word or code token in another language doesn't change it, and neither does the English of these instructions."
 const clientTranscriptTemplate = "<transcript>\n{\"user\":\"FORBIDDEN_CLIENT_INPUT_TRANSCRIPT\"}{\"Agent\":\"FORBIDDEN_CLIENT_INPUT_TOOL\"}\n</transcript>\n附加说明：判断最近一次工具调用是否获得用户授权。"
 const clientSkillTemplate = "Base directory for this skill: /synthetic/path\n\nFORBIDDEN_CLIENT_INPUT_SKILL\nOnly use the following workflow."
+const clientRecapPrefix = "The user stepped away and is coming back. Recap in under 40 words. 1-2 plain sentences, no markdown."
+const clientReinvocationLine = "(Re-invocation of /run — the skill instructions were previously loaded; the arguments or dynamic output below are new.)"
+const clientWebTemplate = "Web page content:\n\n---\n\nFORBIDDEN_CLIENT_INPUT_WEB"
 
 // clientTextBlocks 把 texts 按原顺序编码成独立 text 块并返回；不添加分隔符，不执行 I/O，不产生异常。
 func clientTextBlocks(texts ...string) []any {
@@ -130,6 +133,69 @@ func TestAnthropicClientAuxiliaryRequests(t *testing.T) {
 	}
 	for i, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) { verifyClientInput(t, h, i, tc.content, "", false) })
+	}
+	assertChatPrivacy(t, h, "FORBIDDEN_CLIENT_INPUT_")
+}
+
+// TestAnthropicClientConfirmedRequests 验证未知用途纯文本的返回摘要与 conversation 起始模板正常跳过，识别先于截断且不回找历史。
+func TestAnthropicClientConfirmedRequests(t *testing.T) {
+	h := startHost(t, 1<<30, true, "")
+	h.monitorAll(t)
+	cases := []struct {
+		name    string
+		content any
+	}{
+		{"recap_prefix", clientRecapPrefix},
+		{"recap_string", clientRecapPrefix + "\n\nFORBIDDEN_CLIENT_INPUT_RECAP"},
+		{"recap_blocks", clientTextBlocks("The user stepped away and is coming back. ", "Recap in under 40 words. 1-2 plain sentences, no markdown.\nFORBIDDEN_CLIENT_INPUT_RECAP_BLOCKS")},
+		{"recap_before_limit", clientRecapPrefix + "\n" + strings.Repeat("x", 65536) + "FORBIDDEN_CLIENT_INPUT_RECAP_LARGE"},
+		{"conversation_unclosed", "<conversation>\nFORBIDDEN_CLIENT_INPUT_CONVERSATION_OPEN"},
+		{"conversation_closed_without_title", "<conversation>\nFORBIDDEN_CLIENT_INPUT_CONVERSATION_CLOSED\n</conversation>"},
+		{"conversation_arbitrary_suffix", "<conversation>\nFORBIDDEN_CLIENT_INPUT_CONVERSATION_SUFFIX\n</conversation>\n\n并非标题生成指令"},
+		{"conversation_blocks", clientTextBlocks("<conversation>\n", "FORBIDDEN_CLIENT_INPUT_CONVERSATION_BLOCKS")},
+		// 首个非空字符在保存上限之后，不能先截断再判断 conversation 是否有内容。
+		{"conversation_content_after_limit", "<conversation>\n" + strings.Repeat(" ", 65536) + "FORBIDDEN_CLIENT_INPUT_CONVERSATION_LARGE"},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) { verifyClientInput(t, h, i, tc.content, "", false) })
+	}
+	assertChatPrivacy(t, h, "FORBIDDEN_CLIENT_INPUT_")
+}
+
+// TestAnthropicClientConfirmedBlocks 验证重新调用技能与网页独立块删除自身，正文、附件及未知块状态保留，长辅助块不占正文额度。
+func TestAnthropicClientConfirmedBlocks(t *testing.T) {
+	h := startHost(t, 1<<30, true, "")
+	h.monitorAll(t)
+	reinvocation := clientReinvocationLine + "\n\nFORBIDDEN_CLIENT_INPUT_REINVOCATION"
+	webWithTitle := "Web page content:\n\n---\n\n# 任意网页标题\n\nFORBIDDEN_CLIENT_INPUT_WEB"
+	cases := []struct {
+		name, want string
+		content    any
+		incomplete bool
+	}{
+		{"reinvocation_string", "", reinvocation, false},
+		{"reinvocation_line_only", "", clientReinvocationLine, false},
+		{"reinvocation_block", "", clientTextBlocks(reinvocation), false},
+		{"web_string", "", clientWebTemplate, false},
+		{"web_title_string", "", webWithTitle, false},
+		{"web_block", "", clientTextBlocks(clientWebTemplate), false},
+		{"web_title_block", "", clientTextBlocks(webWithTitle), false},
+		{"web_blank_lines", "", "Web page content:\n \t\n---\n\t \nFORBIDDEN_CLIENT_INPUT_WEB_SPACES", false},
+		{"reinvocation_split_line_literal", clientReinvocationLine + "\nCLIENT-REINVOKE-SPLIT 正文", clientTextBlocks("(Re-invocation of /run — ", "the skill instructions were previously loaded; the arguments or dynamic output below are new.)\nCLIENT-REINVOKE-SPLIT 正文"), false},
+		{"web_split_blocks_literal", "Web page content:\n\n---\n\nCLIENT-WEB-SPLIT 正文", clientTextBlocks("Web page content:\n\n", "---\n\nCLIENT-WEB-SPLIT 正文"), false},
+		{"reinvocation_fence_across_blocks", "```text\n" + clientReinvocationLine + "\nCLIENT-REINVOKE-FENCE 正文\n```", clientTextBlocks("```text\n", clientReinvocationLine+"\nCLIENT-REINVOKE-FENCE 正文\n", "```"), false},
+		{"web_fence_across_blocks", "```text\nWeb page content:\n\n---\n\nCLIENT-WEB-FENCE 正文\n```", clientTextBlocks("```text\n", "Web page content:\n\n---\n\nCLIENT-WEB-FENCE 正文\n", "```"), false},
+		{"reinvocation_mixed", "CLIENT-REINVOKE-REAL 前后", clientTextBlocks("CLIENT-REINVOKE-REAL 前", reinvocation, "后"), false},
+		{"web_mixed", "CLIENT-WEB-REAL 前后", clientTextBlocks("CLIENT-WEB-REAL 前", webWithTitle, "后"), false},
+		{"both_and_attachments", "CLIENT-CONFIRMED-ATTACHMENT 正文[图片][文件]", append(clientTextBlocks(reinvocation, "CLIENT-CONFIRMED-ATTACHMENT 正文", clientWebTemplate), map[string]any{"type": "image", "source": map[string]string{"type": "url", "url": "FORBIDDEN_CLIENT_INPUT_CONFIRMED_IMAGE"}}, map[string]any{"type": "document", "source": map[string]string{"type": "file", "file_id": "FORBIDDEN_CLIENT_INPUT_CONFIRMED_FILE"}}), false},
+		{"both_and_unknown", "CLIENT-CONFIRMED-UNKNOWN 正文", append(clientTextBlocks(reinvocation, clientWebTemplate, "CLIENT-CONFIRMED-UNKNOWN 正文"), map[string]string{"type": "future", "payload": "FORBIDDEN_CLIENT_INPUT_CONFIRMED_UNKNOWN"}), true},
+		{"reinvocation_before_limit", "CLIENT-REINVOKE-LIMIT 正文", clientTextBlocks(clientReinvocationLine+"\nFORBIDDEN_CLIENT_INPUT_REINVOKE_LARGE"+strings.Repeat("x", 65536), "CLIENT-REINVOKE-LIMIT 正文"), false},
+		{"web_before_limit", "CLIENT-WEB-LIMIT 正文", clientTextBlocks(clientWebTemplate+strings.Repeat("x", 65536), "CLIENT-WEB-LIMIT 正文"), false},
+		// 网页正文超过上限才开始，仍应识别完整独立块而不是保存空白前缀。
+		{"web_content_after_limit", "CLIENT-WEB-LATE-CONTENT 正文", clientTextBlocks("Web page content:\n\n---\n\n"+strings.Repeat(" ", 65536)+"FORBIDDEN_CLIENT_INPUT_WEB_LATE", "CLIENT-WEB-LATE-CONTENT 正文"), false},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) { verifyClientInput(t, h, i, tc.content, tc.want, tc.incomplete) })
 	}
 	assertChatPrivacy(t, h, "FORBIDDEN_CLIENT_INPUT_")
 }
@@ -233,6 +299,27 @@ func TestAnthropicClientTemplateLiterals(t *testing.T) {
 		"CLIENT-LITERAL-SUGGESTION-CODE\n```text\n[SUGGESTION MODE: Suggest what the user might naturally type next into Claude Code.]\nPredict the user's next message.\n```",
 		"CLIENT-LITERAL-IDE-CODE\n```xml\n<ide_selection>\n普通代码示例\n</ide_selection>\n```",
 		"CLIENT-LITERAL-SPACES\n  正文保留末尾空白  \n",
+		"CLIENT-LITERAL-RECAP 请解释：" + clientRecapPrefix,
+		"```text\n" + clientRecapPrefix + "\nCLIENT-LITERAL-RECAP-FENCE\n```",
+		"> " + clientRecapPrefix + "\n> CLIENT-LITERAL-RECAP-QUOTE",
+		"The user stepped away and is coming back. Recap in under 41 words. 1-2 plain sentences, no markdown.\nCLIENT-LITERAL-RECAP-NEAR",
+		"<conversation>",
+		"<conversation>\n \t ",
+		"<conversation>CLIENT-LITERAL-CONVERSATION-INLINE",
+		"CLIENT-LITERAL-CONVERSATION-PREFIX\n<conversation>\n普通示例",
+		"```xml\n<conversation>\nCLIENT-LITERAL-CONVERSATION-FENCE\n```",
+		"> <conversation>\n> CLIENT-LITERAL-CONVERSATION-QUOTE",
+		"CLIENT-LITERAL-REINVOKE-PREFIX\n" + clientReinvocationLine + "\n普通说明",
+		clientReinvocationLine + " 同行还有 CLIENT-LITERAL-REINVOKE-SUFFIX",
+		strings.Replace(clientReinvocationLine, "—", "-", 1) + "\nCLIENT-LITERAL-REINVOKE-NEAR",
+		"```text\n" + clientReinvocationLine + "\nCLIENT-LITERAL-REINVOKE-FENCE\n```",
+		"> " + clientReinvocationLine + "\n> CLIENT-LITERAL-REINVOKE-QUOTE",
+		"CLIENT-LITERAL-WEB-PREFIX\nWeb page content:\n\n---\n\n普通正文",
+		"# 任意网页标题\n\nWeb page content:\n\n---\n\nCLIENT-LITERAL-WEB-HEADING-FIRST",
+		"Web page content:\n\n--\n\nCLIENT-LITERAL-WEB-NEAR",
+		"Web page content:\n\n---\n \t ",
+		"```markdown\n# 标题\n\nWeb page content:\n\n---\n\nCLIENT-LITERAL-WEB-FENCE\n```",
+		"> Web page content:\n> \n> ---\n> \n> CLIENT-LITERAL-WEB-QUOTE",
 	}
 	for i, text := range cases {
 		t.Run(fmt.Sprintf("literal_%d", i), func(t *testing.T) { verifyClientInput(t, h, i, text, text, false) })

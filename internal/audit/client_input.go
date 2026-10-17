@@ -12,6 +12,8 @@ import (
 const suggestionPrompt = "[SUGGESTION MODE: Suggest what the user might naturally type next into Claude Code.]"
 const actionPrompt = "Describe your most recent action in 3-5 words using present tense (-ing). Name the file or function, not the branch. Do not use tools."
 const titlePrompt = "Write the title in the predominant language of the session — a stray word or code token in another language doesn't change it, and neither does the English of these instructions."
+const recapPrompt = "The user stepped away and is coming back. Recap in under 40 words. 1-2 plain sentences, no markdown."
+const reinvocationPrompt = "(Re-invocation of /run — the skill instructions were previously loaded; the arguments or dynamic output below are new.)"
 
 // anthropicUserContent 提取已确认的末尾 user；仅 unknown 用途按整请求辅助模板判断，避免误删明确对话中的模板引用。
 // messages 为协议消息，purpose 为有限用途，limit 为正文上限；返回正文、截断、不完整及正常跳过标记，无错误或存储操作。
@@ -56,6 +58,12 @@ func clientMessageText(raw []byte) (string, bool) {
 
 // clientAuxiliary 只匹配已核对的模板及外壳；普通引用或孤立标签不代表辅助请求。
 func clientAuxiliary(text string) bool {
+	if strings.HasPrefix(text, recapPrompt) {
+		return true
+	}
+	if content, ok := strings.CutPrefix(text, "<conversation>\n"); ok && strings.TrimSpace(content) != "" {
+		return true
+	}
 	if strings.HasPrefix(text, suggestionPrompt+"\n\nFIRST: Look at the user's recent messages and original request.\n\n") &&
 		strings.Contains(text, "\n\nYour job is to predict what THEY would type - not what you think they should do.\n") &&
 		strings.Contains(text, "\nFormat: 2-12 words, match the user's style. Or nothing.\n") &&
@@ -178,7 +186,7 @@ type clientTextState struct {
 	fenceLength int
 }
 
-// anthropicClientContent 保留协议块边界排除独立技能，再组合相邻文本；未识别内容沿用原白名单与双状态。
+// anthropicClientContent 保留协议块边界排除独立技能、重新调用说明和网页包装，再组合相邻文本；未识别内容沿用原白名单与双状态。
 func anthropicClientContent(raw []byte, limit int) (string, bool, bool) {
 	raw = bytes.TrimSpace(raw)
 	if len(raw) > 0 && raw[0] == '"' {
@@ -222,16 +230,16 @@ func anthropicClientContent(raw []byte, limit int) (string, bool, bool) {
 	return prefix.text.String(), prefix.truncated, incomplete
 }
 
-// clientCleanText 只移除行边界或独立 text 块中的成对客户端说明，正文空白和代码围栏保持原样。
+// clientCleanText 只移除成对客户端说明及独立自动文本块，正文空白和跨块代码围栏保持原样。
 func clientCleanText(parts []string, state *clientTextState) string {
 	text := strings.Join(parts, "")
 	boundaries := map[int]bool{0: true, len(text): true}
-	skills := make(map[int]int)
+	automatic := make(map[int]int)
 	offset := 0
 	for _, part := range parts {
 		boundaries[offset] = true
-		if clientSkill(part) {
-			skills[offset] = offset + len(part)
+		if clientSkill(part) || clientWebContent(part) {
+			automatic[offset] = offset + len(part)
 		}
 		offset += len(part)
 	}
@@ -266,7 +274,7 @@ func clientCleanText(parts []string, state *clientTextState) string {
 			}
 		}
 		if state.fence == 0 && boundary {
-			end := skills[i]
+			end := automatic[i]
 			if end == 0 && text[i] == '<' {
 				end = clientContextEnd(text, i, boundaries)
 			}
@@ -323,11 +331,27 @@ func clientContextEnd(text string, start int, boundaries map[int]bool) int {
 	return 0
 }
 
+// clientSkill 识别独立技能加载块和已确认的 /run 重新调用说明行，不判断技能内部正文。
 func clientSkill(text string) bool {
+	line, _, _ := strings.Cut(text, "\n")
+	if line == reinvocationPrompt {
+		return true
+	}
 	const header = "Base directory for this skill: "
 	if !strings.HasPrefix(text, header) {
 		return false
 	}
 	path, _, ok := strings.Cut(text[len(header):], "\n\n")
 	return ok && path != "" && !strings.ContainsAny(path, "\r\n")
+}
+
+// clientWebContent 识别块首网页包装及其分隔符，不假设网页正文有标题或能从同一块恢复人工正文。
+func clientWebContent(text string) bool {
+	content, ok := strings.CutPrefix(text, "Web page content:")
+	if !ok {
+		return false
+	}
+	content, ok = strings.CutPrefix(strings.TrimLeft(content, " \t\r\n"), "---")
+	body := strings.TrimLeft(content, " \t\r\n")
+	return ok && len(body) < len(content) && strings.TrimSpace(body) != ""
 }

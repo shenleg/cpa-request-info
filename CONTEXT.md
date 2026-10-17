@@ -44,7 +44,7 @@
 
 先按请求头与专用路径识别用途：Responses compact、明确子智能体/workflow、辅助、压缩、预热和记忆调用正常跳过正文，但仍返回匿名身份以保持对象发现。首版不读取 body.client_metadata；无标记、未知、损坏或互斥用途仍按原规则提取，保存 purpose=unknown。Claude main 保存为 main，Codex turn 在没有子任务来源时保存为 turn；两者都不是人工原文证明。只持久有限用途值，不保存用途头、子代理 ID；旧记录缺字段保持未记录用途，不追溯改写。旧二进制严格拒绝新字段，不支持同一升级后 state 原地降级；详见[用途规范](.scratch/request-purpose-filter/spec.md)。
 
-Anthropic Messages 仅对用途未知请求，在截断前按已确认模板跳过建议、标题、动作及权限转录；明确 main 不再被整请求模板反判。保留请求均清理独立技能、成对提醒和 IDE 上下文，继续原末尾消息、工具排除、附件占位、代码围栏及正文空白规则。跨连续 user 查看转录仅用于未知请求判定，绝不拼接历史正文。无标记时格式识别仍无法区分逐字相同的手工粘贴；规则只影响新记录，不改写历史或模型请求。原有格式规则见[过滤规范](.scratch/client-input-filter/spec.md)。
+Anthropic Messages 仅对用途未知请求，在截断前按已确认模板跳过建议、标题、动作、权限转录、返回摘要及起始独立 `<conversation>` 行后的非空会话包装；明确 main/turn 不被整请求模板反判。保留请求均清理独立技能、已确认 `/run` 重新调用说明、`Web page content:` 分隔包装、成对提醒和 IDE 上下文，保留其他独立正文、附件占位、代码围栏和原始空白。Chat Completions 仅对 unknown 末尾纯文本整消息精确等于 `follow system prompt` 正常跳过，不 trim、不忽略大小写、不匹配子串；其他 Chat 文本与 Responses 不套用 Anthropic 客户端规则。跨连续 user 查看转录仅用于未知请求判定，绝不拼接历史正文。完整同形的手工粘贴也会被过滤；规则只影响新记录，不改写历史或模型请求。完整规则表见 [README](README.md#识别与过滤规则)，契约见[过滤规范](.scratch/client-input-filter/spec.md)。
 
 新记录的 `request_reasoning` 仅保存协议白名单中的 `effort`、`type`、`budget_tokens`。Chat、Responses 和 Messages 分别读取各自思考声明；模式、等级、预算不互相推导，显式0不等于缺失。新记录空对象表示“未指定”，旧记录无字段表示“未记录”，不改写历史。不保存完整配置对象，不从模型后缀或宿主配置推断最终值；旧二进制严格拒绝新字段，不能用写入后的原 state 直接降级。
 

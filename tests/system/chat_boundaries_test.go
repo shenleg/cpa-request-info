@@ -35,6 +35,151 @@ func TestChatTerminalMessage(t *testing.T) {
 	assertChatPrivacy(t, h, "FORBIDDEN_TERMINAL_HISTORY", "FORBIDDEN_TERMINAL_CONTENT", "FORBIDDEN_TERMINAL_TOOL", "FORBIDDEN_CONSECUTIVE_USER")
 }
 
+// TestChatFollowSystemPrompt 验证仅 unknown 的末尾纯文本精确指令跳过，空白、大小写、子串、附件、用途与协议边界不误判，模型调用不变。
+func TestChatFollowSystemPrompt(t *testing.T) {
+	received := make(chan []byte, 4)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if respondDiscovery(w, r) {
+			return
+		}
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		received <- raw
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, httpMatrixReply)
+	}))
+	t.Cleanup(upstream.Close)
+	off := startHost(t, 1<<30, false, upstream.URL+"/v1")
+	h := startHost(t, 1<<30, true, upstream.URL+"/v1")
+	h.monitorAll(t)
+	// receive 返回当前顺序提交对应的上游字节；超时终止测试，不打印输入，无额外副作用。
+	receive := func(t *testing.T) []byte {
+		t.Helper()
+		select {
+		case raw := <-received:
+			return raw
+		case <-time.After(4 * time.Second):
+			t.Fatal("精确指令上游请求缺失")
+			return nil
+		}
+	}
+	const exact = "follow system prompt"
+	type sample struct {
+		name, path, protocol, purpose, want string
+		content                             any
+		incomplete                          bool
+	}
+	cases := []sample{
+		{name: "exact_string", content: exact},
+		{name: "exact_block", content: clientTextBlocks(exact)},
+		{name: "exact_split_blocks", content: clientTextBlocks("follow system ", "prompt")},
+		{name: "leading_space", content: " " + exact, want: " " + exact},
+		{name: "trailing_space", content: exact + " ", want: exact + " "},
+		{name: "trailing_newline", content: exact + "\n", want: exact + "\n"},
+		{name: "case_sensitive", content: "Follow system prompt", want: "Follow system prompt"},
+		{name: "substring_prefix", content: "请解释 " + exact, want: "请解释 " + exact},
+		{name: "substring_suffix", content: exact + " please", want: exact + " please"},
+		{name: "fenced", content: "```text\n" + exact + "\n```", want: "```text\n" + exact + "\n```"},
+		{name: "quoted", content: "> " + exact, want: "> " + exact},
+		{name: "attachment", content: append(clientTextBlocks(exact), map[string]any{"type": "image_url", "image_url": map[string]string{"url": "FORBIDDEN_FOLLOW_PROMPT_IMAGE"}}), want: exact + "[图片]"},
+		{name: "unknown_block", content: append(clientTextBlocks(exact), map[string]string{"type": "future", "payload": "FORBIDDEN_FOLLOW_PROMPT_UNKNOWN"}), want: exact, incomplete: true},
+		{name: "main", purpose: "main", content: exact, want: exact},
+		{name: "turn", purpose: "turn", content: clientTextBlocks(exact), want: exact},
+		{name: "anthropic_unchanged", path: "/v1/messages", protocol: "anthropic-messages", content: exact, want: exact},
+		{name: "responses_unchanged", path: "/v1/responses", protocol: "responses", content: exact, want: exact},
+	}
+	// Anthropic 专用格式不得变成 Chat 或 Responses 的正文黑名单。
+	for _, protocol := range []struct{ path, name string }{{"/v1/chat/completions", "chat-completions"}, {"/v1/responses", "responses"}} {
+		for i, text := range []string{clientRecapPrefix + "\nCLIENT-PROTOCOL-RECAP", "<conversation>\nCLIENT-PROTOCOL-CONVERSATION", clientReinvocationLine + "\nCLIENT-PROTOCOL-SKILL", "Web page content:\n\n---\n\nCLIENT-PROTOCOL-WEB"} {
+			cases = append(cases, sample{name: fmt.Sprintf("%s_anthropic_literal_%d", protocol.name, i), path: protocol.path, protocol: protocol.name, content: text, want: text})
+		}
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path, protocol, purpose := tc.path, tc.protocol, tc.purpose
+			if path == "" {
+				path = "/v1/chat/completions"
+				protocol = "chat-completions"
+			}
+			if purpose == "" {
+				purpose = "unknown"
+			}
+			request := map[string]any{"model": "audit-test-model", "max_tokens": 32, "messages": []any{
+				map[string]string{"role": "user", "content": "FORBIDDEN_FOLLOW_PROMPT_HISTORY"},
+				map[string]any{"role": "user", "content": tc.content},
+			}}
+			if path == "/v1/responses" {
+				delete(request, "messages")
+				request["input"] = tc.content
+			}
+			body, err := json.Marshal(request)
+			if err != nil {
+				t.Fatal("精确指令夹具编码失败")
+			}
+			var headers http.Header
+			switch purpose {
+			case "main":
+				headers = http.Header{"x-claude-code-request-class": {"main"}}
+			case "turn":
+				headers = http.Header{"x-codex-turn-metadata": {`{"request_kind":"turn"}`}}
+			}
+			beforeIDs := make(map[string]bool)
+			for _, record := range snapshotRecords(t, h) {
+				beforeIDs[record.ID] = true
+			}
+			savedBefore, _, gaps := snapshotCounters(t, h)
+			plainCode, plainResponse := requestWithPurposeHeaders(t, off, path, keyA, body, headers)
+			plain := receive(t)
+			code, response := requestWithPurposeHeaders(t, h, path, keyA, body, headers)
+			actual := receive(t)
+			if code != http.StatusOK || code != plainCode || !bytes.Equal(actual, plain) || !bytes.Equal(response, plainResponse) {
+				t.Fatal("精确指令过滤改变了实际模型请求或响应")
+			}
+			// 精确消息不能添加唯一 marker；独立正常正文保存后用 Saved 差值和新记录 ID 验证，不借用历史匹配。
+			barrier := fmt.Sprintf("CHAT-FOLLOW-PROMPT-BARRIER-%d", i)
+			if code, _ := h.request(t, http.MethodPost, "/v1/chat/completions", keyA, snapshotInput(t, barrier)); code != http.StatusOK {
+				t.Fatal("精确指令 FIFO 屏障提交失败")
+			}
+			receive(t)
+			waitSnapshotRecord(t, h, barrier)
+			var added []savedRecord
+			for _, record := range snapshotRecords(t, h) {
+				if !beforeIDs[record.ID] && record.Text != barrier {
+					code, raw := h.request(t, http.MethodGet, api+"/detail?id="+record.ID, adminKey, nil)
+					var detail savedRecord
+					if code != http.StatusOK || json.Unmarshal(raw, &detail) != nil || detail.ID != record.ID {
+						t.Fatal("精确指令本轮详情读取失败")
+					}
+					added = append(added, detail)
+				}
+			}
+			wantSaved := savedBefore + 1
+			if tc.want == "" {
+				if len(added) != 0 {
+					t.Fatal("精确指令被保存或回找了历史正文")
+				}
+			} else {
+				wantSaved++
+				if len(added) != 1 || added[0].Text != tc.want || added[0].Protocol != protocol || added[0].Purpose != purpose || added[0].Truncated || added[0].ExtractionIncomplete != tc.incomplete {
+					t.Fatal("精确指令相邻正文、用途、协议或提取状态不符")
+				}
+			}
+			wantGaps := maps.Clone(gaps)
+			if tc.incomplete {
+				wantGaps["unsupported_content"]++
+			}
+			saved, queued, after := snapshotCounters(t, h)
+			if saved != wantSaved || queued != 0 || !maps.Equal(after, wantGaps) {
+				t.Fatal("精确指令正常跳过误增缺口或新增记录数不符")
+			}
+		})
+	}
+	assertChatPrivacy(t, h, "FORBIDDEN_FOLLOW_PROMPT_", "FORBIDDEN_HTTP_ONCE_REPLY")
+}
+
 // assertChatPrivacy 检查合成实例全部审计持久化输出和宿主/插件诊断；markers 是本轮禁存夹具。
 // 无返回值，读取或禁存内容检查失败终止测试；不打印输入、认证材料或日志原文。
 func assertChatPrivacy(t *testing.T, h *instance, markers ...string) {

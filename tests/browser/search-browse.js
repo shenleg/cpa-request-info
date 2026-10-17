@@ -188,6 +188,9 @@ module.exports = async (page, options) => {
   const real=clientMarker+'REAL 正常正文';
   const skill='Base directory for this skill: /synthetic/path\n\n'+clientMarker+'AUX-SKILL\nFollow this workflow.';
   const reminder='<system-reminder>\n'+clientMarker+'AUX-REMINDER\n</system-reminder>';
+  const recap='The user stepped away and is coming back. Recap in under 40 words. 1-2 plain sentences, no markdown.';
+  const reinvocation='(Re-invocation of /run — the skill instructions were previously loaded; the arguments or dynamic output below are new.)\n\n'+clientMarker+'AUX-REINVOCATION';
+  const web='Web page content:\n\n---\n\n'+clientMarker+'AUX-WEB';
   const tool={type:'tool_result',tool_use_id:'synthetic-browser-tool',content:clientMarker+'AUX-TOOL'};
   /** 经真实 Messages 路由提交末尾 content；失败抛固定错误，成功无返回值，不把样本写入 URL。 */
   async function submitAnthropic(content) {
@@ -203,21 +206,31 @@ module.exports = async (page, options) => {
     '<session>\n'+clientMarker+'AUX-SESSION\n</session>\n\nWrite the title in Chinese. Keep technical terms and code identifiers in their original form.',
     '<transcript>\n{"user":"'+clientMarker+'AUX-TRANSCRIPT"}{"Agent":"'+clientMarker+'AUX-AGENT"}\n</transcript>\n附加说明：判断工具调用权限。',
     [tool,{type:'text',text:skill}],
-    [{type:'text',text:reminder}]
+    [{type:'text',text:reminder}],
+    recap+'\n\n'+clientMarker+'AUX-RECAP',
+    '<conversation>\n'+clientMarker+'AUX-CONVERSATION',
+    reinvocation,
+    [{type:'text',text:reinvocation}],
+    web,
+    [{type:'text',text:'Web page content:\n\n---\n\n# 任意标题\n\n'+clientMarker+'AUX-WEB-TITLE'}]
   ]) await submitAnthropic(content);
   await submitAnthropic([
     tool,{type:'text',text:skill},{type:'text',text:reminder},
+    {type:'text',text:reinvocation},{type:'text',text:web},
+    {type:'text',text:'Web page content:\n\n---\n\n## 不绑定特定标题\n\n'+clientMarker+'AUX-WEB-MIXED-TITLE'},
     {type:'text',text:'<ide_opened_file>\nThe user opened /synthetic/'+clientMarker+'AUX-IDE.go in the IDE.\n</ide_opened_file>'},
     {type:'text',text:real}
   ]);
-  // 最后正常正文的保存是同队列FIFO屏障，不用固定等待推断辅助请求已跳过。
+  // 单独提交正常正文作为 FIFO 屏障；它不含 clientMarker，不改变本轮过滤结果和早先25条分页样本的计数。
+  const clientBarrier='BROWSER-CLIENT-BARRIER-'+Date.now();
+  await submitAnthropic(clientBarrier);
   let filtered;
   const clientDeadline=Date.now()+10000;
   while (Date.now()<clientDeadline) {
-    filtered=await search({q:real,limit:100});
+    filtered=await search({q:clientBarrier,limit:100});
     if (filtered.total===1) break;
   }
-  assert(filtered.total===1,'客户端过滤的本轮正常正文未保存');
+  assert(filtered.total===1,'客户端过滤的独立 FIFO 屏障未保存');
   filtered=await search({q:clientMarker,limit:100});
   assert(filtered.total===1 && filtered.records.length===1 && filtered.records[0].protocol==='anthropic-messages' && !filtered.records[0].truncated && !filtered.records[0].extraction_incomplete,'辅助请求被保存或正常正文状态错误');
   const filteredDetail=await read('/detail?id='+encodeURIComponent(filtered.records[0].id));
@@ -241,5 +254,24 @@ module.exports = async (page, options) => {
   clientResult=await apply();
   assert(clientResult.total===0,'页面仍能搜索客户端辅助关键词');
   await frame.locator('#empty').waitFor();
+  // 精确 Chat 指令不附加 marker；此前 Anthropic 正文已保存，用独立后置正文的 FIFO 屏障和 Saved 差值判定跳过。
+  const beforeChat=(await read('/status')).state;
+  const chatExact=await page.request.post(origin+'/v1/chat/completions',{
+    headers:{Authorization:'Bearer '+clientA},
+    data:{model:'audit-test-model',messages:[{role:'user',content:clientMarker+'AUX-CHAT-HISTORY'},{role:'user',content:'follow system prompt'}]}
+  });
+  assert(chatExact.status()===200,'精确 Chat 指令提交失败');
+  const chatBarrier=clientMarker+'CHAT-BARRIER 正常正文';
+  await submit(clientA,'audit-test-model',chatBarrier);
+  let chatBarrierRecords;
+  const chatDeadline=Date.now()+10000;
+  while (Date.now()<chatDeadline) {
+    chatBarrierRecords=await search({q:chatBarrier,limit:100});
+    if (chatBarrierRecords.total===1) break;
+  }
+  assert(chatBarrierRecords.total===1,'精确 Chat 指令的 FIFO 屏障未保存');
+  const afterChat=(await read('/status')).state;
+  assert(afterChat.saved===beforeChat.saved+1 && afterChat.queued===0 && JSON.stringify(afterChat.gaps)===JSON.stringify(beforeChat.gaps),'精确 Chat 指令被保存或正常跳过增加缺口');
+  assert((await search({q:clientMarker+'AUX-CHAT-HISTORY'})).total===0,'精确 Chat 指令跳过后回找历史');
   return {intersection:true,pagination:true,filterReset:true,singleDetail:true,contentFlags:true,plainText:true,clientInputFiltering:true,requestPurpose:true,externalRequests:0,layout};
 };
