@@ -86,6 +86,15 @@ module.exports = async (page, options = {}) => {
   }
   const ids=await frame.locator('#objects option').evaluateAll(options=>options.map(option=>option.value));
   assert(ids.length===2,'生命周期合成实例应仅有两个客户端对象');
+  /** 核对筛选项仅包含全部对象及当前监控名称；返回无值，目录或纯文本展示不符时抛错。 */
+  async function checkObjectFilter() {
+    const catalog=await read('/objects');
+    const monitored=catalog.objects.filter(object=>object.monitored);
+    const actual=await frame.locator('#object-filter option').evaluateAll(options=>options.map(option=>({value:option.value,text:option.textContent,markup:option.children.length})));
+    const expected=[{value:'',text:'全部对象',markup:0},...monitored.map(object=>({value:object.id,text:object.name,markup:0}))];
+    assert(JSON.stringify(actual)===JSON.stringify(expected),'历史对象筛选应仅显示当前受监控对象的纯文本名称，值保持匿名 ID');
+  }
+  await checkObjectFilter();
   await frame.locator('#open-objects').click();
   for(const [index,id]of ids.entries()) {
     await frame.locator('#objects').selectOption(id);
@@ -102,6 +111,7 @@ module.exports = async (page, options = {}) => {
   const renamed='生命周期当前名 <b>纯文本</b>';
   await frame.getByRole('textbox',{name:'名称',exact:true}).fill(renamed);
   await action('仅改名','/rename','名称已保存');
+  await checkObjectFilter();
   await submit(clientKeys[0],'after-rename');
   const renamedRecord=await saved('after-rename');
   const oldDetail=await read('/detail?id='+encodeURIComponent(before.id));
@@ -123,6 +133,9 @@ module.exports = async (page, options = {}) => {
   await action('移除监控','/remove','已移除监控');
   await frame.locator('#objects option').filter({hasText:'已移除但有历史'}).waitFor({state:'attached'});
   await frame.locator('#close-management').click();
+  await checkObjectFilter();
+  assert(await frame.locator('#object-filter').inputValue()==='','移除当前监控对象后应恢复全部对象筛选');
+  await frame.locator('#records tbody tr').filter({hasText:marker+'other'}).waitFor();
   await oldRow.locator('.object-name').waitFor();
   assert(await oldRow.locator('.object-name').textContent()===renamed,'列表未精确显示当前对象名称');
   const removedState=await drained();
@@ -132,6 +145,7 @@ module.exports = async (page, options = {}) => {
   assert(removedHistory.records.some(record=>record.id===before.id)&&removedHistory.records.every(record=>record.object_id===before.object_id),'移除对象的历史入口或筛选失效');
   await frame.locator('#open-objects').click();
   await action('选择并命名','/monitor','监控配置已保存');
+  await checkObjectFilter();
   await submit(clientKeys[0],'rejoined');
   const rejoined=await saved('rejoined');
   assert(rejoined.object_id===before.object_id&&rejoined.name===renamed,'同 Key 重新加入没有沿用历史身份');
